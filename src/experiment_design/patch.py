@@ -140,6 +140,8 @@ def apply_patch(
         if after.value != before.value:
             after.origin = "researcher" if author == "researcher" else "designer_default"
     for path, quantity in quantities(result.model_dump(mode="json")):
+        if quantity["provenance"] == "computed":
+            errors.append(f"{path}: unattested computed quantity")
         if quantity["provenance"] == "source" and quantity["source_ref"] not in source_ids:
             errors.append(f"{path}: unknown source_ref {quantity['source_ref']}")
     if errors:

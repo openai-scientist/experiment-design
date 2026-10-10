@@ -128,3 +128,20 @@ def test_overrides_do_not_mutate_design():
     r = compute_scenario(d, d.scenarios[0], {"icc": q(0.2, "")})
     assert r.power < 0.8
     assert d.model_dump_json() == before
+
+
+def test_zero_cluster_size_reports_invalid_input():
+    d = clustered(20)
+    d.sampling.cluster.size.value = 0
+    d.sampling.cluster.icc.value = 1
+    result = calc(d)
+    assert result.status == "not_computed"
+    assert "cluster size must be a positive whole head count" in result.reasons
+
+
+def test_unattested_computed_input_not_computed():
+    d = means(63)
+    d.scenarios[0].sd = q(1, provenance="computed")
+    result = calc(d)
+    assert result.status == "not_computed"
+    assert any("unattested computed quantity" in reason for reason in result.reasons)

@@ -2,7 +2,7 @@ import json
 
 import pytest
 from conftest import design, package
-from fakes import ScriptedJudge, ScriptedLLM, submit
+from fakes import ScriptedJudge, ScriptedLLM, submit, tool_call
 
 from experiment_design.config import RunConfig
 from experiment_design.contracts import ResearcherRequest, ReviewIssue
@@ -373,3 +373,87 @@ def test_verifier_uncertain_maps_to_unresolved(state):
     )
     assert advance(rid, d) == "REVIEWABLE"
     assert state.issues(rid)[0].status == "unresolved"
+
+
+def test_answered_input_is_incorporated_before_reviewable(state):
+    rid = saved_run(state, status="NEEDS_RESEARCHER", reviewed_version=1, reviews_done=2)
+    request = state.save_request(
+        ResearcherRequest(
+            run_id=rid,
+            kind="input",
+            question="Confirm score standard deviation",
+            path="/scenarios/0/sd",
+            status="open",
+            raised_by="design",
+        )
+    )
+    answer_request(state, rid, request.id, "District records show standard deviation 20 points")
+    assert "REVISE" in legal_actions(state, rid, RunConfig())
+    assert "MARK_REVIEWABLE" not in legal_actions(state, rid, RunConfig())
+
+    def use_input(messages, tools):
+        source = json.loads(messages[-1]["content"])["researcher_inputs"][0]
+        assert source["text"] == "District records show standard deviation 20 points"
+        return revision(
+            "/scenarios/0/sd",
+            {"value": 20, "unit": "points", "provenance": "source", "source_ref": source["id"]},
+        )
+
+    d = deps(
+        state,
+        [tool_call("read_package", {}), use_input, verification()],
+        [
+            {"next_action": "REVISE"},
+            {"next_action": "VERIFY"},
+            {"I1": "resolved"},
+            {"next_action": "MARK_REVIEWABLE"},
+        ],
+    )
+    assert advance(rid, d) == "REVIEWABLE"
+    assert state.version(rid).design.scenarios[0].sd.value == 20
+    assert state.version(rid).design.scenarios[0].sd.source_ref == f"researcher:{request.id}"
+    assert state.issues(rid)[0].status == "resolved"
+    assert state.version(rid).design.claim.margin.value == 3
+
+
+def test_changed_researcher_claim_requires_design_reconciliation(state):
+    rid = saved_run(state, status="NEEDS_RESEARCHER", reviewed_version=1, reviews_done=2)
+    request = state.save_request(
+        ResearcherRequest(
+            run_id=rid,
+            kind="decision",
+            question="Confirm margin",
+            path="/claim/margin",
+            status="open",
+            raised_by="design",
+        )
+    )
+    answer_request(state, rid, request.id, "1")
+    advance(rid, deps(state, choices=[{"next_action": "STOP"}]))
+    assert state.version(rid).design.claim.margin.value == 1
+    assert "MARK_REVIEWABLE" not in legal_actions(state, rid, RunConfig())
+    assert "REVISE" in legal_actions(state, rid, RunConfig())
+    issue = state.issues(rid)[0]
+    assert issue.raised_by == "researcher" and issue.status == "open"
+    advance(rid, deps(state, choices=[{"next_action": "STOP"}]))
+    assert state.version(rid).version == 2
+    assert len(state.issues(rid)) == 1
+    resumed = deps(
+        state,
+        [
+            revision(
+                "/analysis/decision_rule", "Non-inferior if the lower bound exceeds -1 points"
+            ),
+            verification(),
+        ],
+        [
+            {"next_action": "REVISE"},
+            {"next_action": "VERIFY"},
+            {"I1": "resolved"},
+            {"next_action": "MARK_REVIEWABLE"},
+        ],
+    )
+    assert advance(rid, resumed) == "REVIEWABLE"
+    assert state.version(rid).design.analysis.decision_rule.endswith("-1 points")
+    assert state.version(rid).design.claim.margin.origin == "researcher"
+    assert state.issues(rid)[0].status == "resolved"

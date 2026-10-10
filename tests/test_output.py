@@ -5,7 +5,7 @@ import re
 import pytest
 from conftest import design, package
 
-from experiment_design.contracts import ResearcherRequest, ReviewIssue
+from experiment_design.contracts import Quantity, ResearcherRequest, ReviewIssue
 from experiment_design.output import export, render_markdown
 from experiment_design.patch import design_hash
 from experiment_design.runtime.store import Store
@@ -161,3 +161,46 @@ def test_export_keeps_unresolved_after_patch(state, tmp_path):
     data = json.loads(files["experiment_design.json"].read_bytes())
     assert data["open_concerns"][0]["mechanism"] == "Class correlation may be uncertain"
     assert "Unresolved concern" in files["experiment_design.md"].read_text(encoding="utf-8")
+
+
+def test_binary_percent_null_keeps_outcome_scale(state):
+    store, run = state
+    d = design()
+    d.claim.outcome_kind.value = "binary"
+    d.claim.outcome_unit.value = "%"
+    d.scenarios[0].p_control = Quantity(value=50, unit="%", provenance="assumption")
+    d.scenarios[0].p_treatment = Quantity(value=0.5, unit="proportion", provenance="assumption")
+    store.add_version(run, d, author="design", parent=1)
+    md = render(state)
+    assert "Margin: 3 %" in md
+    assert "greater than -3 %; the null" in md
+
+
+def test_small_scientific_threshold_is_not_rounded_to_zero(state):
+    store, run = state
+    d = design()
+    d.claim.margin.value = 0.004
+    d.scenarios[0].effect.value = 0.001
+    store.add_version(run, d, author="researcher", parent=1)
+    md = render(state)
+    assert "Margin: 0.004 points" in md
+    assert "greater than -0.004 points; the null" in md
+    assert "effect: 0.001 points" in md
+
+
+@pytest.mark.parametrize("status", ["addressed", "rebutted"])
+def test_export_keeps_concerns_awaiting_verification(state, tmp_path, status):
+    store, run = state
+    concern = issue(run)
+    concern.severity, concern.status, concern.addressed_in = "BLOCKER", status, 1
+    store.save_issue(concern)
+    store.update_run(run, status="BUDGET_STOP")
+    assert "Awaiting verification: Class correlation may be uncertain" in render(
+        state, "BUDGET_STOP", issues=[concern]
+    )
+    files = export(store, run, tmp_path / "out")
+    data = json.loads(files["experiment_design.json"].read_bytes())
+    assert data["open_concerns"][0]["severity"] == "BLOCKER"
+    assert "Awaiting verification: Class correlation may be uncertain" in files[
+        "experiment_design.md"
+    ].read_text(encoding="utf-8")

@@ -69,6 +69,7 @@ def legal_actions(store: Store, run_id: str, cfg: RunConfig) -> list[str]:
     issues = store.issues(run_id)
     blockers = any(i.severity == "BLOCKER" and i.status in {"open", "unresolved"} for i in issues)
     pending_verify = any(i.status in {"addressed", "rebutted"} for i in issues)
+    researcher_pending = any(i.raised_by == "researcher" and i.status == "open" for i in issues)
     legal = {
         "REVIEW": version is not None
         and version.version > run.reviewed_version
@@ -76,7 +77,10 @@ def legal_actions(store: Store, run_id: str, cfg: RunConfig) -> list[str]:
         "REVISE": any(_material(i) for i in issues) and run.revisions_done < cfg.max_revisions,
         "VERIFY": pending_verify,
         "ASK_RESEARCHER": any(r.status == "draft" for r in store.requests(run_id)),
-        "MARK_REVIEWABLE": run.reviewed_version >= 1 and not pending_verify and not blockers,
+        "MARK_REVIEWABLE": run.reviewed_version >= 1
+        and not pending_verify
+        and not blockers
+        and not researcher_pending,
         "STOP": True,
     }
     return [action for action in ACTIONS if legal[action]]
@@ -524,15 +528,37 @@ def _apply_answers(deps: Deps, run_id: str) -> None:
         return
     parent = deps.store.version(run_id)
     d = parent.design
+    changed = []
     for request in pending:
-        d = set_claim(
-            d, request.path.split("/")[-1], _answer_value(request, request.answer), "researcher"
-        )
+        field = request.path.split("/")[-1]
+        value = _answer_value(request, request.answer)
+        if getattr(d.claim, field).value != value:
+            changed.append(request)
+        d = set_claim(d, field, value, "researcher")
     with deps.store.transaction():
         version = deps.store.add_version(run_id, d, author="researcher", parent=parent.version)
         for request in pending:
             request.applied_in = version.version
             deps.store.save_request(request)
+        for request in changed:
+            deps.store.save_issue(
+                ReviewIssue(
+                    run_id=run_id,
+                    raised_by="researcher",
+                    version_raised=version.version,
+                    severity="MAJOR",
+                    paths=["/"],
+                    basis="reasoning",
+                    mechanism=(
+                        f"Reconcile the design with researcher decision {request.path}: "
+                        f"{request.answer}"
+                    ),
+                    consequence=(
+                        "Dependent measurements, analysis and decision rules may still "
+                        "express the earlier claim"
+                    ),
+                )
+            )
         _validate_new(deps, run_id)
 
 
@@ -599,7 +625,25 @@ def answer_request(store: Store, run_id: str, request_id: str, answer: str) -> N
         raise WorkflowError(f"request {request_id} is not open for researcher input")
     _answer_value(request, answer)
     request.status, request.answer = "answered", answer
-    store.save_request(request)
+    with store.transaction():
+        store.save_request(request)
+        version = store.version(run_id)
+        if request.kind == "input" and version is not None:
+            store.save_issue(
+                ReviewIssue(
+                    run_id=run_id,
+                    raised_by="researcher",
+                    version_raised=version.version,
+                    severity="MAJOR",
+                    paths=[request.path or "/"],
+                    basis="reasoning",
+                    mechanism=f"Incorporate researcher input: {request.question}",
+                    consequence=(
+                        "The current design may use assumptions superseded by the supplied evidence"
+                    ),
+                    evidence_refs=[f"researcher:{request.id}"],
+                )
+            )
 
 
 def request_changes(store: Store, run_id: str, text: str, path: str | None = None) -> ReviewIssue:

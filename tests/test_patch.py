@@ -72,6 +72,15 @@ def test_patch_rejects_unknown_source_ref():
         )
 
 
+def test_patch_rejects_unattested_computed_input():
+    with pytest.raises(PatchError, match="unattested computed quantity"):
+        apply_patch(
+            design(),
+            patch("/scenarios/0/sd", {"value": 1, "unit": "points", "provenance": "computed"}),
+            source_ids={"S1"},
+        )
+
+
 @pytest.mark.parametrize("path", ["/nope/x", "/conditions/99/name", "/conditions/-1/name"])
 def test_patch_bad_pointer(path):
     with pytest.raises(PatchError):

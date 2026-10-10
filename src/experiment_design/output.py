@@ -24,7 +24,7 @@ from experiment_design.workflow import WorkflowError
 def _number(value) -> str:
     if value is None:
         return "Not specified"
-    return str(int(value)) if float(value).is_integer() else f"{value:.2f}"
+    return str(int(value)) if float(value).is_integer() else f"{value:.8g}"
 
 
 def _quantity(q: Quantity | None, sources: list[Source]) -> str:
@@ -170,9 +170,14 @@ def render_markdown(
             "less": "less than",
             "two_sided": "different from",
         }[contrast.alternative]
+        display_null = (
+            contrast.null_in_outcome_units
+            if contrast.null_in_outcome_units is not None
+            else contrast.null
+        )
         item(
             "Null and alternative",
-            f"Treatment minus control is {comparison} {_number(contrast.null)} "
+            f"Treatment minus control is {comparison} {_number(display_null)} "
             f"{d.claim.outcome_unit.value or ''}; the null is the complementary condition",
         )
     item("Analysis model", d.analysis.model)
@@ -228,6 +233,8 @@ def render_markdown(
     for issue in issues:
         if issue.status in {"open", "unresolved"}:
             lines.append(f"- Unresolved concern: {issue.mechanism} — {issue.consequence}")
+        elif issue.status in {"addressed", "rebutted"}:
+            lines.append(f"- Awaiting verification: {issue.mechanism} — {issue.consequence}")
     heading("## 7. Researcher actions and handoff")
     if version.version < latest_version:
         lines.append("See the latest version for open researcher actions.")
@@ -243,7 +250,10 @@ def render_markdown(
 def _concerns(issues: list[ReviewIssue], version: int, latest: int) -> list[ReviewIssue]:
     if version == latest:
         return [
-            i for i in issues if i.version_raised <= version and i.status in {"open", "unresolved"}
+            i
+            for i in issues
+            if i.version_raised <= version
+            and i.status in {"open", "unresolved", "addressed", "rebutted"}
         ]
     return [
         i.model_copy(update={"status": "open"})

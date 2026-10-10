@@ -88,6 +88,17 @@ def test_design_initial_submit_rejects_claim_change(ctx):
         )
 
 
+def test_initial_submit_rejects_unattested_computation(ctx):
+    d = design()
+    d.scenarios[0].sd.value = 1
+    d.scenarios[0].sd.provenance = "computed"
+    d.scenarios[0].sd.source_ref = None
+    with pytest.raises(SubmitRejected, match="unattested computed quantity"):
+        designer.submit_tool(ctx, mode="initial").handler(
+            {"design": d.model_dump(mode="json"), "rationale": "Draft"}
+        )
+
+
 def test_revision_must_cover_batch(ctx):
     with pytest.raises(SubmitRejected, match="I2"):
         designer.submit_tool(ctx, mode="revise", batch=["I1", "I2"]).handler(

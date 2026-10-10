@@ -17,6 +17,7 @@ class Contrast:
     null: float
     alternative: Literal["greater", "less", "two_sided"]
     alpha: float
+    null_in_outcome_units: float | None = None
 
 
 class ScenarioResult(Record):
@@ -55,10 +56,11 @@ def contrast_from(claim: Claim, sidedness: str, alpha: float) -> Contrast | list
             "two_sided" if sidedness == "two_sided" else ("greater" if sign == 1 else "less")
         )
         return Contrast(0, alternative, alpha)
+    null_in_outcome_units = (-sign if kind == "non_inferiority" else sign) * margin
     if claim.outcome_kind.value == "binary" and str(claim.outcome_unit.value).strip() == "%":
         margin /= 100
     null = (-sign if kind == "non_inferiority" else sign) * margin
-    return Contrast(null, "greater" if sign == 1 else "less", alpha)
+    return Contrast(null, "greater" if sign == 1 else "less", alpha, null_in_outcome_units)
 
 
 def design_effect(cluster_size: float, icc: float) -> float:
@@ -132,6 +134,9 @@ def compute_scenario(
         if quantity.provenance == "llm":
             reasons.append(f"{name} is an LLM interpretation, not a valid input")
             return None
+        if quantity.provenance == "computed":
+            reasons.append(f"{name} is an unattested computed quantity, not a valid input")
+            return None
         result = normalize(quantity, expected, unit) if expected else quantity.value
         if isinstance(result, str):
             reasons.append(f"{name}: {result}")
@@ -171,7 +176,7 @@ def compute_scenario(
         size, icc = value("size", None), value("icc", "proportion")
         if size is not None and (size < 1 or not size.is_integer()):
             reasons.append("cluster size must be a positive whole head count")
-        if size is not None and icc is not None:
+        if size is not None and size >= 1 and icc is not None:
             deff = design_effect(size, icc)
         n = (
             cluster.clusters_per_arm * size / deff

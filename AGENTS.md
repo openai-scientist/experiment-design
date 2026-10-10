@@ -36,6 +36,9 @@ JEV selects workflow WHAT/NEXT among legal options. Code enumerates and validate
 options and computes statistics. Agents choose HOW within their allowed tools.
 Keep one canonical design per version; after the initial design, use apply_patch.
 Researcher-owned claim fields change only through researcher answers.
+New researcher evidence and changed claims require reconciliation before readiness.
+Agent-supplied quantities cannot claim computed provenance without an attested
+production calculation; such inputs are currently unsupported.
 All statistical numbers come from science/power.py. Missing or unsupported inputs
 produce not_computed with reasons. Keep fakes out of production. The journal is
 the only event source. Input, state and output file access belongs to package,
