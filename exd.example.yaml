@@ -1,0 +1,21 @@
+# secrets live in .env; only env var NAMES appear here
+llm:
+  base_url: https://your-provider.example/v1
+  model: your-tool-calling-model
+  api_key_env: EXD_LLM_API_KEY
+  timeout_sec: 120
+  max_retries: 3
+  retry_base_delay: 2.0
+  temperature: 0.2
+  max_tokens: 4096
+jev:
+  api_key_env: TYPESAFE_API_KEY
+  model: null
+run:
+  llm_tokens: 300000
+  max_actions: 12
+  max_reviews: 2
+  max_revisions: 3
+  task_max_turns: 15
+  task_max_tokens: 60000
+store: .exd/exd.db
