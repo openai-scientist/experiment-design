@@ -20,6 +20,17 @@ def clarification_options(
     return options
 
 
+def affected_work(
+    before: ResearchContext, after: ResearchContext, diff_paths: list[str]
+) -> list[str]:
+    if before != after or any(
+        p.startswith(("/claim", "/analysis", "/sampling", "/measurement", "/scenarios"))
+        for p in diff_paths
+    ):
+        return ["synthesis", "calculations", "review", "verification", "qualification"]
+    return ["review", "qualification"] if diff_paths else []
+
+
 def respond(
     store: Store, run_id: str, decision_id: str, response: DecisionResponse
 ) -> ResearcherDecision:

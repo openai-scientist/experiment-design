@@ -37,6 +37,9 @@ class ToolContext:
     accepted_call_ids: set[str]
     pending_findings: list[Finding] = field(default_factory=list)
     binding: ArtifactBinding | None = None
+    issue_cutoff: int | None = None
+    task_id: str | None = None
+    cohort_id: str | None = None
 
     def __post_init__(self):
         if self.binding is None and self.store.run(self.run_id).schema_version == 2:
@@ -58,7 +61,9 @@ def sources(ctx: ToolContext):
             Source(id=a.ref, title=a.path, kind="note", text=a.text)
             for a in ctx.store.source_snapshot(ctx.run_id).artifacts
         ]
-        context = ctx.store.context(ctx.run_id)
+        context = ctx.store.context(ctx.run_id, ctx.binding.context_revision)
+        if ctx.cohort_id:
+            return list(context.package.sources) if context else raw
         return all_sources(context, ctx.store.decisions(ctx.run_id)) if context else raw
     return all_sources(ctx.package, ctx.store.requests(ctx.run_id))
 
@@ -78,7 +83,7 @@ def validate_refs(refs: list[str], ctx: ToolContext) -> list[str]:
 
 def validate_findings(findings: list[Finding], ctx: ToolContext) -> list[str]:
     errors = []
-    existing = {i.id for i in ctx.store.issues(ctx.run_id)}
+    existing = {i.id for i in visible_issues(ctx)}
     for finding in findings:
         if not finding.paths or not finding.mechanism.strip() or not finding.consequence.strip():
             errors.append("Findings need paths, mechanism and consequence")
@@ -132,7 +137,7 @@ def submit_schema(name: str, model: type[Record], handler) -> Tool:
 
 def context_brief(ctx: ToolContext) -> str:
     package = ctx.package.model_dump(mode="json", exclude={"sources", "assumptions"})
-    ledger = [i.model_dump(mode="json") for i in ctx.store.issues(ctx.run_id)]
+    ledger = [i.model_dump(mode="json") for i in visible_issues(ctx)]
     guidance = (
         "Tool observations contain result and evidence_ref. Copy evidence_ref exactly into "
         "evidence_refs or scenarios_checked, e.g. tool:call_abc. Source references are exact "
@@ -149,12 +154,28 @@ def context_brief(ctx: ToolContext) -> str:
             "intake_gaps": intake_gaps(ctx.package),
             "version": ctx.version.version if ctx.version else None,
             "issue_ledger": ledger,
-            "pending_findings": [f.model_dump(mode="json") for f in ctx.pending_findings],
+            "pending_findings": []
+            if ctx.cohort_id
+            else [f.model_dump(mode="json") for f in ctx.pending_findings],
             "source_ids": sorted(source_ids(ctx)),
         },
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+def visible_issues(ctx: ToolContext):
+    if ctx.issue_cutoff is None:
+        return ctx.store.issues(ctx.run_id)
+    issues = {}
+    for e in ctx.store.events(ctx.run_id):
+        if e.event_id > ctx.issue_cutoff:
+            break
+        if e.type == "issue" and "record" in e.data:
+            from experiment_design.contracts import ReviewIssue
+
+            issues[e.data["id"]] = ReviewIssue.model_validate(e.data["record"])
+    return list(issues.values())
 
 
 def build_tools(ctx: ToolContext) -> dict[str, Tool]:
@@ -186,12 +207,12 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
     def read_issues(args):
         selected = [
             i.model_dump(mode="json")
-            for i in ctx.store.issues(ctx.run_id)
+            for i in visible_issues(ctx)
             if args.get("status") is None or i.status == args["status"]
         ]
         return selected + [
             f.model_dump(mode="json") | {"pending": True, "raised_by": "methodologist"}
-            for f in ctx.pending_findings
+            for f in ([] if ctx.cohort_id else ctx.pending_findings)
         ]
 
     def validators(args):
