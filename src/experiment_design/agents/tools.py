@@ -19,7 +19,7 @@ from experiment_design.contracts import (
     ScientificPackage,
 )
 from experiment_design.package import all_sources, intake_gaps
-from experiment_design.patch import PatchError, apply_patch, design_diff, resolve
+from experiment_design.patch import PatchError, apply_patch, design_diff, preview_design, resolve
 from experiment_design.runtime.loop import SubmitRejected, Tool
 from experiment_design.runtime.store import Store
 from experiment_design.science.evidence import lookup_evidence
@@ -169,10 +169,13 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
     def candidate(args):
         d = current(args)
         if args.get("ops") is not None:
-            d = apply_patch(
+            context = ctx.store.context(ctx.run_id)
+            preview = preview_design if context else apply_patch
+            d = preview(
                 d,
                 Patch(ops=args["ops"], rationale="Read-only patch preview"),
                 source_ids=source_ids(ctx),
+                **({"context": context} if context else {}),
             )
         return d
 

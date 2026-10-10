@@ -12,6 +12,60 @@ from experiment_design.patch import (
 )
 
 
+def research_context():
+    from experiment_design.contracts import FieldAnnotation, ResearchContext
+
+    return ResearchContext(
+        id="context",
+        revision=1,
+        source_snapshot_id="source-1",
+        package=package(),
+        field_annotations={
+            p: FieldAnnotation(status="source-stated")
+            for p in (
+                "/measurement/primary_metric",
+                "/conditions",
+                "/analysis/decision_rule",
+                "/analysis/stopping",
+                "/analysis/model",
+            )
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        ("/measurement/primary_metric/name", "different outcome"),
+        ("/conditions/0/description", "Different intervention"),
+        ("/analysis/decision_rule", "Choose a different conclusion"),
+        ("/analysis/stopping", "Stop when significant"),
+        ("/analysis/model", "Different estimand model"),
+    ],
+)
+def test_scientific_commitments_outside_claim_are_protected(path, value):
+    with pytest.raises(PatchError, match="researcher"):
+        apply_patch(design(), patch(path, value), source_ids={"S1"}, context=research_context())
+
+
+def test_margin_preview_is_read_only_and_has_no_commit_authority():
+    from experiment_design.patch import preview_design
+
+    original = design()
+    proposed = patch("/claim/margin", 2)
+    preview = preview_design(original, proposed, context=research_context(), source_ids={"S1"})
+    assert preview.claim.margin.value == 2
+    assert preview.claim.margin.origin == "designer_default"
+    assert original.claim.margin.value == 3
+    with pytest.raises(PatchError, match="researcher"):
+        apply_patch(original, proposed, source_ids={"S1"}, context=research_context())
+
+
+def test_author_argument_does_not_grant_researcher_rights():
+    with pytest.raises(PatchError, match="authorization"):
+        apply_patch(design(), patch("/claim/margin", 2), source_ids={"S1"}, author="researcher")
+
+
 def patch(path, value):
     return Patch(ops=[PatchOp(path=path, value=value)], rationale="Correct the design")
 

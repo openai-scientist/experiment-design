@@ -117,7 +117,9 @@ def test_understanding_uses_sources_and_keeps_intent_provisional(tmp_path):
 def test_understanding_rejects_invented_authority_or_numbers(tmp_path, corruption):
     store, rid, snapshot, ctx, data = setup_context(tmp_path)
     if corruption == "source":
-        data["context"]["field_annotations"]["margin"]["source_span"] = "Invented margin"
+        data["context"]["field_annotations"]["margin"]["source_span"] = (
+            "Margin 3 points not present"
+        )
     elif corruption == "confirmation":
         data["context"]["field_annotations"]["estimand"]["status"] = "researcher-confirmed"
     else:

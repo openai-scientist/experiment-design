@@ -14,6 +14,8 @@ from experiment_design.contracts import (
     Origin,
     Patch,
     PatchOp,
+    ResearchContext,
+    ResearcherDecision,
     ScientificPackage,
 )
 
@@ -104,7 +106,70 @@ def apply_patch(
     *,
     source_ids: set[str],
     author: str = "agent",
+    context: ResearchContext | None = None,
+    authorization: ResearcherDecision | None = None,
 ) -> Design:
+    if author == "researcher":
+        if (
+            authorization is None
+            or authorization.status != "ANSWERED"
+            or not authorization.responses
+        ):
+            raise PatchError(["Researcher authorization is required"])
+        response = authorization.responses[-1]
+        if (
+            response.action not in {"SELECT_OPTION", "PROPOSE_ALTERNATIVE"}
+            or response.revision != authorization.revision
+            or authorization.binding.design_hash != design_hash(design)
+            or not authorization.interpretation.get("authorized")
+            or authorization.application
+        ):
+            raise PatchError(["Researcher authorization is stale or inapplicable"])
+        if any(
+            not any(
+                op.path == path or op.path.startswith(path + "/")
+                for path in authorization.affected_paths
+            )
+            for op in patch.ops
+        ):
+            raise PatchError(["Patch exceeds researcher authorization scope"])
+    result = _apply_patch(design, patch, source_ids=source_ids, author=author)
+    if context is not None and author != "researcher":
+        impact = scientific_impact(design, result, context)
+        if impact:
+            raise PatchError([f"{path} is researcher-owned" for path in impact])
+    return result
+
+
+def scientific_impact(before: Design, after: Design, context: ResearchContext) -> list[str]:
+    owned = {
+        path
+        for path, annotation in context.field_annotations.items()
+        if path.startswith("/") and annotation.status in {"source-stated", "researcher-confirmed"}
+    }
+    return [
+        change["path"]
+        for change in design_diff(before, after)
+        if any(
+            change["path"] == path
+            or change["path"].startswith(path + "/")
+            or path.startswith(change["path"] + "/")
+            for path in owned
+        )
+    ]
+
+
+def preview_design(
+    design: Design, patch: Patch, *, context: ResearchContext, source_ids: set[str]
+) -> Design:
+    result = _apply_patch(design, patch, source_ids=source_ids, author="preview")
+    for name in CLAIM_FIELDS:
+        if getattr(result.claim, name).value != getattr(design.claim, name).value:
+            getattr(result.claim, name).origin = "designer_default"
+    return result
+
+
+def _apply_patch(design: Design, patch: Patch, *, source_ids: set[str], author: str) -> Design:
     data = design.model_dump(mode="json")
     errors = []
     for op in patch.ops:
@@ -133,7 +198,11 @@ def apply_patch(
         raise PatchError(errors + [str(exc)]) from exc
     for name in CLAIM_FIELDS:
         before, after = getattr(design.claim, name), getattr(result.claim, name)
-        if author != "researcher" and before.origin in RESEARCHER_ORIGINS and after != before:
+        if (
+            author not in {"researcher", "preview"}
+            and before.origin in RESEARCHER_ORIGINS
+            and after != before
+        ):
             errors.append(f"{name} is researcher-owned")
         if after.origin != before.origin:
             errors.append(f"Claim origin cannot be edited: {name}")
@@ -157,7 +226,7 @@ def set_claim(design: Design, field: str, value: str | float, origin: Origin) ->
         for _, q in quantities(design.model_dump(mode="json"))
         if q["provenance"] == "source"
     }
-    result = apply_patch(
+    result = _apply_patch(
         design,
         Patch(ops=[PatchOp(path=f"/claim/{field}", value=value)], rationale="Researcher answer"),
         source_ids=source_ids,
