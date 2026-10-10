@@ -8,6 +8,7 @@ from pydantic import Field, ValidationError
 
 from experiment_design.contracts import (
     CLAIM_FIELDS,
+    ArtifactBinding,
     Design,
     DesignVersion,
     Finding,
@@ -30,10 +31,15 @@ from experiment_design.science.validators import validate_design
 class ToolContext:
     store: Store
     run_id: str
-    package: ScientificPackage
+    package: ScientificPackage | None
     version: DesignVersion | None
     accepted_call_ids: set[str]
     pending_findings: list[Finding] = field(default_factory=list)
+    binding: ArtifactBinding | None = None
+
+    def __post_init__(self):
+        if self.binding is None and self.store.run(self.run_id).schema_version == 2:
+            self.binding = self.store.binding(self.run_id)
 
 
 class RequestProposal(Record):
@@ -44,6 +50,15 @@ class RequestProposal(Record):
 
 
 def sources(ctx: ToolContext):
+    if ctx.store.run(ctx.run_id).schema_version == 2:
+        from experiment_design.contracts import Source
+
+        raw = [
+            Source(id=a.ref, title=a.path, kind="note", text=a.text)
+            for a in ctx.store.source_snapshot(ctx.run_id).artifacts
+        ]
+        context = ctx.store.context(ctx.run_id)
+        return all_sources(context, ctx.store.decisions(ctx.run_id)) if context else raw
     return all_sources(ctx.package, ctx.store.requests(ctx.run_id))
 
 
@@ -238,13 +253,31 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
         definitions = draft.pop("$defs")
         preview = {"design": draft}
     result = {
+        "read_sources": tool(
+            "read_sources",
+            "Read exact immutable supplied sources",
+            {},
+            [],
+            lambda _: ctx.store.source_snapshot(ctx.run_id).model_dump(mode="json"),
+        ),
+        "read_context": tool(
+            "read_context",
+            "Read research understanding and authority",
+            {},
+            [],
+            lambda _: (
+                ctx.store.context(ctx.run_id).model_dump(mode="json")
+                if ctx.store.context(ctx.run_id)
+                else None
+            ),
+        ),
         "read_package": tool(
             "read_package",
             "Read researcher input",
             {},
             [],
             lambda _: {
-                "package": ctx.package.model_dump(mode="json"),
+                "package": ctx.package.model_dump(mode="json") if ctx.package else None,
                 "researcher_inputs": [
                     s.model_dump(mode="json") for s in sources(ctx) if s.kind == "researcher_input"
                 ],

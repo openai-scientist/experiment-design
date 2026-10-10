@@ -31,6 +31,7 @@ class Quantity(Record):
     unit: str = ""
     provenance: Provenance
     source_ref: str | None = None
+    source_span: str | None = None
     note: str = ""
 
 
