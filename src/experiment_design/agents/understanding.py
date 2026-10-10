@@ -34,7 +34,10 @@ def brief(ctx: ToolContext, **focus) -> str:
     return (
         "Read the original sources using tools. Submit a typed context with source-stated, "
         "agent-proposed or unknown annotations. Source-stated annotations require exact source_ref "
-        "and source_span. context.field_annotations uses these exact claim keys: "
+        "and source_span. Set context.revision to "
+        + str((ctx.binding.context_revision or 0) + 1)
+        + ", advancing the current revision exactly once. "
+        "context.field_annotations uses these exact claim keys: "
         + ", ".join(CLAIM_FIELDS)
         + ". Use margin, not inference.margin or /inference/margin. "
         "If package.inference.margin is supplied, context.field_annotations['margin'] is required. "
@@ -70,7 +73,10 @@ def submit_tool(ctx: ToolContext, **focus):
         if context.source_snapshot_id != binding.source_snapshot_id:
             raise ValueError("source binding differs")
         if context.revision != (binding.context_revision or 0) + 1:
-            raise ValueError("context revision differs")
+            raise ValueError(
+                f"context revision differs: expected {(binding.context_revision or 0) + 1}, "
+                f"received {context.revision}"
+            )
         supplied = {s.id: s for s in sources(ctx)}
         previous = ctx.store.context(ctx.run_id)
         if previous:
