@@ -6,7 +6,7 @@ import re
 from pydantic import Field
 
 from experiment_design.agents.tools import ToolContext, sources, submit_schema
-from experiment_design.contracts import Record, ResearchContext, ResearcherDecision
+from experiment_design.contracts import CLAIM_FIELDS, Record, ResearchContext, ResearcherDecision
 from experiment_design.patch import package_claim, resolve
 from experiment_design.runtime.loop import AgentSpec
 
@@ -17,7 +17,10 @@ TOOLS = ("read_sources", "read_context", "lookup_evidence")
 
 
 class UnderstandingSubmission(Record):
-    context: ResearchContext
+    context: ResearchContext = Field(
+        description="Research context including field_annotations, unknowns and decision_ids. "
+        "These fields belong inside context, never beside it."
+    )
     decisions: list[ResearcherDecision] = Field(default_factory=list)
 
 
@@ -25,7 +28,12 @@ def brief(ctx: ToolContext, **focus) -> str:
     return (
         "Read the original sources using tools. Submit a typed context with source-stated, "
         "agent-proposed or unknown annotations. Source-stated annotations require exact source_ref "
-        "and source_span. Use claim names for claim annotations and JSON pointers for other "
+        "and source_span. context.field_annotations uses these exact claim keys: "
+        + ", ".join(CLAIM_FIELDS)
+        + ". Use margin, not inference.margin or /inference/margin. "
+        "If package.inference.margin is supplied, context.field_annotations['margin'] is required. "
+        "Keep field_annotations, unknowns and decision_ids inside context; the only top-level "
+        "submission fields are context and decisions. Use JSON pointers for other "
         "scientific commitments, especially /analysis/model. Do not invent missing claims "
         "or mark proposals researcher-confirmed. "
         "Record contradictions and missing scientific decisions even before a design exists. "
@@ -93,7 +101,12 @@ def submit_tool(ctx: ToolContext, **focus):
         if context.package.inference and context.package.inference.margin is not None:
             annotation = context.field_annotations.get("margin")
             if annotation is None:
-                raise ValueError("margin needs authority annotation")
+                raise ValueError(
+                    "margin needs authority annotation at context.field_annotations['margin']; "
+                    "use this exact key, not inference.margin or /inference/margin. "
+                    "For source-stated margin include source_ref and verbatim source_span "
+                    "supporting the value; otherwise annotate agent-proposed or unknown."
+                )
             if annotation.status == "source-stated" and not supports_number(
                 context.package.inference.margin, annotation.source_span
             ):

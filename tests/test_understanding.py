@@ -215,3 +215,22 @@ def test_typed_source_commitment_cannot_claim_unsupported_number(tmp_path):
         understanding.submit_tool(ctx).handler(data)
     assert store.context(rid) is None
     store.close()
+
+
+def test_margin_rejection_identifies_the_recoverable_context_key(tmp_path):
+    store, _, _, ctx, data = setup_context(tmp_path)
+    data["context"]["field_annotations"]["inference.margin"] = data["context"][
+        "field_annotations"
+    ].pop("margin")
+    with pytest.raises(SubmitRejected) as rejected:
+        understanding.submit_tool(ctx).handler(data)
+    feedback = " ".join(rejected.value.errors)
+    assert "context.field_annotations['margin']" in feedback
+    assert "source_ref" in feedback and "source_span" in feedback
+    data["context"]["field_annotations"]["margin"] = data["context"]["field_annotations"].pop(
+        "inference.margin"
+    )
+    accepted = understanding.submit_tool(ctx).handler(data)
+    assert accepted["context"]["package"]["inference"]["margin"] == 3
+    assert accepted["context"]["field_annotations"]["margin"]["status"] == "source-stated"
+    store.close()
