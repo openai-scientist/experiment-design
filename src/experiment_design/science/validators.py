@@ -1,7 +1,13 @@
 """Deterministic findings about scientific form and computation validity."""
 
-from experiment_design.contracts import Design, Record, ScientificPackage, Severity
-from experiment_design.patch import package_claim, quantities, resolve
+from experiment_design.contracts import (
+    CalculationResult,
+    Design,
+    Record,
+    ScientificPackage,
+    Severity,
+)
+from experiment_design.patch import design_hash, package_claim, quantities, resolve
 from experiment_design.science.power import compute_scenarios, contrast_from
 
 
@@ -30,6 +36,7 @@ def validate_design(
     design: Design,
     package: ScientificPackage,
     source_ids: set[str] | None = None,
+    calculations: list[CalculationResult] | None = None,
 ) -> list[ValidationFinding]:
     source_ids = {s.id for s in package.sources} if source_ids is None else source_ids
     findings = []
@@ -123,7 +130,16 @@ def validate_design(
             "/analysis/sidedness",
             "This contrast requires one-sided inference",
         )
-    results = compute_scenarios(design)
+    results = calculations if calculations is not None else compute_scenarios(design)
+    if calculations is not None and any(
+        r.binding.design_hash != design_hash(design) for r in calculations
+    ):
+        add(
+            "no_computable_scenario",
+            "MAJOR",
+            "/scenarios",
+            "Calculation binding differs from design",
+        )
     if results and all(r.status == "not_computed" for r in results):
         add("no_computable_scenario", "MINOR", "/scenarios", "No power scenario can be computed")
     return findings

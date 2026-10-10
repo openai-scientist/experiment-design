@@ -5,6 +5,85 @@ from experiment_design.contracts import ClusterSpec, Quantity
 from experiment_design.science.power import compute_scenario, design_effect
 
 
+@pytest.mark.parametrize(
+    "case", ["independent51", "cluster20", "cluster24", "reversed20", "superiority64"]
+)
+def test_method_power_matches_independent_r_reference(case):
+    import json
+    from pathlib import Path
+
+    from experiment_design.contracts import ArtifactBinding, CalculationRequest
+    from experiment_design.science.power import calculate
+
+    ref = json.loads(Path("tests/fixtures/power_reference.json").read_text())["cases"][case]
+    d = design()
+    d.analysis.common_variance = True
+    if "20" in case or case == "cluster24":
+        d.analysis.method_id = "cluster_equal_size_t"
+        d.analysis.model = "Pooled t test of cluster means"
+        d.sampling.unit_of_analysis = "class"
+        d.sampling.cluster.equal_size = True
+        d.sampling.cluster.independent_clusters = True
+        d.sampling.cluster.clusters_per_arm = ref["n"]
+        if case == "reversed20":
+            d.claim.direction.value = "decrease"
+    else:
+        d.sampling.cluster = None
+        d.sampling.n_per_arm = ref["n"]
+        d.sampling.unit_of_randomization = d.sampling.unit_of_analysis = "participant"
+        d.analysis.method_id = "independent_pooled_t"
+        d.analysis.model = "Pooled two-sample t test"
+        d.analysis.alpha = ref["alpha"]
+        d.scenarios[0].sd = q(ref["sd"])
+        if case == "independent51":
+            d.claim.margin.value = 0.05
+        else:
+            d.claim.contrast_type.value = "superiority"
+            d.analysis.sidedness = "two_sided"
+            d.scenarios[0].effect = q(0.5)
+    r = calculate(
+        CalculationRequest(
+            binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
+            scenario_id="base",
+            design=d,
+        )
+    )
+    assert r.power == pytest.approx(ref["power"], abs=1e-8)
+    assert r.df == 2 * ref["n"] - 2
+    assert r.mde is None
+    if case == "independent51":
+        assert r.power == pytest.approx(0.8059, abs=5e-5)
+
+
+def test_cluster_t_integer_search_and_unsupported_method():
+    from experiment_design.contracts import ArtifactBinding, CalculationRequest
+    from experiment_design.science.power import calculate
+
+    d = design()
+    d.analysis.method_id = "cluster_equal_size_t"
+    d.analysis.model = "Pooled t test of cluster means"
+    d.analysis.common_variance = True
+    d.sampling.unit_of_analysis = "class"
+    d.sampling.cluster.equal_size = d.sampling.cluster.independent_clusters = True
+    request = CalculationRequest(
+        binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
+        scenario_id="base",
+        design=d,
+    )
+    result = calculate(request)
+    assert result.required_clusters_per_arm == 25
+    for k, expected in [(24, False), (25, True)]:
+        request.design.sampling.cluster.clusters_per_arm = k
+        assert (calculate(request).power >= 0.8) == expected
+    request.design.analysis.model = "Mixed model with class random intercept"
+    unsupported = calculate(request)
+    assert unsupported.status == "not_computed"
+    assert "method" in " ".join(unsupported.reasons)
+    request.design.analysis.model = "Pooled t test of cluster means"
+    request.design.sampling.cluster.equal_size = False
+    assert calculate(request).status == "not_computed"
+
+
 def q(value, unit="points", provenance="assumption"):
     return Quantity(value=value, unit=unit, provenance=provenance)
 

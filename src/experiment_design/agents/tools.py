@@ -9,6 +9,7 @@ from pydantic import Field, ValidationError
 from experiment_design.contracts import (
     CLAIM_FIELDS,
     ArtifactBinding,
+    CalculationRequest,
     Design,
     DesignVersion,
     Finding,
@@ -23,7 +24,7 @@ from experiment_design.patch import PatchError, apply_patch, design_diff, previe
 from experiment_design.runtime.loop import SubmitRejected, Tool
 from experiment_design.runtime.store import Store
 from experiment_design.science.evidence import lookup_evidence
-from experiment_design.science.power import compute_scenario
+from experiment_design.science.power import calculate, compute_scenario
 from experiment_design.science.validators import validate_design
 
 
@@ -213,6 +214,15 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
         overrides = {
             k: Quantity.model_validate(v) for k, v in (args.get("overrides") or {}).items()
         }
+        if ctx.binding:
+            return [
+                calculate(
+                    CalculationRequest(
+                        binding=ctx.binding, scenario_id=s.name, design=d, overrides=overrides
+                    )
+                ).model_dump(mode="json")
+                for s in selected
+            ]
         return [compute_scenario(d, s, overrides).model_dump(mode="json") for s in selected]
 
     def check_patch(args):

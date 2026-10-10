@@ -1,0 +1,50 @@
+{
+  "provenance": {
+    "runtime": "webR",
+    "version": "R version 4.6.0 (2026-04-24)",
+    "generator_sha256": "3702aac8b2c6d64bf4beda13eabd0e54b91bc7447c057e46fe29e953ac71b2cb",
+    "reference": "https://www.stat.ethz.ch/R-manual/R-devel/library/stats/html/power.t.test.html"
+  },
+  "cases": {
+    "independent51": {
+      "n": 51,
+      "delta": 0.05,
+      "sd": 0.1,
+      "alpha": 0.05,
+      "sidedness": "one.sided",
+      "power": 0.805898599094045
+    },
+    "cluster20": {
+      "n": 20,
+      "delta": 3,
+      "sd": 3.687817782917155,
+      "alpha": 0.025,
+      "sidedness": "one.sided",
+      "power": 0.7078304846683958
+    },
+    "cluster24": {
+      "n": 24,
+      "delta": 3,
+      "sd": 3.687817782917155,
+      "alpha": 0.025,
+      "sidedness": "one.sided",
+      "power": 0.7877891416463259
+    },
+    "reversed20": {
+      "n": 20,
+      "delta": 3,
+      "sd": 3.687817782917155,
+      "alpha": 0.025,
+      "sidedness": "one.sided",
+      "power": 0.7078304846683958
+    },
+    "superiority64": {
+      "n": 64,
+      "delta": 0.5,
+      "sd": 1,
+      "alpha": 0.05,
+      "sidedness": "two.sided",
+      "power": 0.8014595579223276
+    }
+  }
+}

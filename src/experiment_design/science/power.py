@@ -1,13 +1,25 @@
 """Normal-approximation power for two-arm contrasts, including clustering."""
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass
 from statistics import NormalDist
 from typing import Literal
 
 from pydantic import Field
+from scipy.stats import nct, t
 
-from experiment_design.contracts import Claim, Design, PowerScenario, Quantity, Record
+from experiment_design.contracts import (
+    ArtifactBinding,
+    CalculationRequest,
+    CalculationResult,
+    Claim,
+    Design,
+    PowerScenario,
+    Quantity,
+    Record,
+)
 
 NORMAL = NormalDist()
 
@@ -108,6 +120,24 @@ def compute_scenario(
     scenario: PowerScenario,
     overrides: dict[str, Quantity] | None = None,
 ) -> ScenarioResult:
+    if design.analysis.method_id:
+        result = calculate(
+            CalculationRequest(
+                binding=ArtifactBinding(source_snapshot_id="compatibility", event_id=0),
+                scenario_id=scenario.name,
+                design=design,
+                overrides=overrides or {},
+            )
+        )
+        return ScenarioResult(
+            name=scenario.name,
+            status=result.status,
+            power=result.power,
+            required_n_per_arm=result.required_n_per_arm,
+            required_clusters_per_arm=result.required_clusters_per_arm,
+            reasons=result.reasons,
+            input_provenance=result.input_provenance,
+        )
     inputs = {
         "effect": scenario.effect,
         "sd": scenario.sd,
@@ -237,3 +267,151 @@ def compute_scenario(
 
 def compute_scenarios(design: Design) -> list[ScenarioResult]:
     return [compute_scenario(design, scenario) for scenario in design.scenarios]
+
+
+def calculate(request: CalculationRequest) -> CalculationResult:
+    raw = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    design = request.design
+    if request.preview_patch:
+        from experiment_design.patch import _apply_patch
+
+        ids = {
+            q.source_ref for s in design.scenarios for q in (s.effect, s.sd) if q and q.source_ref
+        }
+        if design.sampling.cluster and design.sampling.cluster.icc:
+            ids.add(design.sampling.cluster.icc.source_ref)
+        design = _apply_patch(design, request.preview_patch, source_ids=ids, author="preview")
+    method = design.analysis.method_id or "unsupported"
+    result = CalculationResult(
+        id="calc:" + digest,
+        request_hash=digest,
+        binding=request.binding,
+        method_id=method,
+        status="not_computed",
+    )
+    reasons = result.reasons
+    scenarios = [s for s in design.scenarios if s.name == request.scenario_id]
+    if len(scenarios) != 1:
+        reasons.append("scenario is missing or ambiguous")
+        return result
+    scenario = scenarios[0]
+    cluster = design.sampling.cluster
+    expected_model = {
+        "independent_pooled_t": "Pooled two-sample t test",
+        "cluster_equal_size_t": "Pooled t test of cluster means",
+    }.get(method)
+    if expected_model is None or design.analysis.model != expected_model:
+        reasons.append("analysis method/model missing, mismatched or unsupported")
+    if design.claim.outcome_kind.value != "continuous":
+        reasons.append("method supports continuous outcomes only")
+    if design.sampling.allocation != "1:1" or design.analysis.common_variance is not True:
+        reasons.append("method requires equal allocation and explicit common variance assumption")
+    if method == "cluster_equal_size_t":
+        if cluster is None:
+            reasons.append("cluster method requires cluster inputs")
+        elif cluster.equal_size is not True or cluster.independent_clusters is not True:
+            reasons.append("cluster method requires equal fixed sizes and independent clusters")
+        elif (
+            design.sampling.unit_of_analysis != cluster.unit
+            or design.sampling.unit_of_randomization != cluster.unit
+        ):
+            reasons.append("cluster method requires assignment and analysis at cluster level")
+    elif cluster is not None:
+        reasons.append("independent method does not support cluster dependence")
+    elif design.sampling.unit_of_analysis != design.sampling.unit_of_randomization:
+        reasons.append("independent method requires matching independent assigned/analysis units")
+    quantities = {"effect": scenario.effect, "sd": scenario.sd}
+    if cluster:
+        quantities.update(size=cluster.size, icc=cluster.icc)
+    reasons.extend(
+        f"unsupported override {key}" for key in request.overrides if key not in quantities
+    )
+    quantities.update({key: q for key, q in request.overrides.items() if key in quantities})
+    unit = str(design.claim.outcome_unit.value or "")
+    for name, quantity in quantities.items():
+        if quantity is None or quantity.value is None:
+            reasons.append(f"{name} missing")
+            continue
+        result.input_provenance[name] = quantity.provenance
+        if quantity.provenance not in {"source", "assumption"}:
+            reasons.append(f"{name}: invalid or unattested quantitative provenance")
+        if quantity.provenance == "source" and not quantity.source_ref:
+            reasons.append(f"{name}: missing source reference")
+        value = (
+            normalize(quantity, "outcome" if name in {"sd", "effect"} else "proportion", unit)
+            if name != "size"
+            else quantity.value
+        )
+        if isinstance(value, str):
+            reasons.append(f"{name}: {value}")
+        else:
+            result.normalized_inputs[name] = value
+    values = result.normalized_inputs
+    if values.get("sd", 0) <= 0:
+        reasons.append("sd must be positive")
+    if cluster and (values.get("size", 0) < 1 or not float(values.get("size", 0)).is_integer()):
+        reasons.append("cluster size must be a positive fixed whole count")
+    contrast = contrast_from(design.claim, design.analysis.sidedness, design.analysis.alpha)
+    if isinstance(contrast, list):
+        reasons.extend(contrast)
+    if (
+        design.claim.contrast_type.value != "superiority"
+        and design.analysis.sidedness != "one_sided"
+    ):
+        reasons.append("margin method requires one-sided inference")
+    if not 0 < scenario.target_power < 1:
+        reasons.append("target power must be between zero and one")
+    count = cluster.clusters_per_arm if cluster else design.sampling.n_per_arm
+    if count is not None and count < 2:
+        reasons.append("at least two independent units per arm are required")
+    if reasons:
+        result.applicability = list(reasons)
+        return result
+    sd = values["sd"]
+    if cluster:
+        sd *= math.sqrt(values["icc"] + (1 - values["icc"]) / values["size"])
+    delta = values["effect"] - contrast.null
+    if contrast.alternative == "less":
+        delta = -delta
+    if contrast.alternative == "two_sided":
+        delta = abs(delta)
+    if delta <= 0 and scenario.target_power > contrast.alpha:
+        reasons.append("target power is unattainable at the stated effect")
+        return result
+
+    def at(n: int) -> float:
+        df = 2 * n - 2
+        nc = delta / (sd * math.sqrt(2 / n))
+        critical = t.isf(contrast.alpha / (2 if contrast.alternative == "two_sided" else 1), df)
+        power = nct.sf(critical, df, nc)
+        if contrast.alternative == "two_sided":
+            power += nct.cdf(-critical, df, nc)
+        return float(power)
+
+    high = 2
+    while at(high) < scenario.target_power:
+        high *= 2
+        if high > 2**30:
+            reasons.append("required sample exceeds supported search range")
+            return result
+    low = 2
+    while low < high:
+        mid = (low + high) // 2
+        if at(mid) >= scenario.target_power:
+            high = mid
+        else:
+            low = mid + 1
+    result.status = "computed"
+    result.power = at(count) if count is not None else None
+    result.df = 2 * count - 2 if count is not None else None
+    result.required_clusters_per_arm = low if cluster else None
+    result.required_n_per_arm = int(low * values["size"]) if cluster else low
+    result.assumptions = [
+        "Normal continuous outcomes; common variance; equal allocation",
+        "Fixed equal cluster sizes; independent cluster means"
+        if cluster
+        else "Independent assigned units",
+    ]
+    result.applicability = ["Supported pooled t planning model under declared assumptions"]
+    return result

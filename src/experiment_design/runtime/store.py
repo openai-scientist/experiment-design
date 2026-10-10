@@ -13,6 +13,7 @@ from experiment_design.contracts import (
     AgentTask,
     Approval,
     ArtifactBinding,
+    CalculationResult,
     Design,
     DesignVersion,
     Observation,
@@ -632,6 +633,16 @@ class Store:
                 for e in history
                 if e.type == "approval" and e.data["design_hash"] == selected.design_hash
             ]
+            observations = self._artifact_records(run_id, "observation", Observation, cutoff)
+            calculations = [
+                CalculationResult.model_validate(item)
+                for o in observations
+                if o.accepted
+                and o.tool_name == "compute_power"
+                and o.binding.design_hash == selected.design_hash
+                for item in o.result.get("value", [])
+                if "request_hash" in item
+            ]
             return PublicationSnapshot(
                 run=run,
                 context=context,
@@ -643,4 +654,5 @@ class Store:
                 assessment=assessments[-1] if assessments else None,
                 approval=approvals[-1] if approvals else None,
                 binding=binding,
+                calculations=calculations,
             )

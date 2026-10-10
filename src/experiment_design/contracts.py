@@ -137,6 +137,8 @@ class ClusterSpec(Record):
     size: Quantity
     clusters_per_arm: int | None = None
     icc: Quantity | None = None
+    equal_size: bool | None = None
+    independent_clusters: bool | None = None
 
 
 class Sampling(Record):
@@ -168,6 +170,8 @@ class Measurement(Record):
 
 
 class AnalysisPlan(Record):
+    method_id: str | None = None
+    common_variance: bool | None = None
     model: str | None = None
     sidedness: Literal["one_sided", "two_sided"] = "two_sided"
     alpha: float = 0.05
@@ -461,8 +465,36 @@ class PublicationSnapshot(Record):
     decisions: list[ResearcherDecision]
     assessment: ReadinessAssessment | None
     approval: Approval | None
-    calculations: list[dict] = Field(default_factory=list)
+    calculations: list["CalculationResult"] = Field(default_factory=list)
     binding: ArtifactBinding
 
 
+class CalculationRequest(Record):
+    binding: ArtifactBinding
+    scenario_id: str
+    design: Design
+    overrides: dict[str, Quantity] = Field(default_factory=dict)
+    preview_patch: Patch | None = None
+
+
+class CalculationResult(Record):
+    id: str
+    request_hash: str
+    binding: ArtifactBinding
+    method_id: str
+    implementation: str = "scipy-noncentral-t"
+    applicability: list[str] = Field(default_factory=list)
+    normalized_inputs: dict[str, float] = Field(default_factory=dict)
+    input_provenance: dict[str, str] = Field(default_factory=dict)
+    assumptions: list[str] = Field(default_factory=list)
+    status: Literal["computed", "not_computed"]
+    power: float | None = None
+    required_n_per_arm: int | None = None
+    required_clusters_per_arm: int | None = None
+    df: int | None = None
+    mde: float | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
 AgentTask.model_rebuild()
+PublicationSnapshot.model_rebuild()
