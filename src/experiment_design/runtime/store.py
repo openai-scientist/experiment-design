@@ -51,6 +51,7 @@ EVENT_TYPES = (
     "run.updated",
     "publication",
     "provider.usage",
+    "budget.changed",
 )
 
 
@@ -137,6 +138,52 @@ class Store:
 
     def close(self) -> None:
         self.connection.close()
+
+    def backup(self, target: Path) -> None:
+        target = Path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(target) as connection:
+            self.connection.backup(connection)
+
+    def record_publication(self, run_id: str, binding: ArtifactBinding, manifest: dict) -> None:
+        with self.transaction():
+            previous = [
+                e
+                for e in self.events(run_id)
+                if e.type == "publication" and e.data["manifest"] == manifest
+            ]
+            if previous:
+                return
+            self.append_event(
+                run_id, "publication", {"binding": binding.model_dump(), "manifest": manifest}
+            )
+            run = self.run(run_id)
+            if (
+                run.stage_id == "S7"
+                and run.status == "APPROVED"
+                and binding.design_hash == self.version(run_id).design_hash
+            ):
+                from experiment_design.qualification import can_approve
+
+                current_snapshot = self.publication_snapshot(run_id)
+                if (
+                    binding.context_revision != current_snapshot.binding.context_revision
+                    or current_snapshot.approval is None
+                    or can_approve(current_snapshot)
+                ):
+                    raise ValueError("publication approval or supporting records changed")
+                self.commit_stage(
+                    run_id,
+                    StageResult(
+                        stage_id="S7",
+                        status="COMPLETE",
+                        binding=self.binding(run_id),
+                        output_refs=[manifest["support_hash"]],
+                        reason="Consistent EDP bundle published",
+                    ),
+                    "S7",
+                )
+                self.update_run(run_id, status="PUBLISHED")
 
     @contextmanager
     def transaction(self):
@@ -482,6 +529,8 @@ class Store:
         )
 
     def check_binding(self, run_id: str, binding: ArtifactBinding) -> None:
+        if not any(e.event_id == binding.event_id for e in self.events(run_id)):
+            raise ValueError("unknown artifact binding checkpoint")
         current = self.binding(run_id)
         if binding.model_dump(exclude={"event_id"}) != current.model_dump(exclude={"event_id"}):
             raise ValueError("stale artifact binding")
@@ -500,6 +549,9 @@ class Store:
                     raise ValueError("unpermitted return target")
                 if not result.reason.strip() or not (result.issue_refs or result.output_refs):
                     raise ValueError("return requires originating issue or decision")
+                known = {i.id for i in self.issues(run_id)} | {d.id for d in self.decisions(run_id)}
+                if not any(ref in known for ref in result.issue_refs + result.output_refs):
+                    raise ValueError("return requires an existing originating issue or decision")
             elif target != result.stage_id:
                 if (
                     stages.index(target) != stages.index(result.stage_id) + 1
@@ -518,6 +570,30 @@ class Store:
             self.update_run(run_id, stage_id=target)
 
     def save_decision(self, decision: ResearcherDecision) -> ResearcherDecision:
+        try:
+            previous = self.decision(decision.run_id, decision.id)
+        except KeyError:
+            previous = None
+        if previous:
+            if decision.revision not in {previous.revision, previous.revision + 1}:
+                raise ValueError("decision revision must be current or next")
+            frozen = {
+                "binding",
+                "problem",
+                "affected_paths",
+                "dependencies",
+                "options",
+                "recommendation",
+                "purpose",
+            }
+            if (
+                previous.status not in {"IDENTIFIED", "EXPLORING"}
+                and decision.revision == previous.revision
+                and previous.model_dump(include=frozen) != decision.model_dump(include=frozen)
+            ):
+                raise ValueError("presented decision is immutable within its revision")
+            if decision.responses[: len(previous.responses)] != previous.responses:
+                raise ValueError("researcher response history is immutable")
         return self._put_artifact(decision.run_id, "researcher_decision", decision.id, decision)
 
     def decision(
@@ -531,6 +607,17 @@ class Store:
         return self._artifact_records(run_id, "researcher_decision", ResearcherDecision)
 
     def save_cohort(self, cohort: ReviewCohort) -> ReviewCohort:
+        try:
+            previous = self.cohort(cohort.run_id, cohort.id)
+        except KeyError:
+            previous = None
+        if previous and (
+            previous.binding != cohort.binding
+            or previous.member_task_ids != cohort.member_task_ids
+            or previous.published_event_id is not None
+            and previous != cohort
+        ):
+            raise ValueError("review cohort is immutable")
         return self._put_artifact(cohort.run_id, "cohort", cohort.id, cohort)
 
     def cohort(self, run_id: str, cohort_id: str) -> ReviewCohort:
@@ -669,6 +756,11 @@ class Store:
                 if o.accepted
                 and o.tool_name == "compute_power"
                 and o.binding.design_hash == selected.design_hash
+                and o.binding.context_revision == binding.context_revision
+                and o.binding.source_snapshot_id == binding.source_snapshot_id
+                and not o.arguments.get("overrides")
+                and not o.arguments.get("ops")
+                and not o.arguments.get("design")
                 for item in o.result.get("value", [])
                 if "request_hash" in item
             ]

@@ -224,3 +224,59 @@ def test_unattested_computed_input_not_computed():
     result = calc(d)
     assert result.status == "not_computed"
     assert any("unattested computed quantity" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "binary",
+        "unequal_allocation",
+        "variance",
+        "dependent",
+        "analysis_unit",
+        "fractional_size",
+        "sd_zero",
+        "target",
+        "one_cluster",
+        "provenance",
+        "outcome_unit",
+    ],
+)
+def test_t_method_refuses_inputs_outside_its_applicability(case):
+    from test_stage_pipeline import supported_design
+
+    from experiment_design.contracts import ArtifactBinding, CalculationRequest
+    from experiment_design.science.power import calculate
+
+    d = supported_design()
+    if case == "binary":
+        d.claim.outcome_kind.value = "binary"
+    elif case == "unequal_allocation":
+        d.sampling.allocation = "2:1"
+    elif case == "variance":
+        d.analysis.common_variance = False
+    elif case == "dependent":
+        d.sampling.cluster.independent_clusters = False
+    elif case == "analysis_unit":
+        d.sampling.unit_of_analysis = "student"
+    elif case == "fractional_size":
+        d.sampling.cluster.size.value = 25.5
+    elif case == "sd_zero":
+        d.scenarios[0].sd.value = 0
+    elif case == "target":
+        d.scenarios[0].target_power = 1
+    elif case == "one_cluster":
+        d.sampling.cluster.clusters_per_arm = 1
+    elif case == "provenance":
+        d.scenarios[0].sd.provenance = "computed"
+    elif case == "outcome_unit":
+        d.scenarios[0].sd.unit = "kg"
+    result = calculate(
+        CalculationRequest(
+            binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
+            scenario_id="base",
+            design=d,
+        )
+    )
+    assert result.status == "not_computed" and result.reasons
+    assert result.power is None and result.required_n_per_arm is None

@@ -8,7 +8,6 @@ from experiment_design.patch import (
     design_diff,
     design_hash,
     initial_design,
-    set_claim,
 )
 
 
@@ -156,8 +155,36 @@ def test_hash_stable():
     assert design_hash(d) != design_hash(design())
 
 
-def test_set_claim_researcher():
-    d = design()
-    result = set_claim(d, "margin", 2.0, "researcher")
-    assert (result.claim.margin.value, result.claim.margin.origin) == (2.0, "researcher")
-    assert d.claim.margin.value == 3
+def test_unannotated_understanding_cannot_become_researcher_owned():
+    from experiment_design.contracts import ResearchContext
+    from experiment_design.patch import initial_design
+
+    context = ResearchContext(
+        id="context", revision=1, source_snapshot_id="source", package=package()
+    )
+    committed = initial_design(context.package, design(), context=context)
+    assert committed.claim.estimand.origin == "designer_default"
+    assert committed.claim.margin.origin == "designer_default"
+
+
+def test_source_specified_sap_cannot_be_replaced_in_initial_draft():
+    from experiment_design.contracts import FieldAnnotation, ResearchContext
+    from experiment_design.patch import initial_design
+
+    p = package()
+    p.hypothesis.method = "Mixed model with class random intercept"
+    context = ResearchContext(
+        id="context",
+        revision=1,
+        source_snapshot_id="source",
+        package=p,
+        field_annotations={
+            "/analysis/model": FieldAnnotation(
+                status="source-stated", source_ref="S1", source_span=p.hypothesis.method
+            )
+        },
+    )
+    from test_stage_pipeline import supported_design
+
+    with pytest.raises(PatchError, match="researcher-owned"):
+        initial_design(p, supported_design(), context=context)

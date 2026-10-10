@@ -105,19 +105,19 @@ def test_revision_must_cover_batch(ctx):
             {
                 "patch": {"ops": [], "rationale": "Fix", "addresses": ["I1"]},
                 "rebuttals": [],
-                "requests": [],
+                "decisions": [],
             }
         )
 
 
-@pytest.mark.parametrize("path", ["/analysis/model", "/claim/unknown"])
-def test_decision_request_needs_claim_path(ctx, path):
-    with pytest.raises(SubmitRejected, match="claim"):
+@pytest.mark.parametrize("path", ["/analysis/unknown", "/claim/unknown"])
+def test_decision_proposal_rejects_unknown_scientific_path(ctx, path):
+    with pytest.raises(SubmitRejected, match="pointer"):
         designer.submit_tool(ctx, mode="initial").handler(
             {
                 "design": design().model_dump(mode="json"),
                 "rationale": "Draft",
-                "requests": [{"kind": "decision", "question": "Which model?", "path": path}],
+                "decisions": [{"problem": "Which model?", "affected_paths": [path]}],
             }
         )
 
@@ -175,3 +175,46 @@ def test_researcher_input_visible_as_source(ctx):
     )
     hits = build_tools(ctx)["lookup_evidence"].handler({"query": "observed standard deviation"})
     assert hits[0]["source_id"] == "researcher:R1"
+
+
+def test_read_observation_cannot_attest_a_computation(tmp_path):
+    from test_decisions import decision_state
+
+    from experiment_design.contracts import Observation
+
+    store, run, context, _ = decision_state(tmp_path)
+    bound = ToolContext(
+        store, run, context.package, store.version(run), {"read"}, binding=store.binding(run)
+    )
+    store.save_observation(
+        run,
+        Observation(
+            id="read",
+            task_id="review",
+            binding=bound.binding,
+            tool_name="read_design",
+            arguments={},
+            result={"value": "read"},
+            accepted=True,
+            evidence_ref="tool:read",
+        ),
+    )
+    errors = validate_findings([finding(basis="computation", evidence_refs=["tool:read"])], bound)
+    assert any("compute_power" in error for error in errors)
+    store.close()
+
+
+def test_source_quantity_cannot_use_unrelated_span(tmp_path):
+    from test_decisions import decision_state
+    from test_stage_pipeline import supported_design
+
+    store, run, context, _ = decision_state(tmp_path)
+    bound = ToolContext(store, run, context.package, None, set(), binding=store.binding(run))
+    d = supported_design()
+    d.scenarios[0].sd.source_span = "Typical class size 25"
+    with pytest.raises(SubmitRejected, match="source span"):
+        designer.submit_tool(bound, mode="initial").handler(
+            {"design": d.model_dump(mode="json"), "rationale": "Draft"}
+        )
+    assert store.version(run).version == 1
+    store.close()

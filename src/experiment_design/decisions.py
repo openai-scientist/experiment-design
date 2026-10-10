@@ -2,12 +2,13 @@
 
 from experiment_design.contracts import (
     DecisionResponse,
+    FieldAnnotation,
     Patch,
     ResearchContext,
     ResearcherDecision,
     ReviewIssue,
 )
-from experiment_design.patch import apply_patch, design_diff
+from experiment_design.patch import apply_patch, design_diff, package_claim, resolve
 from experiment_design.runtime.store import Store
 
 
@@ -45,6 +46,9 @@ def respond(
             return decision
         if response.revision != decision.revision:
             raise ValueError("stale decision revision")
+        if decision.status != "AWAITING_RESEARCHER":
+            raise ValueError("decision is not awaiting a researcher response")
+        store.check_binding(run_id, decision.binding)
         if not response.researcher.strip() or not response.response_id.strip():
             raise ValueError("researcher identity and response ID are required")
         allowed = (
@@ -58,8 +62,16 @@ def respond(
             o.id for o in decision.options
         }:
             raise ValueError("unknown option ID")
-        if response.action == "PROPOSE_ALTERNATIVE" and not response.text.strip():
+        if (
+            response.action in {"PROPOSE_ALTERNATIVE", "REQUEST_CHANGES"}
+            and not response.text.strip()
+        ):
             raise ValueError("alternative text is required")
+        if response.affected_paths:
+            if response.action != "REQUEST_CHANGES":
+                raise ValueError("affected paths are only valid for a final change request")
+            for path in response.affected_paths:
+                resolve(store.version(run_id).design, path)
         decision.responses.append(response)
         decision.status = (
             "AWAITING_RESEARCHER" if response.action in {"DEFER", "HOLD"} else "ANSWERED"
@@ -82,6 +94,32 @@ def interpret(
         for op in proposed.ops
     ):
         raise ValueError("interpretation exceeds allowed scope")
+    if result.get("context"):
+        proposed_context = ResearchContext.model_validate(result["context"])
+        if (
+            proposed_context.id != context.id
+            or proposed_context.source_snapshot_id != context.source_snapshot_id
+            or proposed_context.revision != context.revision + 1
+        ):
+            raise ValueError("authorized context revision differs")
+        old_claim, new_claim = (
+            package_claim(context.package),
+            package_claim(proposed_context.package),
+        )
+        changed_paths = [f"/claim/{key}" for key in old_claim if old_claim[key] != new_claim[key]]
+        for key in ("research_question", "constraints", "budget", "assumptions", "sources"):
+            if getattr(context.package, key) != getattr(proposed_context.package, key):
+                changed_paths.append(f"/context/package/{key}")
+        if any(
+            not any(
+                path == allowed or path.startswith(allowed + "/")
+                for allowed in decision.affected_paths
+            )
+            for path in changed_paths
+        ):
+            raise ValueError("context interpretation exceeds allowed scope")
+        if proposed_context.field_annotations != context.field_annotations:
+            raise ValueError("context authority is assigned during application")
     updated = decision.model_copy(deep=True)
     updated.interpretation = dict(result)
     if proposed:
@@ -128,15 +166,48 @@ def apply_decision(
             version = store.add_version(
                 run_id, changed, author="researcher", parent=version.version, patch=patch
             )
-        next_context = context.model_copy(deep=True)
         context_changes = decision.interpretation.get("context")
-        if context_changes:
-            next_context = ResearchContext.model_validate(context_changes)
-            if (
-                next_context.source_snapshot_id != context.source_snapshot_id
-                or next_context.revision != context.revision + 1
-            ):
-                raise ValueError("authorized context revision differs")
+        next_context = (
+            ResearchContext.model_validate(context_changes)
+            if context_changes
+            else context.model_copy(deep=True)
+        )
+        if patch:
+            mapping = {
+                "margin": ("inference", "margin"),
+                "estimand": ("inference", "estimand"),
+                "contrast_type": ("inference", "contrast_type"),
+                "hypothesis": ("hypothesis", "statement"),
+                "prediction": ("hypothesis", "prediction"),
+                "failure_condition": ("hypothesis", "failure_condition"),
+                "exposure": ("hypothesis", "exposure"),
+                "primary_outcome": ("outcome", "name"),
+                "outcome_unit": ("outcome", "unit"),
+                "outcome_kind": ("outcome", "kind"),
+                "direction": ("outcome", "direction"),
+            }
+            for op in patch.ops:
+                parts = op.path.strip("/").split("/")
+                if len(parts) in {2, 3} and parts[0] == "claim" and parts[1] in mapping:
+                    group, field = mapping[parts[1]]
+                    record = getattr(next_context.package, group)
+                    if record is not None:
+                        setattr(record, field, op.value)
+                    next_context.field_annotations[parts[1]] = FieldAnnotation(
+                        status="researcher-confirmed",
+                        source_ref=f"researcher:{decision.id}:{response.response_id}",
+                        note=response.text,
+                    )
+        if patch or context_changes:
+            next_context.revision = context.revision + 1
+            for name, value in package_claim(next_context.package).items():
+                if value != package_claim(context.package)[name]:
+                    next_context.field_annotations[name] = FieldAnnotation(
+                        status="researcher-confirmed",
+                        source_ref=f"researcher:{decision.id}:{response.response_id}",
+                        note=response.text,
+                    )
+            next_context = ResearchContext.model_validate(next_context.model_dump())
             store.save_context(run_id, next_context)
         decision.status = "APPLIED"
         decision.application = {
@@ -147,7 +218,7 @@ def apply_decision(
         }
         decision.verification = {"status": "pending", "evidence_refs": []}
         if version:
-            store.save_issue(
+            issue = store.save_issue(
                 ReviewIssue(
                     run_id=run_id,
                     raised_by="researcher",
@@ -162,4 +233,5 @@ def apply_decision(
                     basis="reasoning",
                 )
             )
+            decision.application["issue_id"] = issue.id
         return store.save_decision(decision)

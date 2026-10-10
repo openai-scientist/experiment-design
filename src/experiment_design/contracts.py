@@ -1,5 +1,6 @@
 """Canonical scientific records and agent task contracts."""
 
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -402,6 +403,8 @@ class DecisionResponse(Record):
     text: str = ""
     researcher: str
     response_id: str
+    affected_paths: list[str] = Field(default_factory=list)
+    at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ResearcherDecision(Record):
@@ -478,6 +481,8 @@ class CalculationRequest(Record):
 
 
 class CalculationResult(Record):
+    scenario_id: str = ""
+    counterfactual: bool = False
     id: str
     request_hash: str
     binding: ArtifactBinding

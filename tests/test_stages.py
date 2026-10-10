@@ -136,3 +136,24 @@ def test_historical_snapshot_uses_supporting_record_revisions(tmp_path):
     assert store.events(run) == before
     assert store.decision(run, "D1").revision == 2
     store.close()
+
+
+def test_fabricated_return_reference_cannot_change_stage(tmp_path):
+    store = Store(tmp_path / "research.db")
+    run, binding = staged(store)
+    store.update_run(run, stage_id="S5")
+    before = store.events(run)
+    with pytest.raises(ValueError, match="originating"):
+        store.commit_stage(
+            run,
+            StageResult(
+                stage_id="S5",
+                status="REVISION_REQUIRED",
+                binding=binding,
+                output_refs=["invented decision"],
+                reason="Repair",
+            ),
+            "S4",
+        )
+    assert store.events(run) == before
+    store.close()

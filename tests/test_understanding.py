@@ -140,3 +140,13 @@ def test_understanding_rejects_invented_authority_or_numbers(tmp_path, corruptio
         understanding.submit_tool(ctx).handler(data)
     assert store.context(rid) is None
     store.close()
+
+
+def test_explicit_missing_input_cannot_be_hidden_by_a_reference(tmp_path):
+    main = tmp_path / "main.md"
+    missing = tmp_path / "missing.md"
+    main.write_text("[Additional](missing.md)", encoding="utf-8")
+    from experiment_design.package import PackageFormatError, snapshot_sources
+
+    with pytest.raises(PackageFormatError, match="cannot read input"):
+        snapshot_sources([main, missing])

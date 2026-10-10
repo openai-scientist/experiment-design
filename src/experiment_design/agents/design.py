@@ -3,13 +3,14 @@
 from pydantic import Field
 
 from experiment_design.agents.tools import (
-    RequestProposal,
+    DecisionProposal,
     ToolContext,
     context_brief,
-    requests,
+    decision_proposals,
     source_ids,
     submit_schema,
     validate_refs,
+    validate_source_quantities,
 )
 from experiment_design.contracts import Design, Patch, Record
 from experiment_design.patch import apply_patch, initial_design
@@ -30,7 +31,7 @@ TOOLS = (
 class InitialSubmission(Record):
     design: Design
     rationale: str
-    requests: list[RequestProposal] = Field(default_factory=list)
+    decisions: list[DecisionProposal] = Field(default_factory=list)
 
 
 class Rebuttal(Record):
@@ -42,7 +43,7 @@ class Rebuttal(Record):
 class RevisionSubmission(Record):
     patch: Patch
     rebuttals: list[Rebuttal] = Field(default_factory=list)
-    requests: list[RequestProposal] = Field(default_factory=list)
+    decisions: list[DecisionProposal] = Field(default_factory=list)
 
 
 def brief(ctx: ToolContext, **focus) -> str:
@@ -62,16 +63,17 @@ def submit_tool(ctx: ToolContext, **mode):
     if mode.get("mode", "initial") == "initial":
 
         def initial(payload):
-            d = initial_design(ctx.package, payload.design)
+            d = initial_design(ctx.package, payload.design, context=ctx.store.context(ctx.run_id))
             d = apply_patch(
                 d,
                 Patch(ops=[], rationale="Validate quantitative provenance"),
                 source_ids=source_ids(ctx),
             )
+            validate_source_quantities(d, ctx)
             return {
                 "design": d.model_dump(mode="json"),
                 "rationale": payload.rationale,
-                "requests": requests(payload.requests, ctx),
+                "decisions": decision_proposals(payload.decisions, ctx),
             }
 
         return submit_schema("submit_design", InitialSubmission, initial)
@@ -91,11 +93,17 @@ def submit_tool(ctx: ToolContext, **mode):
             raise SubmitRejected(errors)
         if ctx.version is None:
             raise SubmitRejected(["Revision needs a committed parent design"])
-        apply_patch(ctx.version.design, payload.patch, source_ids=source_ids(ctx))
+        changed = apply_patch(
+            ctx.version.design,
+            payload.patch,
+            source_ids=source_ids(ctx),
+            context=ctx.store.context(ctx.run_id),
+        )
+        validate_source_quantities(changed, ctx)
         return {
             "patch": payload.patch.model_dump(mode="json"),
             "rebuttals": [r.model_dump(mode="json") for r in payload.rebuttals],
-            "requests": requests(payload.requests, ctx),
+            "decisions": decision_proposals(payload.decisions, ctx),
         }
 
     return submit_schema("submit_revision", RevisionSubmission, revision)

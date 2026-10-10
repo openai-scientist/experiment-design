@@ -46,11 +46,11 @@ class ConfigError(ValueError):
     pass
 
 
-def load_config(path: Path) -> ExdConfig:
+def load_config(path: Path, *, require_provider_keys: bool = True) -> ExdConfig:
     try:
         cfg = ExdConfig.model_validate(yaml.safe_load(Path(path).read_text(encoding="utf-8")))
     except (yaml.YAMLError, ValidationError) as exc:
         raise ConfigError(f"invalid configuration: {exc}") from exc
-    if not os.environ.get(cfg.llm.api_key_env):
+    if require_provider_keys and not os.environ.get(cfg.llm.api_key_env):
         raise ConfigError(f"missing API key environment variable {cfg.llm.api_key_env}")
     return cfg

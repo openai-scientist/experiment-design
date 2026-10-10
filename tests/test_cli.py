@@ -1,24 +1,20 @@
 import json
 import shlex
-from pathlib import Path
 
 import pytest
 import yaml
-from conftest import design, package
-from fakes import ScriptedJudge, ScriptedLLM, submit
+from fakes import ScriptedJudge, ScriptedLLM
+from test_stage_pipeline import normal_responses, source_snapshot
 
 from experiment_design import cli
 from experiment_design.config import RunConfig
-from experiment_design.contracts import Claim, ClaimField, ResearcherRequest
+from experiment_design.contracts import DecisionOption, ResearcherDecision
 from experiment_design.runtime.store import Store
-from experiment_design.workflow import Deps
-
-EXAMPLE = Path(__file__).resolve().parents[1] / "hypothesis.example.md"
+from experiment_design.workflow import Deps, advance, start_run
 
 
 @pytest.fixture
 def state(tmp_path, monkeypatch):
-    monkeypatch.setenv("EXD_LLM_API_KEY", "x")
     monkeypatch.chdir(tmp_path)
     cfg = tmp_path / "exd.yaml"
     cfg.write_text(
@@ -31,54 +27,123 @@ def state(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     store = Store(tmp_path / "exd.db")
-    rid = store.create_run(package(), {})
-    store.add_version(rid, design(), author="design", parent=None)
-    store.update_run(rid, status="NEEDS_RESEARCHER")
-    req = store.save_request(
-        ResearcherRequest(
-            run_id=rid,
-            kind="input",
-            question="Confirm district data?",
-            status="open",
-            raised_by="design",
-        )
+    deps = Deps(
+        store,
+        ScriptedLLM(normal_responses()),
+        ScriptedJudge([{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}]),
+        RunConfig(),
     )
-    yield store, rid, req, cfg
+    rid = start_run(source_snapshot(), deps, {})
+    assert advance(rid, deps) == "REVIEWABLE"
+    yield store, rid, cfg
     store.close()
 
 
 def call(state, args):
-    return cli.main(["--config", str(state[3]), *args])
+    return cli.main(["--config", str(state[2]), *args])
+
+
+def scientific_decision(state):
+    store, rid, _ = state
+    final = store.decisions(rid)[-1]
+    final.status = "APPLIED"
+    store.save_decision(final)
+    return store.save_decision(
+        ResearcherDecision(
+            id="D1",
+            run_id=rid,
+            binding=store.binding(rid),
+            status="AWAITING_RESEARCHER",
+            problem="Choose margin",
+            affected_paths=["/claim/margin"],
+            options=[DecisionOption(id="two", label="Two points", proposal={"margin": 2})],
+        )
+    )
 
 
 @pytest.mark.parametrize("custom_config", [False, True])
-def test_status_answer_hint_is_parseable(state, capsys, custom_config):
+def test_status_decision_hint_is_parseable_without_provider_keys(state, capsys, custom_config):
+    decision = scientific_decision(state)
     if custom_config:
-        custom = state[3].parent / "custom config.yaml"
-        custom.write_bytes(state[3].read_bytes())
-        default = yaml.safe_load(state[3].read_text(encoding="utf-8"))
-        default["store"] = str(state[3].parent / "other.db")
-        state[3].write_text(yaml.safe_dump(default), encoding="utf-8")
-        state = (*state[:3], custom)
+        custom = state[2].parent / "custom config.yaml"
+        custom.write_bytes(state[2].read_bytes())
+        state = (*state[:2], custom)
     assert call(state, ["status", state[1]]) == 0
     line = next(
         line.strip()
         for line in capsys.readouterr().out.splitlines()
         if line.strip().startswith("exd ")
     )
-    assert cli.main(shlex.split(line.replace('"<your answer>"', '"yes"'))[1:]) == 0
-    assert state[0].requests(state[1])[0].answer == "yes"
+    line = line.replace('"<your answer>"', '"Use 2.5 points"').replace('"<your name>"', '"PI"')
+    assert cli.main(shlex.split(line)[1:]) == 0
+    stored = state[0].decision(state[1], decision.id)
+    assert stored.responses[-1].text == "Use 2.5 points"
+    assert stored.application == {}
+    assert state[0].version(state[1]).version == 1
 
 
-def test_answer_unknown_request_exit_2(state, capsys):
+@pytest.mark.parametrize(
+    "revision,option,error", [(2, "two", "stale"), (1, "missing", "unknown option")]
+)
+def test_invalid_decision_does_not_mutate(state, capsys, revision, option, error):
+    decision = scientific_decision(state)
+    before = state[0].events(state[1])
+    assert (
+        call(
+            state,
+            [
+                "decide",
+                state[1],
+                decision.id,
+                "--revision",
+                str(revision),
+                "--action",
+                "SELECT_OPTION",
+                "--option",
+                option,
+                "--by",
+                "PI",
+            ],
+        )
+        == 2
+    )
+    assert error in capsys.readouterr().err
+    assert state[0].events(state[1]) == before
+
+
+def test_select_option_preserves_choice_without_provider(state):
+    decision = scientific_decision(state)
+    assert (
+        call(
+            state,
+            [
+                "decide",
+                state[1],
+                decision.id,
+                "--revision",
+                "1",
+                "--action",
+                "SELECT_OPTION",
+                "--option",
+                "two",
+                "--by",
+                "PI",
+            ],
+        )
+        == 0
+    )
+    assert state[0].decision(state[1], decision.id).responses[-1].option_id == "two"
+
+
+def test_legacy_answer_has_migration_message_without_mutation(state, capsys):
     before = state[0].events(state[1])
     assert call(state, ["answer", state[1], "R9", "yes"]) == 2
-    assert "unknown request R9" in capsys.readouterr().err
+    assert "Use decide" in capsys.readouterr().err
     assert state[0].events(state[1]) == before
 
 
 def test_status_explains_budget_stop_from_journal(state, capsys):
-    store, rid, _, _ = state
+    store, rid, _ = state
     store.append_event(
         rid,
         "budget.stop",
@@ -94,37 +159,24 @@ def test_status_explains_budget_stop_from_journal(state, capsys):
     store.update_run(rid, status="BUDGET_STOP")
     assert call(state, ["status", rid]) == 0
     output = capsys.readouterr().out
-    assert "skeptic" in output and "token_limit" in output
+    assert "S6" in output and "skeptic" in output and "token_limit" in output
     assert "63979/60000" in output
 
 
-def test_answer_twice_exit_2(state, capsys):
-    assert call(state, ["answer", state[1], state[2].id, "yes"]) == 0
-    before = state[0].events(state[1])
-    assert call(state, ["answer", state[1], state[2].id, "no"]) == 2
-    assert "already answered" in capsys.readouterr().err
-    assert state[0].events(state[1]) == before
-
-
 def test_approve_stale_version_exit_2(state, capsys):
-    store, rid, _, _ = state
-    store.add_version(rid, design(), author="design", parent=1)
-    store.update_run(rid, status="REVIEWABLE")
-    assert call(state, ["approve", rid, "--version", "1", "--by", "PI"]) == 2
-    assert "latest version" in capsys.readouterr().err
-    assert store.approvals(rid) == []
+    assert call(state, ["approve", state[1], "--version", "9", "--by", "PI"]) == 2
+    assert "current version" in capsys.readouterr().err
+    assert state[0].approvals(state[1]) == []
 
 
-def test_approve_then_export_has_approval(state, tmp_path):
-    store, rid, _, _ = state
-    store.add_version(rid, design(), author="design", parent=1)
-    store.update_run(rid, status="REVIEWABLE")
-    assert call(state, ["approve", rid, "--version", "2", "--by", "PI"]) == 0
+def test_approve_then_export_has_exact_approval_without_provider(state, tmp_path):
+    store, rid, _ = state
+    assert call(state, ["approve", rid, "--version", "1", "--by", "PI"]) == 0
     assert call(state, ["export", rid, "--out", str(tmp_path / "final")]) == 0
     data = json.loads((tmp_path / "final/experiment_design.json").read_bytes())
-    assert data["provenance"]["approval"]["version"] == 2
+    assert data["provenance"]["approval"]["version"] == 1
     assert data["provenance"]["approval"]["design_hash"] == store.version(rid).design_hash
-    assert "Approved by PI" in (tmp_path / "final/experiment_design.md").read_text(encoding="utf-8")
+    assert store.run(rid).status == "PUBLISHED"
 
 
 def test_unknown_run_exit_2(state, capsys):
@@ -132,41 +184,71 @@ def test_unknown_run_exit_2(state, capsys):
     assert "unknown run" in capsys.readouterr().err
 
 
-def test_run_with_scripted_deps(state, monkeypatch, capsys):
-    d = design()
-    d.claim = Claim(
-        estimand=ClaimField(value="ITT difference in class means", origin="designer_default")
-    )
-    d.sampling.cluster.icc.provenance = "assumption"
-    d.sampling.cluster.icc.source_ref = None
-    scripted = Deps(
-        Store(state[3].parent / "exd.db"),
-        ScriptedLLM(
-            [
-                submit(
-                    "submit_design",
-                    {
-                        "design": d.model_dump(mode="json"),
-                        "rationale": "Draft",
-                    },
-                )
-            ]
-        ),
-        ScriptedJudge([{"next_action": "STOP"}]),
-        RunConfig(),
-    )
-    monkeypatch.setattr(cli, "build_deps", lambda _: scripted)
-    assert call(state, ["run", str(EXAMPLE)]) == 0
-    assert "run r" in capsys.readouterr().out
-
-
-def test_run_bad_hypothesis_file_exit_2(state, monkeypatch, tmp_path, capsys):
-    bad = tmp_path / "bad.md"
-    bad.write_text("# Question\n## Hypothesis\nStatement\n## Outcomes\n", encoding="utf-8")
+def test_unreadable_source_rejected_before_provider(state, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("EXD_LLM_API_KEY", "x")
 
     def forbidden(_):
-        pytest.fail("Dependencies constructed for malformed input")
+        pytest.fail("Dependencies constructed before source intake")
 
     monkeypatch.setattr(cli, "build_deps", forbidden)
-    assert call(state, ["run", str(bad)]) == 2
-    assert "line 4" in capsys.readouterr().err
+    assert call(state, ["run", str(tmp_path / "missing.md")]) == 2
+    assert "missing.md" in capsys.readouterr().err
+
+
+def test_explicit_resume_ceiling_is_persisted_without_resetting_usage(state, monkeypatch):
+    monkeypatch.setenv("EXD_LLM_API_KEY", "x")
+    observed = []
+
+    def build(cfg):
+        deps = Deps(Store(cfg.store), ScriptedLLM([]), ScriptedJudge([]), cfg.run)
+        observed.append(deps)
+        return deps
+
+    monkeypatch.setattr(cli, "build_deps", build)
+    before = state[0].usage(state[1]).llm_tokens
+    assert (
+        call(
+            state,
+            [
+                "resume",
+                state[1],
+                "--llm-token-limit",
+                "400000",
+                "--reason",
+                "PI authorizes more work",
+            ],
+        )
+        == 0
+    )
+    assert state[0].usage(state[1]).llm_tokens == before
+    event = [e for e in state[0].events(state[1]) if e.type == "budget.changed"][-1]
+    assert event.data == {"old": 300000, "new": 400000, "reason": "PI authorizes more work"}
+    assert call(state, ["resume", state[1]]) == 0
+    assert observed[-1].run.llm_tokens == 400000
+
+
+def test_request_changes_alias_uses_final_decision_without_provider(state):
+    store, run, _ = state
+    final = store.decisions(run)[-1]
+    assert (
+        call(
+            state,
+            [
+                "request-changes",
+                run,
+                "Clarify assignment",
+                "--path",
+                "/sampling/randomization",
+                "--revision",
+                str(final.revision),
+                "--by",
+                "PI",
+            ],
+        )
+        == 0
+    )
+    recorded = store.decision(run, final.id)
+    assert recorded.responses[-1].action == "REQUEST_CHANGES"
+    assert recorded.responses[-1].text == "Clarify assignment"
+    assert recorded.responses[-1].researcher == "PI"
+    assert store.version(run).version == 1

@@ -6,12 +6,15 @@ import shlex
 import sys
 from collections import Counter
 from pathlib import Path
+from uuid import uuid4
 
 from dotenv import load_dotenv
 
-from experiment_design.config import ConfigError, ExdConfig, load_config
+from experiment_design.config import ConfigError, ExdConfig, RunConfig, load_config
+from experiment_design.contracts import DecisionResponse
+from experiment_design.decisions import respond
 from experiment_design.output import export, render_markdown
-from experiment_design.package import PackageFormatError, all_sources, load_package
+from experiment_design.package import PackageFormatError, all_sources, snapshot_sources
 from experiment_design.runtime.jev import JudgeError, TypeSafeJudge
 from experiment_design.runtime.llm import LLMClient, LLMError
 from experiment_design.runtime.store import Store
@@ -43,7 +46,26 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=Path("exd.yaml"))
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run")
-    run.add_argument("hypothesis", type=Path)
+    run.add_argument("hypothesis", type=Path, nargs="+")
+    decide = commands.add_parser("decide")
+    decide.add_argument("run")
+    decide.add_argument("decision")
+    decide.add_argument("--revision", type=int, required=True)
+    decide.add_argument(
+        "--action",
+        choices=[
+            "SELECT_OPTION",
+            "PROPOSE_ALTERNATIVE",
+            "DEFER",
+            "REQUEST_CHANGES",
+            "REJECT",
+            "HOLD",
+        ],
+        required=True,
+    )
+    decide.add_argument("--option")
+    decide.add_argument("--text", default="")
+    decide.add_argument("--by", required=True)
     for command in ("resume", "status", "review", "answer", "request-changes", "approve", "export"):
         sub = commands.add_parser(command)
         sub.add_argument("run")
@@ -53,12 +75,17 @@ def _parser() -> argparse.ArgumentParser:
         elif command == "request-changes":
             sub.add_argument("text")
             sub.add_argument("--path")
+            sub.add_argument("--by", required=True)
+            sub.add_argument("--revision", type=int, required=True)
         elif command == "approve":
             sub.add_argument("--version", type=int, required=True)
             sub.add_argument("--by", required=True)
         elif command == "export":
             sub.add_argument("--out", type=Path, required=True)
             sub.add_argument("--version", type=int)
+        elif command == "resume":
+            sub.add_argument("--llm-token-limit", type=int)
+            sub.add_argument("--reason", default="Explicit operator budget increase")
     return parser
 
 
@@ -71,6 +98,7 @@ def _prefix(config: Path) -> str:
 def _status(store: Store, rid: str, config: Path) -> None:
     record, version, usage = store.run(rid), store.version(rid), store.usage(rid)
     print(f"status: {record.status}")
+    print(f"stage: {record.stage_id or 'legacy'}; schema: {record.schema_version}")
     print(f"latest version: {version.version if version else 0}")
     print(f"reviewed version: {record.reviewed_version}")
     counts = Counter(issue.status for issue in store.issues(rid))
@@ -101,6 +129,21 @@ def _status(store: Store, rid: str, config: Path) -> None:
         if request.status == "open":
             print(request.question)
             print(f'  {_prefix(config)} answer {rid} {request.id} "<your answer>"')
+    if record.schema_version == 2:
+        for decision in store.decisions(rid):
+            if decision.status == "AWAITING_RESEARCHER":
+                print(f"decision {decision.id} revision {decision.revision}: {decision.problem}")
+                if decision.purpose == "scientific":
+                    print(
+                        f"  {_prefix(config)} decide {rid} {decision.id} "
+                        f"--revision {decision.revision} "
+                        '--action PROPOSE_ALTERNATIVE --text "<your answer>" --by "<your name>"'
+                    )
+                else:
+                    print(
+                        f"  {_prefix(config)} approve {rid} --version {version.version} "
+                        '--by "<your name>"'
+                    )
 
 
 def _read_command(store: Store, args) -> None:
@@ -112,6 +155,9 @@ def _read_command(store: Store, args) -> None:
         run, version = store.run(rid), store.version(rid)
         if version is None:
             raise WorkflowError("No design version exists yet")
+        if run.schema_version == 2:
+            print(render_markdown(store.publication_snapshot(rid)), end="")
+            return
         approvals = [
             a
             for a in store.approvals(rid)
@@ -135,8 +181,26 @@ def _read_command(store: Store, args) -> None:
         print(f"answered {args.request}")
         if not any(r.status == "open" for r in store.requests(rid)):
             print(f"next: {prefix} resume {rid}")
+    elif args.command == "decide":
+        respond(
+            store,
+            rid,
+            args.decision,
+            DecisionResponse(
+                revision=args.revision,
+                action=args.action,
+                option_id=args.option,
+                text=args.text,
+                researcher=args.by,
+                response_id="response:" + uuid4().hex,
+            ),
+        )
+        print(f"recorded decision {args.decision}")
+        print(f"next: {prefix} resume {rid}")
     elif args.command == "request-changes":
-        request_changes(store, rid, args.text, args.path)
+        request_changes(
+            store, rid, args.text, args.path, researcher=args.by, revision=args.revision
+        )
         print(f"next: {prefix} resume {rid}")
     elif args.command == "approve":
         approve(store, rid, args.version, args.by)
@@ -151,12 +215,30 @@ def main(argv: list[str] | None = None) -> int:
     deps, store = None, None
     try:
         load_dotenv(dotenv_path=Path(".env"), override=False)
-        cfg = load_config(args.config)
+        cfg = load_config(args.config, require_provider_keys=args.command in {"run", "resume"})
         if args.command in {"run", "resume"}:
-            package = load_package(args.hypothesis) if args.command == "run" else None
+            package = snapshot_sources(args.hypothesis) if args.command == "run" else None
             deps = build_deps(cfg)
             store = deps.store
             rid = start_run(package, deps, cfg.model_dump(mode="json")) if package else args.run
+            if args.command == "resume" and store.run(rid).config.get("run"):
+                deps.run = cfg.run = RunConfig.model_validate(store.run(rid).config["run"])
+            if args.command == "resume" and args.llm_token_limit is not None:
+                record = store.run(rid)
+                if record.schema_version != 2:
+                    raise WorkflowError("schema-1 run cannot resume")
+                old = record.config.get("run", {}).get("llm_tokens", cfg.run.llm_tokens)
+                if args.llm_token_limit <= old:
+                    raise WorkflowError("new token ceiling must exceed current ceiling")
+                store.append_event(
+                    rid,
+                    "budget.changed",
+                    {"old": old, "new": args.llm_token_limit, "reason": args.reason},
+                )
+                cfg.run.llm_tokens = args.llm_token_limit
+                config = record.config | {"run": cfg.run.model_dump()}
+                store.update_run(rid, config=config)
+                deps.run = cfg.run
             try:
                 status = advance(rid, deps)
             except (LLMError, JudgeError):
@@ -177,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         KeyError,
         LLMError,
         JudgeError,
+        ValueError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

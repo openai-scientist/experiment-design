@@ -57,6 +57,7 @@ def test_independent_cohort_has_atomic_publication_barrier(tmp_path):
     assert finding["mechanism"] not in context_brief(ctx)
     assert build_tools(ctx)["read_issues"].handler({}) == []
     assert validate_refs(["tool:private-method-call"], ctx)
+    store.save_task(run, store.task(skeptic.id).model_copy(update={"status": "completed"}))
     with pytest.raises(ValueError, match="submission"):
         publish_cohort(store, run, cohort.id)
     assert store.issues(run) == []
@@ -118,5 +119,40 @@ def test_revision_parent_and_verification_guard(tmp_path):
     before = store.events(run)
     with pytest.raises(ValueError, match="parent"):
         commit_revision(store, run, parent=1, patch=patch, issue_ids=[issue.id])
+    assert store.events(run) == before
+    store.close()
+
+
+def test_cohort_keeps_bound_context_and_rejects_membership_rewrite(tmp_path):
+    from test_decisions import decision_state
+
+    from experiment_design.agents.tools import build_tools
+    from experiment_design.contracts import AgentTask, TaskBudget
+    from experiment_design.review import review_context, start_cohort
+
+    store, run, context, _ = decision_state(tmp_path)
+    cohort = start_cohort(store, run, store.binding(run))
+    task = AgentTask(
+        id=cohort.member_task_ids["methodologist"],
+        binding=cohort.binding,
+        cohort_id=cohort.id,
+        objective="Review",
+        package_ref=context.package.id,
+        design_version=1,
+        budget=TaskBudget(max_turns=5, max_tokens=1000),
+        allowed_tools=[],
+        exit_conditions=[],
+    )
+    ctx = review_context(store, run, task)
+    changed = context.model_copy(deep=True)
+    changed.revision = 2
+    changed.package.research_question = "New question after review began"
+    store.save_context(run, changed)
+    observed = build_tools(ctx)["read_context"].handler({})
+    assert observed["revision"] == 1
+    assert observed["package"]["research_question"] == context.package.research_question
+    before = store.events(run)
+    with pytest.raises(ValueError, match="immutable"):
+        store.save_cohort(cohort.model_copy(update={"binding": store.binding(run)}))
     assert store.events(run) == before
     store.close()

@@ -285,6 +285,8 @@ def calculate(request: CalculationRequest) -> CalculationResult:
     method = design.analysis.method_id or "unsupported"
     result = CalculationResult(
         id="calc:" + digest,
+        scenario_id=request.scenario_id,
+        counterfactual=bool(request.overrides or request.preview_patch),
         request_hash=digest,
         binding=request.binding,
         method_id=method,

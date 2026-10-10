@@ -11,9 +11,7 @@ from experiment_design.contracts import (
     CLAIM_FIELDS,
     ClaimField,
     Design,
-    Origin,
     Patch,
-    PatchOp,
     ResearchContext,
     ResearcherDecision,
     ScientificPackage,
@@ -46,7 +44,9 @@ def package_claim(package: ScientificPackage) -> dict[str, str | float | None]:
     }
 
 
-def initial_design(package: ScientificPackage, proposed: Design) -> Design:
+def initial_design(
+    package: ScientificPackage, proposed: Design, context: ResearchContext | None = None
+) -> Design:
     result = proposed.model_copy(deep=True)
     errors = []
     for name, known in package_claim(package).items():
@@ -54,9 +54,26 @@ def initial_design(package: ScientificPackage, proposed: Design) -> Design:
         if known is not None:
             if field.value is not None and field.value != known:
                 errors.append(f"{name} is researcher-owned; proposed value differs from package")
-            setattr(result.claim, name, ClaimField(value=known, origin="package"))
+            annotation = context.field_annotations.get(name) if context else None
+            origin = (
+                "designer_default"
+                if context is not None
+                and (annotation is None or annotation.status in {"agent-proposed", "unknown"})
+                else "package"
+            )
+            if annotation and annotation.status == "researcher-confirmed":
+                origin = "researcher"
+            setattr(result.claim, name, ClaimField(value=known, origin=origin))
         else:
             field.origin = "designer_default" if field.value is not None else "missing"
+    method_annotation = context.field_annotations.get("/analysis/model") if context else None
+    if (
+        method_annotation
+        and method_annotation.status in {"source-stated", "researcher-confirmed"}
+        and package.hypothesis.method
+        and result.analysis.model != package.hypothesis.method
+    ):
+        errors.append("analysis/model is researcher-owned; proposed SAP differs from source")
     if errors:
         raise PatchError(errors)
     return result
@@ -215,24 +232,6 @@ def _apply_patch(design: Design, patch: Patch, *, source_ids: set[str], author: 
             errors.append(f"{path}: unknown source_ref {quantity['source_ref']}")
     if errors:
         raise PatchError(errors)
-    return result
-
-
-def set_claim(design: Design, field: str, value: str | float, origin: Origin) -> Design:
-    if field not in CLAIM_FIELDS or origin != "researcher":
-        raise PatchError(["Only researcher answers may set a known claim field"])
-    source_ids = {
-        q["source_ref"]
-        for _, q in quantities(design.model_dump(mode="json"))
-        if q["provenance"] == "source"
-    }
-    result = _apply_patch(
-        design,
-        Patch(ops=[PatchOp(path=f"/claim/{field}", value=value)], rationale="Researcher answer"),
-        source_ids=source_ids,
-        author="researcher",
-    )
-    getattr(result.claim, field).origin = origin
     return result
 
 

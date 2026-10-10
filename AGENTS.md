@@ -1,18 +1,23 @@
 # Experiment Design
 
 ## Purpose
-Turn a researcher-written Scientific Package into an experiment design through
-four tool-using agents, independent verification and researcher review. Export
+Turn researcher Markdown into a source snapshot and provenance-aware research
+context, then an experiment design through seven owned stages, independent
+review and qualification, and explicit researcher decisions. Export
 a readable EDP and authoritative JSON from the same canonical design version.
 
 ## Layout
 - `contracts.py`: scientific and workflow records.
 - `config.py`: YAML configuration and environment variable names.
-- `package.py`: hypothesis Markdown parser and intake.
+- `package.py`: exact Markdown intake and referenced source snapshots.
 - `patch.py`: validated design changes, ownership, diff and hash.
-- `workflow.py`: legal actions, JEV decisions and researcher commands.
+- `stages.py`: seven responsibilities and permitted returns.
+- `workflow.py`: stage progression and legal JEV coordination.
+- `decisions.py`: researcher response, authorized application and reconciliation.
+- `review.py`: independent cohort barrier, patches and verification.
+- `qualification.py`: version-bound readiness and exact approval.
 - `output.py`: human-first rendering and versioned export.
-- `cli.py`: run, resume, status, review, answer, approve and export.
+- `cli.py`: run, resume, status, review, decide, approve and export.
 - `runtime/store.py`: SQLite records and append-only journal.
 - `runtime/llm.py`: OpenAI-compatible tool-calling client.
 - `runtime/jev.py`: TypeSafe workflow judge.
@@ -53,7 +58,12 @@ Keep tool schemas and earlier messages stable within an agent task for provider
 prefix caching. Record reported cache hits separately from missing cache telemetry;
 cached input still counts toward token budgets. Do not replay cached LLM answers
 for independent review or verification. Budget stops record their scope and reason
-in the journal and appear in CLI status.
+in the journal and appear in CLI status. Reserve verifier and handoff allowance
+before optional coordination. Explicit resume budget increases preserve used tokens.
+Schema-1 runs support historical reads/exports only; never silently migrate their
+scientific meaning. Qualification and publication use bound observations, never
+recompute numbers while rendering. Researcher responses record exact revision,
+identity and timestamp; final review uses the same ResearcherDecision lifecycle.
 
 ## Testing rules
 Each test protects a user-visible or downstream contract: statistical references,

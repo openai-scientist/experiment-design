@@ -1,80 +1,74 @@
 # Researcher-reviewed pilot
 
-`exd status RUN` explains new budget stops with their scope (task or run), reason
-(tokens, turns or actions), agent and applicable limits. Earlier journals can lack
-the reason. A task's token ceiling counts cumulative input and output across calls;
-the final response can cross it before its tool calls are executed. Resume reruns
-an unfinished review action, including a methodologist task that already succeeded.
+The core accepts one or more researcher Markdown files without prescribed headings.
+S1 preserves exact supplied text and reachable local text attachments; S2 records
+scientific understanding, provenance, contradictions and unresolved decisions.
+The seven responsibilities and their evidence are described in
+[stage responsibility](stage-responsibility.md). See [paired evaluation](paired-evaluation.md)
+for the frozen baseline comparison and acceptance requirements.
 
-Provider prompt caching can reuse stable tool schemas and earlier conversation
-prefixes. Support depends on the configured provider/model. Usage reports
-`llm_cached_tokens_reported` and `llm_cache_usage_missing_calls`: missing telemetry
-does not establish either a hit or a miss. Cache hits remain included in the task
-and run token ceilings; no billing estimate or token discount is inferred. The
-client generates a fresh LLM response on every call and sends no provider-specific
-cache options. See the [OpenAI caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
-for provider behavior; an OpenAI-compatible gateway need not expose every option.
-
-Before a live run, review `hypothesis.example.md`: confirm the claim, the 3-point margin,
-the available classes and the operational constraints. Replace the draft district note
-with real data supporting the standard deviation. Confirm or revise the assumed ICC and
-class size. The estimand is deliberately absent; answer the resulting request or review
-any explicitly labeled default before approval.
-
-The draft calculation uses standard deviation 10 points, ICC 0.10, class size 25, expected
-AI–teacher difference 0, and one-sided alpha 0.025. It needs 24 classes per arm for 80%
-power; 20 classes per arm give about 73%. One-sided alpha 0.05 gives about 82% power at
-20 classes per arm, with a different error threshold. The design must explain this
-trade-off and preserve the researcher-owned margin.
-
-Run commands from the repository root. Install with `uv sync`, copy `exd.example.yaml`
-to `exd.yaml`, and set the actual tool-calling provider URL and model. Set
-`EXD_LLM_API_KEY` and `TYPESAFE_API_KEY` in the environment or the local `.env` file.
-The YAML stores environment variable names, not credentials. Use `uv run exd` in place
-of `exd` if the virtual environment is not activated. Choose the run date for `<date>`
-and substitute the printed ID for `<run>` and request ID for `<request>`.
-
-Preserve the reviewed input and configuration before running (PowerShell `cp` is an
-alias for `Copy-Item`; create the directory first):
+Install with `uv sync`, copy `exd.example.yaml` to an ignored local configuration,
+and set the configured LLM and TypeSafe key environment variables. YAML contains
+variable names, never secrets. Commands that read artifacts, record researcher
+responses, approve or export do not need provider credentials.
 
 ```text
-mkdir pilot/runs/<date>
-cp hypothesis.example.md pilot/runs/<date>/hypothesis.md
-cp exd.yaml pilot/runs/<date>/config.yaml
-exd run pilot/runs/<date>/hypothesis.md
+uv run exd --config pilot/runs/<date>/config.yaml run <source.md> <additional.md>
+uv run exd --config pilot/runs/<date>/config.yaml status <run>
+uv run exd --config pilot/runs/<date>/config.yaml review <run>
+uv run exd --config pilot/runs/<date>/config.yaml decide <run> <decision> --revision <n> --action SELECT_OPTION --option <id> --by "<researcher>"
+uv run exd --config pilot/runs/<date>/config.yaml decide <run> <decision> --revision <n> --action PROPOSE_ALTERNATIVE --text "<actual researcher answer>" --by "<researcher>"
+uv run exd --config pilot/runs/<date>/config.yaml resume <run>
 ```
 
-Review the output and answer each pending question with actual researcher information:
+Responses preserve raw intent and identity with a timestamp. Recording a response
+does not call a provider. Resume interprets its authorized scope, applies changes
+and requires reconciliation and independent verification. Alternatives need not
+match suggested options. DEFER retains a pending scientific decision. The old
+`answer` command gives a migration message. `request-changes` is a final-decision
+alias that also requires `--revision` and `--by`; optional `--path` narrows its scope.
+
+Final review uses the same decision record. REQUEST_CHANGES, REJECT and HOLD use
+`decide` with the presented revision; approval requires the exact current design,
+current qualification and a complete scientific handoff.
 
 ```text
-exd status <run>
-exd review <run>
-exd answer <run> <request> "<researcher answer>"
-exd resume <run>
+uv run exd --config <config> decide <run> <final-decision> --revision <n> --action REQUEST_CHANGES --text "<change>" --by "<researcher>"
+uv run exd --config <config> approve <run> --version <latest> --by "<researcher>"
+uv run exd --config <config> export <run> --out pilot/runs/<date>/final
+uv run exd --config <config> export <run> --version 1 --out pilot/runs/<date>/initial
 ```
 
-For a requested change or version-bound human approval:
+Each export has Markdown, authoritative JSON and a checksum manifest from one
+historical snapshot. Export a draft for inspection without implying approval.
+Publication completes S7 only with current approval; a different or incomplete
+existing destination is refused. Preserve all source files, actual decisions and
+exports. Use `Store.backup(target)` for a consistent SQLite evidence copy.
+
+`status` displays stage, outstanding decisions, usage and journaled stop scope and
+reason. Stable task schemas and transcripts support provider prefix caching;
+cache telemetry reports hits separately from missing telemetry. Cached tokens
+remain charged to budgets. A committed reviewer submission survives interruption;
+it is reused for the same task, while each independent reviewer uses fresh provider
+responses. Uncommitted external responses may be retried; this is not exactly-once
+provider execution. Review observations stay private until both cohort members have
+submitted on the same frozen input.
+
+Resume preserves cumulative run usage and task limits. An explicit operator increase
+of the run token ceiling is recorded with old/new limits and a reason:
 
 ```text
-exd request-changes <run> "<required change>" --path /analysis
-exd approve <run> --version <latest-version> --by "<researcher name>"
+uv run exd --config <config> resume <run> --llm-token-limit 400000 --reason "<operator reason>"
 ```
 
-Save both versions for comparison. Each directory receives `experiment_design.md`, `experiment_design.json` and
-`manifest.json` from the selected canonical version:
+The example AI-feedback source is explicitly a draft. Its SD/ICC/size assumptions
+are not district evidence. Confirm the estimand, scientific intent, planning inputs,
+SAP and available classes before a scientific acceptance run. Supported t methods
+and independent R references are documented in
+[statistical methods](../docs/statistical-methods.md); older normal approximations
+cannot certify those methods or a mixed-model SAP. Unsupported inputs remain
+`not_computed`. Never relabel a source-specified method to obtain a passing number.
 
-```text
-exd export <run> --out pilot/runs/<date>/final
-exd export <run> --version 1 --out pilot/runs/<date>/initial
-```
-
-If using a custom configuration, put `--config pilot/runs/<date>/config.yaml` before the
-command on every invocation. Keep the SQLite store and journal with the run evidence;
-the journal records task results, accepted tool calls, decisions and usage. Resume uses
-the last committed action after interruption. Archive the store after the run has stopped.
-
-Copy `pilot/scorecard.md` into the run directory and have a researcher complete it against
-both exports and the journal. Record material concerns, independent verification,
-improvement or regression, effort and provider costs. Keep the original input snapshot
-when later answers clarify the claim. Do not score a run using the draft source as real
-district evidence.
+Copy the [scorecard](scorecard.md) into each local run directory. Both acceptance
+axes require evidence; missing researcher inputs or independent human review leave
+Pilot 2 NOT_PROVEN. Generated provider logs and source evidence stay ignored locally.

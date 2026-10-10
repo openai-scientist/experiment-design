@@ -2,11 +2,14 @@
 
 import hashlib
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 from experiment_design.contracts import (
     Approval,
     DesignVersion,
+    PublicationSnapshot,
     Quantity,
     ResearcherRequest,
     ReviewIssue,
@@ -46,7 +49,7 @@ def _quantity(q: Quantity | None, sources: list[Source]) -> str:
     return f"{_number(q.value)} {q.unit} {provenance}{note}".strip()
 
 
-def render_markdown(
+def render_legacy_markdown(
     package: ScientificPackage,
     sources: list[Source],
     version: DesignVersion,
@@ -247,6 +250,223 @@ def render_markdown(
     return "\n".join(lines).replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n"
 
 
+def render_markdown(snapshot: PublicationSnapshot | ScientificPackage, *args, **kwargs) -> str:
+    if isinstance(snapshot, ScientificPackage):
+        return render_legacy_markdown(snapshot, *args, **kwargs)
+    d = snapshot.version.design
+    p = snapshot.context.package
+    lines = [
+        f"# {p.research_question}",
+        "",
+        f"Approved by {snapshot.approval.approver}"
+        if snapshot.approval
+        else "Draft — not approved",
+        f"Design version {snapshot.version.version}",
+    ]
+
+    def section(title):
+        lines.extend(["", title, ""])
+
+    def item(label, value):
+        lines.append(f"- {label}: {value if value not in {None, ''} else 'Not specified'}")
+
+    def claim(name):
+        field = getattr(d.claim, name)
+        value = _number(field.value) if isinstance(field.value, (int, float)) else field.value
+        return str(value or "Not specified") + (
+            " (provisional; researcher decision needed)"
+            if field.origin in {"designer_default", "missing"}
+            else ""
+        )
+
+    section("## 1. Research intent and scientific conclusion")
+    for name in ("hypothesis", "prediction", "failure_condition", "inference_scope", "estimand"):
+        item(name.replace("_", " ").capitalize(), claim(name))
+    section("## 2. Design rationale and conditions")
+    for choice in d.rationale:
+        item(choice.choice, choice.why)
+        item("Trade-offs", choice.tradeoffs)
+    for condition in d.conditions:
+        item(f"{condition.name} ({condition.role})", condition.description)
+    section("## 3. Sampling, allocation and assignment")
+    for name in (
+        "population",
+        "inclusion",
+        "exclusion",
+        "allocation",
+        "randomization",
+        "unit_of_randomization",
+        "unit_of_analysis",
+        "repetitions",
+        "n_per_arm",
+    ):
+        item(name.replace("_", " ").capitalize(), getattr(d.sampling, name))
+    if d.sampling.cluster:
+        cluster = d.sampling.cluster
+        item("Clusters per arm", cluster.clusters_per_arm)
+        item("Cluster size", _quantity(cluster.size, p.sources))
+        item("ICC", _quantity(cluster.icc, p.sources))
+    section("## 4. Measurement and missing data")
+    metric = d.measurement.primary_metric
+    if metric:
+        item(
+            "Primary outcome",
+            f"{metric.name} ({metric.unit}), {metric.operationalization}; {metric.timing}",
+        )
+    for metric in d.measurement.secondary_metrics:
+        item("Secondary measure", f"{metric.name}: {metric.operationalization}")
+    item("Data collection", d.measurement.data_collection)
+    item("Missingness", d.measurement.missingness)
+    section("## 5. Statistical analysis and uncertainty")
+    for name in (
+        "method_id",
+        "model",
+        "sidedness",
+        "alpha",
+        "uncertainty",
+        "decision_rule",
+        "multiplicity",
+        "stopping",
+    ):
+        item(name.replace("_", " ").capitalize(), getattr(d.analysis, name))
+    item("Contrast", claim("contrast_type"))
+    item("Margin", claim("margin") + " " + claim("outcome_unit"))
+    for sensitivity in d.analysis.sensitivity:
+        item("Sensitivity", sensitivity)
+    section("## 6. Power and recruitment feasibility")
+    if not snapshot.calculations:
+        lines.append("Not computed: no version-bound production calculation is available.")
+    for c in snapshot.calculations:
+        if c.status != "computed":
+            lines.append("Not computed: " + "; ".join(c.reasons))
+            continue
+        item("Planning method", c.method_id)
+        item("Power", _number(c.power))
+        item("Required participants per arm", c.required_n_per_arm)
+        if c.required_clusters_per_arm is not None:
+            item("Required clusters per arm", c.required_clusters_per_arm)
+        item("Degrees of freedom", c.df)
+        for name, value in c.normalized_inputs.items():
+            item(f"{name} ({c.input_provenance.get(name, 'unknown')})", _number(value))
+        for assumption in c.assumptions:
+            item("Planning assumption", assumption)
+        lines.append(
+            "Power is computed under these assumptions. MDE/precision are not reference-validated."
+        )
+    section("## 7. Execution protocol and stopping policy")
+    for number, step in enumerate(d.protocol.steps, 1):
+        lines.append(f"{number}. {step}")
+    for resource in d.protocol.resources:
+        item("Resource", resource)
+    item("Feasibility", d.protocol.feasibility)
+    for stop in d.protocol.stop_conditions:
+        item("Stop condition", stop)
+    section("## 8. Validity, assumptions and limitations")
+    for risk in d.validity:
+        item(risk.threat, f"{risk.mechanism}; mitigation: {risk.mitigation or 'Not specified'}")
+    for issue in snapshot.issues:
+        if issue.status not in {"resolved", "duplicate"}:
+            item(issue.status, f"{issue.mechanism}; {issue.consequence}")
+    for assumption in d.assumptions:
+        item("Assumption", assumption.statement)
+    for limitation in p.hypothesis.limitations:
+        item("Limitation", limitation)
+    section("## 9. Researcher decisions and readiness")
+    for decision in snapshot.decisions:
+        item(decision.status, decision.problem)
+        for response in decision.responses:
+            item(
+                f"{response.action} by {response.researcher}",
+                response.text or response.option_id or "Exact version",
+            )
+    if snapshot.assessment:
+        item("Review status", snapshot.assessment.review_status)
+        item(
+            "Scientific handoff",
+            "Complete" if snapshot.assessment.handoff_complete else "Incomplete",
+        )
+        for blocker in snapshot.assessment.blockers:
+            item("Blocker", blocker)
+    else:
+        item("Qualification", "Missing or stale")
+    for action in d.handoff:
+        item("Handoff", action)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _export_snapshot(
+    store: Store, run_id: str, out_dir: Path, version: int | None
+) -> dict[str, Path]:
+    snapshot = store.publication_snapshot(run_id, version)
+    support = snapshot.model_dump(mode="json", exclude={"run", "binding"})
+    support_hash = hashlib.sha256(json.dumps(support, sort_keys=True).encode()).hexdigest()
+    data = {
+        "schema_version": 2,
+        "run_id": run_id,
+        "version": snapshot.version.version,
+        "binding": snapshot.binding.model_dump(),
+        "context": snapshot.context.model_dump(mode="json"),
+        "design": snapshot.version.design.model_dump(mode="json"),
+        "computed": [c.model_dump(mode="json") for c in snapshot.calculations],
+        "provenance": {
+            "design_sha256": snapshot.version.design_hash,
+            "approval": snapshot.approval.model_dump(mode="json") if snapshot.approval else None,
+        },
+        "issues": [i.model_dump(mode="json") for i in snapshot.issues],
+        "decisions": [d.model_dump(mode="json") for d in snapshot.decisions],
+        "assessment": snapshot.assessment.model_dump(mode="json") if snapshot.assessment else None,
+    }
+
+    def encoded(obj):
+        return (json.dumps(obj, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode(
+            "utf-8"
+        )
+
+    payloads = {
+        "experiment_design.md": render_markdown(snapshot).encode("utf-8"),
+        "experiment_design.json": encoded(data),
+    }
+    manifest = {
+        "schema_version": 2,
+        "run_id": run_id,
+        "version": snapshot.version.version,
+        "design_hash": snapshot.version.design_hash,
+        "binding": snapshot.binding.model_dump(),
+        "support_hash": support_hash,
+        "files": [
+            {"path": name, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+            for name, raw in payloads.items()
+        ],
+    }
+    payloads["manifest.json"] = encoded(manifest)
+    if out_dir.exists():
+        try:
+            existing = json.loads((out_dir / "manifest.json").read_bytes())
+            matches = existing["support_hash"] == support_hash and all(
+                hashlib.sha256((out_dir / f["path"]).read_bytes()).hexdigest() == f["sha256"]
+                for f in existing["files"]
+            )
+        except (OSError, ValueError, KeyError):
+            matches = False
+        if not matches:
+            raise ValueError("destination contains a different or incomplete publication")
+        manifest = existing
+    else:
+        out_dir.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".edp-", dir=out_dir.parent))
+        try:
+            for name, raw in payloads.items():
+                (temporary / name).write_bytes(raw)
+            temporary.rename(out_dir)
+        finally:
+            if temporary.exists():
+                if temporary.resolve().parent != out_dir.parent.resolve():
+                    raise ValueError("temporary publication path escaped its parent")
+                shutil.rmtree(temporary)
+    store.record_publication(run_id, snapshot.binding, manifest)
+    return {name: out_dir / name for name in payloads}
+
+
 def _concerns(issues: list[ReviewIssue], version: int, latest: int) -> list[ReviewIssue]:
     if version == latest:
         return [
@@ -271,6 +491,8 @@ def export(
     version: int | None = None,
 ) -> dict[str, Path]:
     run = store.run(run_id)
+    if run.schema_version == 2:
+        return _export_snapshot(store, run_id, Path(out_dir), version)
     latest, selected = store.version(run_id), store.version(run_id, version)
     if selected is None or latest is None:
         raise WorkflowError(f"unknown design version {version} for run {run_id}")
@@ -292,7 +514,7 @@ def export(
         if a.version == selected.version and a.design_hash == selected.design_hash
     ]
     approval = approvals[-1] if approvals else None
-    markdown = render_markdown(
+    markdown = render_legacy_markdown(
         run.package,
         sources,
         selected,

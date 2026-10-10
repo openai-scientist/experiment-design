@@ -75,7 +75,10 @@ def review_actions(store: Store, run_id: str, cfg) -> list[str]:
         and run.revisions_done < cfg.max_revisions
     ):
         actions.append("REVISE")
-    if any(d.status in {"IDENTIFIED", "EXPLORING"} for d in store.decisions(run_id)):
+    if any(
+        d.status in {"IDENTIFIED", "EXPLORING"} and (d.options or d.dependencies)
+        for d in store.decisions(run_id)
+    ):
         actions.append("ASK_RESEARCHER")
     if run.reviewed_version and not any(
         i.severity in {"MAJOR", "BLOCKER"} and i.status not in {"resolved", "duplicate"}

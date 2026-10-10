@@ -1,11 +1,10 @@
 import pytest
-from conftest import design, package
+from conftest import design
 from test_stages import staged
 
 from experiment_design.contracts import (
     DecisionResponse,
     Patch,
-    ResearchContext,
     ResearcherDecision,
 )
 from experiment_design.decisions import apply_decision, clarification_options, interpret, respond
@@ -15,9 +14,9 @@ from experiment_design.runtime.store import Store
 def decision_state(tmp_path):
     store = Store(tmp_path / "decision.db")
     run, _ = staged(store)
-    context = ResearchContext(
-        id="context", revision=1, source_snapshot_id="source-1", package=package()
-    )
+    from test_stage_pipeline import source_context
+
+    context = source_context()
     store.save_context(run, context)
     store.add_version(run, design(), author="design", parent=None)
     d = store.save_decision(
@@ -65,6 +64,8 @@ def test_alternative_records_raw_intent_and_applies_once(tmp_path):
     assert applied.status == "APPLIED"
     assert applied.application["response_id"] == response.response_id
     assert store.version(run).design.claim.margin.value == 2
+    assert store.context(run).package.inference.margin == 2
+    assert store.context(run).revision == 2
     assert applied.verification["status"] == "pending"
     count = len(store.events(run))
     apply_decision(store, run, decision.id, context=context, patch=proposed)
@@ -135,4 +136,62 @@ def test_just_in_time_accepts_either_trigger_without_exhaustive_options(tmp_path
     assert "ASK_RESEARCHER" not in clarification_options(
         decision, informative_options=False, blocks_required_work=False
     )
+    store.close()
+
+
+def test_response_rejects_stale_binding_and_second_answer(tmp_path):
+    store, run, context, decision = decision_state(tmp_path)
+    response = DecisionResponse(
+        revision=1,
+        action="PROPOSE_ALTERNATIVE",
+        text="Two points",
+        researcher="PI",
+        response_id="one",
+    )
+    respond(store, run, decision.id, response)
+    before = store.events(run)
+    with pytest.raises(ValueError, match="awaiting"):
+        respond(store, run, decision.id, response.model_copy(update={"response_id": "two"}))
+    assert store.events(run) == before
+    decision = store.decision(run, decision.id)
+    decision.status = "AWAITING_RESEARCHER"
+    decision.revision += 1
+    store.save_decision(decision)
+    store.save_context(run, context.model_copy(update={"revision": 2}))
+    before = store.events(run)
+    with pytest.raises(ValueError, match="binding"):
+        respond(
+            store,
+            run,
+            decision.id,
+            response.model_copy(update={"revision": 2, "response_id": "three"}),
+        )
+    assert store.events(run) == before
+    store.close()
+
+
+def test_context_interpretation_cannot_change_unapproved_claim(tmp_path):
+    store, run, context, decision = decision_state(tmp_path)
+    answered = respond(
+        store,
+        run,
+        decision.id,
+        DecisionResponse(
+            revision=1,
+            action="PROPOSE_ALTERNATIVE",
+            text="Two points",
+            researcher="PI",
+            response_id="one",
+        ),
+    )
+    changed = context.model_copy(deep=True)
+    changed.revision = 2
+    changed.package.inference.estimand = "A different population effect"
+    with pytest.raises(ValueError, match="scope"):
+        interpret(
+            answered,
+            context,
+            {"authorized": True, "ambiguous": False, "context": changed.model_dump(mode="json")},
+        )
+    assert store.context(run) == context
     store.close()

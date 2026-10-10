@@ -3,7 +3,7 @@
 Run `uv run pytest -q` for the complete local suite. It replaces external
 providers with scripted services while exercising real scientific calculations,
 SQLite storage, workflow, CLI commands and exports. The default command excludes
-the `live` marker. The 2026-10-10 audit measured the suite at 4.79 seconds.
+the `live` marker. The migration suite remains below the 60-second threshold for additional lanes.
 
 During an edit, run the owner file, for example:
 
@@ -31,10 +31,13 @@ These modules also affect commands and exported scientific results.
 | `runtime/llm.py` | `tests/test_llm.py` |
 | `runtime/jev.py` | `tests/test_jev.py` |
 | `runtime/loop.py` | `tests/test_loop.py` |
-| `runtime/store.py` | `tests/test_store.py` |
-| `agents/` | `tests/test_agents.py` |
-| `workflow.py` | `tests/test_workflow.py` |
-| `output.py` | `tests/test_output.py` |
+| `runtime/store.py`, `stages.py` | `tests/test_store.py`, `tests/test_stages.py` |
+| `agents/` | `tests/test_agents.py`, `tests/test_understanding.py` |
+| `decisions.py` | `tests/test_decisions.py` |
+| `review.py` | `tests/test_review.py` |
+| `qualification.py` | `tests/test_qualification.py` |
+| `workflow.py` | `tests/test_workflow.py`, `tests/test_stage_pipeline.py` |
+| `output.py` | `tests/test_output.py`, `tests/test_publication.py` |
 | `cli.py` | `tests/test_cli.py` |
 | Shared contracts, test support, configuration, or an unknown owner | Complete local suite |
 

@@ -2,25 +2,32 @@
 
 import json
 from dataclasses import dataclass, field
-from typing import Literal
+from hashlib import sha256
 
 from pydantic import Field, ValidationError
 
 from experiment_design.contracts import (
-    CLAIM_FIELDS,
     ArtifactBinding,
     CalculationRequest,
+    DecisionOption,
     Design,
     DesignVersion,
     Finding,
     Patch,
     Quantity,
     Record,
-    ResearcherRequest,
+    ResearcherDecision,
     ScientificPackage,
 )
 from experiment_design.package import all_sources, intake_gaps
-from experiment_design.patch import PatchError, apply_patch, design_diff, preview_design, resolve
+from experiment_design.patch import (
+    PatchError,
+    apply_patch,
+    design_diff,
+    preview_design,
+    quantities,
+    resolve,
+)
 from experiment_design.runtime.loop import SubmitRejected, Tool
 from experiment_design.runtime.store import Store
 from experiment_design.science.evidence import lookup_evidence
@@ -46,11 +53,12 @@ class ToolContext:
             self.binding = self.store.binding(self.run_id)
 
 
-class RequestProposal(Record):
-    kind: Literal["decision", "input"]
-    question: str
-    path: str | None = None
-    options: list[str] = Field(default_factory=list)
+class DecisionProposal(Record):
+    problem: str
+    affected_paths: list[str]
+    dependencies: list[str] = Field(default_factory=list)
+    options: list[DecisionOption] = Field(default_factory=list)
+    recommendation: str = ""
 
 
 def sources(ctx: ToolContext):
@@ -99,25 +107,78 @@ def validate_findings(findings: list[Finding], ctx: ToolContext) -> list[str]:
             ref.startswith("tool:") for ref in finding.evidence_refs
         ):
             errors.append("Computation basis requires a tool: evidence ref")
+        if (
+            ctx.binding
+            and finding.basis == "computation"
+            and not computation_refs(ctx).intersection(finding.evidence_refs)
+        ):
+            errors.append(
+                "Computation basis requires an accepted compute_power call from this task"
+            )
         if finding.duplicate_of is not None and finding.duplicate_of not in existing:
             errors.append(f"Unknown duplicate_of {finding.duplicate_of}")
     return errors
 
 
-def requests(proposals: list[RequestProposal], ctx: ToolContext) -> list[dict]:
+def validate_source_quantities(design: Design, ctx: ToolContext) -> None:
+    if ctx.binding is None:
+        return
+    from experiment_design.agents.understanding import supports_number
+
+    known = {s.id: s for s in sources(ctx)}
+    for path, quantity in quantities(design.model_dump(mode="json")):
+        if quantity["provenance"] != "source":
+            continue
+        source = known.get(quantity.get("source_ref"))
+        span = quantity.get("source_span")
+        if (
+            source is None
+            or not span
+            or span not in source.text
+            or not supports_number(quantity.get("value"), span)
+            or quantity.get("unit")
+            and quantity["unit"].casefold() not in span.casefold()
+        ):
+            raise ValueError(f"{path}: source span does not support quantity value and unit")
+
+
+def computation_refs(ctx: ToolContext) -> set[str]:
+    refs = set()
+    for call_id in ctx.accepted_call_ids:
+        try:
+            observation = ctx.store.observation(ctx.run_id, call_id)
+        except KeyError:
+            continue
+        if (
+            observation.accepted
+            and observation.tool_name == "compute_power"
+            and observation.binding == ctx.binding
+        ):
+            refs.add(observation.evidence_ref)
+    return refs
+
+
+def decision_proposals(proposals: list[DecisionProposal], ctx: ToolContext) -> list[dict]:
     result = []
     for proposal in proposals:
-        if proposal.kind == "decision" and proposal.path not in {
-            f"/claim/{field}" for field in CLAIM_FIELDS
-        }:
-            raise SubmitRejected(["Decision requests need a /claim/<field> path"])
-        if not proposal.question.strip():
-            raise SubmitRejected(["Researcher questions must be non-empty"])
+        if not proposal.problem.strip() or not proposal.affected_paths:
+            raise SubmitRejected(["Decision needs a problem and affected scientific paths"])
+        for path in proposal.affected_paths:
+            if path.startswith("/context/package/"):
+                continue
+            if ctx.version is not None:
+                resolve(ctx.version.design, path)
+            else:
+                resolve(Design(claim={}), path)
+        if ctx.binding is None:
+            raise SubmitRejected(["Scientific decisions require a stage-bound run"])
+        digest = sha256(json.dumps(proposal.model_dump(), sort_keys=True).encode()).hexdigest()[:20]
         result.append(
-            ResearcherRequest(
-                **proposal.model_dump(),
+            ResearcherDecision(
+                id="decision:" + digest,
                 run_id=ctx.run_id,
-                raised_by="design",
+                binding=ctx.binding,
+                **proposal.model_dump(),
             ).model_dump(mode="json")
         )
     return result
@@ -191,7 +252,11 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
     def candidate(args):
         d = current(args)
         if args.get("ops") is not None:
-            context = ctx.store.context(ctx.run_id)
+            context = (
+                ctx.store.context(ctx.run_id, ctx.binding.context_revision)
+                if ctx.binding
+                else ctx.store.context(ctx.run_id)
+            )
             preview = preview_design if context else apply_patch
             d = preview(
                 d,
@@ -199,6 +264,7 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
                 source_ids=source_ids(ctx),
                 **({"context": context} if context else {}),
             )
+        validate_source_quantities(d, ctx)
         return d
 
     def read_design(args):
@@ -300,8 +366,12 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
             {},
             [],
             lambda _: (
-                ctx.store.context(ctx.run_id).model_dump(mode="json")
-                if ctx.store.context(ctx.run_id)
+                bound_context.model_dump(mode="json")
+                if (
+                    bound_context := ctx.store.context(ctx.run_id, ctx.binding.context_revision)
+                    if ctx.binding
+                    else ctx.store.context(ctx.run_id)
+                )
                 else None
             ),
         ),

@@ -24,7 +24,9 @@ def brief(ctx: ToolContext, **focus) -> str:
     return (
         "Read the original sources using tools. Submit a typed context with source-stated, "
         "agent-proposed or unknown annotations. Source-stated annotations require exact source_ref "
-        "and source_span. Do not invent missing claims or mark proposals researcher-confirmed. "
+        "and source_span. Use claim names for claim annotations and JSON pointers for other "
+        "scientific commitments, especially /analysis/model. Do not invent missing claims "
+        "or mark proposals researcher-confirmed. "
         "Record contradictions and missing scientific decisions even before a design exists. "
         "Quantities from sources require a verbatim span supporting value and unit; otherwise "
         "mark an explicit planning assumption, or leave missing. Context package.sources will "

@@ -55,7 +55,7 @@ def snapshot_sources(paths: list[Path]) -> SourceSnapshot:
 
     def read(path: Path, required: bool) -> None:
         path = path.resolve()
-        if path in visited:
+        if path in visited and (not required or any(a.path == str(path) for a in artifacts)):
             return
         visited.add(path)
         try:

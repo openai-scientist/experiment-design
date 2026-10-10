@@ -1,40 +1,51 @@
-"""JEV selects scientific workflow actions; code validates and commits them atomically."""
+"""Owned stage progression with scientific coordination confined to review/refinement."""
 
+import hashlib
 import json
-import math
 from dataclasses import dataclass
+from uuid import uuid4
 
-from experiment_design.agents import design, methodologist, skeptic, verifier
-from experiment_design.agents.tools import ToolContext, build_tools, source_ids
+from experiment_design.agents import (
+    decision_interpretation,
+    design,
+    handoff,
+    methodologist,
+    skeptic,
+    understanding,
+    verifier,
+)
+from experiment_design.agents.tools import ToolContext, build_tools
 from experiment_design.config import RunConfig
 from experiment_design.contracts import (
-    CLAIM_FIELDS,
     AgentTask,
-    Approval,
-    Finding,
+    DecisionResponse,
+    Design,
     Patch,
-    ResearcherRequest,
+    ResearchContext,
+    ResearcherDecision,
+    ReviewCohort,
     ReviewIssue,
     RunStatus,
-    ScientificPackage,
+    SourceSnapshot,
+    StageId,
+    StageResult,
     TaskBudget,
 )
-from experiment_design.patch import apply_patch, resolve, set_claim
-from experiment_design.runtime.jev import Decision, Judge, JudgeError, Question, bounded_decide
+from experiment_design.decisions import apply_decision, interpret, respond
+from experiment_design.qualification import approve_version, assess_readiness
+from experiment_design.review import (
+    commit_revision,
+    publish_cohort,
+    review_actions,
+    review_context,
+    start_cohort,
+    verification_options,
+)
+from experiment_design.runtime.jev import Judge, JudgeError, Question, bounded_decide
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.runtime.loop import run_agent
-from experiment_design.runtime.store import Store, now
+from experiment_design.runtime.store import Store
 from experiment_design.science.validators import validate_design
-
-ACTIONS = ("REVISE", "REVIEW", "VERIFY", "ASK_RESEARCHER", "MARK_REVIEWABLE", "STOP")
-ACTION_DESCRIPTIONS = {
-    "REVISE": "Address related material concerns with a patch or evidence-backed rebuttal.",
-    "REVIEW": "Review the latest unreviewed version with the methodologist and skeptic.",
-    "VERIFY": "Independently verify addressed concerns and rebuttals, checking for regressions.",
-    "ASK_RESEARCHER": "Open draft questions and wait for researcher decisions or evidence.",
-    "MARK_REVIEWABLE": "Present the reviewed design for researcher assessment and approval.",
-    "STOP": "Stop honestly when further work is not justified; report remaining blockers.",
-}
 
 
 @dataclass
@@ -49,87 +60,57 @@ class WorkflowError(ValueError):
     pass
 
 
-class _TaskExhausted(RuntimeError):
-    def __init__(self, **details):
-        self.details = details
-        super().__init__(details["reason"])
+class _BudgetStop(RuntimeError):
+    pass
 
 
-def start_run(package: ScientificPackage, deps: Deps, config_snapshot: dict) -> str:
-    return deps.store.create_run(package, config_snapshot)
+def start_run(snapshot: SourceSnapshot, deps: Deps, config_snapshot: dict) -> str:
+    return deps.store.create_staged_run(snapshot, config_snapshot)
 
 
-def _material(issue: ReviewIssue) -> bool:
-    return issue.status == "open" and (
-        issue.severity in {"MAJOR", "BLOCKER"} or issue.raised_by == "researcher"
-    )
+def _require_staged(store: Store, run_id: str) -> None:
+    if store.run(run_id).schema_version != 2:
+        raise WorkflowError(
+            "schema-1 runs are read/export only; start a new run from original sources"
+        )
 
 
 def legal_actions(store: Store, run_id: str, cfg: RunConfig) -> list[str]:
-    run = store.run(run_id)
-    version = store.version(run_id)
-    issues = store.issues(run_id)
-    blockers = any(i.severity == "BLOCKER" and i.status in {"open", "unresolved"} for i in issues)
-    pending_verify = any(i.status in {"addressed", "rebutted"} for i in issues)
-    researcher_pending = any(i.raised_by == "researcher" and i.status == "open" for i in issues)
-    legal = {
-        "REVIEW": version is not None
-        and version.version > run.reviewed_version
-        and run.reviews_done < cfg.max_reviews,
-        "REVISE": any(_material(i) for i in issues) and run.revisions_done < cfg.max_revisions,
-        "VERIFY": pending_verify,
-        "ASK_RESEARCHER": any(r.status == "draft" for r in store.requests(run_id)),
-        "MARK_REVIEWABLE": run.reviewed_version >= 1
-        and not pending_verify
-        and not blockers
-        and not researcher_pending,
-        "STOP": True,
-    }
-    return [action for action in ACTIONS if legal[action]]
+    _require_staged(store, run_id)
+    return review_actions(store, run_id, cfg) if store.run(run_id).stage_id == "S4" else ["ADVANCE"]
 
 
 def jev_state(store: Store, run_id: str, cfg: RunConfig) -> dict:
-    run, version, usage = store.run(run_id), store.version(run_id), store.usage(run_id)
-    history = [e for e in store.events(run_id) if e.type == "decision"][-6:]
     return {
-        "research_question": run.package.research_question,
-        "version": version.version if version else 0,
-        "reviewed_version": run.reviewed_version,
-        "budget": {
-            "tokens_used": usage.llm_tokens,
-            "tokens_limit": cfg.llm_tokens,
-            "actions_used": run.actions_done,
-            "max_actions": cfg.max_actions,
-            "reviews_done": run.reviews_done,
-            "revisions_done": run.revisions_done,
-        },
+        "binding": store.binding(run_id).model_dump(),
+        "stage": store.run(run_id).stage_id,
         "issues": [
             {
                 "id": i.id,
                 "severity": i.severity,
                 "status": i.status,
-                "raised_by": i.raised_by,
                 "paths": i.paths,
                 "summary": i.mechanism[:200],
             }
             for i in store.issues(run_id)
             if i.status not in {"resolved", "duplicate"}
         ],
-        "requests": [
-            {
-                "id": r.id,
-                "kind": r.kind,
-                "question": r.question[:200],
-            }
-            for r in store.requests(run_id)
-            if r.status in {"draft", "open"}
+        "decisions": [
+            {"id": d.id, "status": d.status, "problem": d.problem[:200]}
+            for d in store.decisions(run_id)
+            if d.status != "APPLIED"
         ],
-        "history": [{"point": e.data["point"], "choice": e.data["choice"]} for e in history],
+        "budget": {
+            "used": store.usage(run_id).llm_tokens,
+            "limit": cfg.llm_tokens,
+            "actions": store.run(run_id).actions_done,
+            "max_actions": cfg.max_actions,
+        },
     }
 
 
-def _decide(deps: Deps, run_id: str, point: str, questions: dict[str, Question]) -> dict[str, str]:
-    multi = {key: q for key, q in questions.items() if len(q.options) > 1}
+def _choose(deps: Deps, run_id: str, point: str, questions: dict[str, Question]) -> dict[str, str]:
+    multi = {k: q for k, q in questions.items() if len(q.options) > 1}
     decisions = (
         bounded_decide(
             deps.judge, deps.store, run_id, deps.run, jev_state(deps.store, run_id, deps.run), multi
@@ -137,76 +118,118 @@ def _decide(deps: Deps, run_id: str, point: str, questions: dict[str, Question])
         if multi
         else {}
     )
-    choices = {}
-    for key, question in questions.items():
-        if not question.options:
-            raise JudgeError(f"No legal options for {key}")
-        if key in multi:
-            if key not in decisions:
-                raise JudgeError(f"Missing decision {key}")
-            decision, by = decisions[key], "jev"
-        else:
-            choice = next(iter(question.options))
-            decision, by = Decision(choice, {choice: 1.0}, 1.0), "only_option"
-        if decision.choice not in question.options:
-            raise JudgeError(f"Illegal choice {decision.choice} for {key}")
-        choices[key] = decision.choice
+    chosen = {}
+    for key, q in questions.items():
+        value = decisions[key].choice if key in decisions else next(iter(q.options))
+        if value not in q.options:
+            raise JudgeError("illegal workflow choice")
+        chosen[key] = value
         deps.store.append_event(
             run_id,
             "decision",
             {
                 "point": point,
+                "choice": value,
                 "question": key,
-                "options": list(question.options),
-                "choice": decision.choice,
-                "probabilities": decision.probabilities,
-                "confidence": decision.confidence,
-                "by": by,
-                "latency_ms": decision.latency_ms,
-                "tokens": decision.tokens,
+                "by": "jev" if key in decisions else "only_option",
             },
         )
-    return choices
+    return chosen
+
+
+def _budget(deps: Deps, run_id: str) -> int:
+    store = deps.store
+    remaining = deps.run.llm_tokens - store.usage(run_id).llm_tokens
+    reason = (
+        "token_limit"
+        if remaining <= 0
+        else "action_limit"
+        if store.run(run_id).actions_done >= deps.run.max_actions
+        else None
+    )
+    if reason:
+        store.append_event(
+            run_id,
+            "budget.stop",
+            {
+                "scope": "run",
+                "reason": reason,
+                "tokens_used": store.usage(run_id).llm_tokens,
+                "tokens_limit": deps.run.llm_tokens,
+                "actions_used": store.run(run_id).actions_done,
+                "actions_limit": deps.run.max_actions,
+            },
+        )
+        raise _BudgetStop(reason)
+    return remaining
 
 
 def _context(deps: Deps, run_id: str) -> ToolContext:
+    context = deps.store.context(run_id)
     return ToolContext(
-        deps.store,
-        run_id,
-        deps.store.run(run_id).package,
-        deps.store.version(run_id),
-        set(),
+        deps.store, run_id, context.package if context else None, deps.store.version(run_id), set()
     )
 
 
-def _agent(deps: Deps, ctx: ToolContext, module, **focus) -> dict:
-    remaining = deps.run.llm_tokens - deps.store.usage(ctx.run_id).llm_tokens
-    if remaining <= 0:
-        raise _TaskExhausted(
-            scope="run",
-            reason="token_limit",
-            tokens_used=deps.store.usage(ctx.run_id).llm_tokens,
-            tokens_limit=deps.run.llm_tokens,
+def _agent(
+    deps: Deps,
+    run_id: str,
+    module,
+    ctx: ToolContext | None = None,
+    task_id: str | None = None,
+    **focus,
+):
+    ctx = ctx or _context(deps, run_id)
+    remaining = _budget(deps, run_id)
+    identity = json.dumps(
+        {
+            "run": run_id,
+            "role": module.SPEC.agent_id,
+            "stage": deps.store.run(run_id).stage_id,
+            "context": ctx.binding.context_revision,
+            "version": ctx.binding.design_version,
+            "focus": str(focus),
+        },
+        sort_keys=True,
+    )
+    task_id = task_id or "task:" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+    try:
+        task = deps.store.task(task_id).task
+        ctx.binding = task.binding
+    except KeyError:
+        reserve = (
+            2 if module in {design, methodologist, skeptic} else 1 if module is verifier else 0
         )
-    ctx.accepted_call_ids.clear()
-    task = AgentTask(
-        objective=module.SPEC.system_prompt,
-        package_ref=ctx.package.id,
-        design_version=ctx.version.version if ctx.version else None,
-        focus_paths=[
-            p
-            for i in focus.get("batch", focus.get("issues", []))
-            if hasattr(i, "paths")
-            for p in i.paths
-        ],
-        issue_refs=[i.id for i in focus.get("batch", focus.get("issues", [])) if hasattr(i, "id")],
-        allowed_tools=list(module.TOOLS),
-        budget=TaskBudget(
-            max_turns=deps.run.task_max_turns,
-            max_tokens=min(deps.run.task_max_tokens, remaining),
-        ),
-        exit_conditions=["Submit a valid task result or exhaust the task budget"],
-    )
+        reserve *= deps.run.task_max_tokens if deps.store.run(run_id).stage_id == "S4" else 0
+        available = remaining - reserve
+        if available <= 0:
+            deps.store.append_event(
+                run_id,
+                "budget.stop",
+                {
+                    "scope": "coordination",
+                    "reason": "reserved_verification_and_handoff",
+                    "tokens_remaining": remaining,
+                    "tokens_reserved": reserve,
+                },
+            )
+            raise _BudgetStop("reserved_verification_and_handoff") from None
+        task = AgentTask(
+            id=task_id,
+            binding=ctx.binding,
+            stage_id=deps.store.run(run_id).stage_id,
+            cohort_id=ctx.cohort_id,
+            objective=module.SPEC.system_prompt,
+            package_ref=ctx.package.id if ctx.package else ctx.binding.source_snapshot_id,
+            design_version=ctx.binding.design_version,
+            allowed_tools=list(module.TOOLS),
+            issue_refs=[i.id for i in focus.get("issues", focus.get("batch", []))],
+            budget=TaskBudget(
+                max_turns=deps.run.task_max_turns,
+                max_tokens=min(deps.run.task_max_tokens, available),
+            ),
+            exit_conditions=["Valid structured submission"],
+        )
     result = run_agent(
         module.SPEC,
         task,
@@ -215,512 +238,522 @@ def _agent(deps: Deps, ctx: ToolContext, module, **focus) -> dict:
         module.submit_tool(ctx, **focus),
         deps.llm,
         deps.store,
-        ctx.run_id,
+        run_id,
         ctx.accepted_call_ids,
     )
     if result.completion_status != "completed":
-        run_tokens = deps.store.usage(ctx.run_id).llm_tokens
-        run_exhausted = result.stop_reason == "token_limit" and run_tokens >= deps.run.llm_tokens
-        task_tokens = result.tokens_in + result.tokens_out
-        raise _TaskExhausted(
-            scope="run" if run_exhausted else "task",
-            reason=result.stop_reason,
-            agent_id=module.SPEC.agent_id,
-            tokens_used=run_tokens if run_exhausted else task_tokens,
-            tokens_limit=deps.run.llm_tokens if run_exhausted else task.budget.max_tokens,
-            task_tokens_used=task_tokens,
-            task_tokens_limit=task.budget.max_tokens,
-            llm_calls=result.llm_calls,
-            max_turns=task.budget.max_turns,
+        deps.store.append_event(
+            run_id,
+            "budget.stop",
+            {
+                "scope": "task",
+                "reason": result.stop_reason,
+                "agent_id": module.SPEC.agent_id,
+                "tokens_used": result.tokens_in + result.tokens_out,
+                "tokens_limit": task.budget.max_tokens,
+                "llm_calls": result.llm_calls,
+            },
         )
-    return result.findings_or_changes
+        raise _BudgetStop(result.stop_reason)
+    return result
 
 
-def _validate_new(deps: Deps, run_id: str) -> None:
-    ctx = _context(deps, run_id)
-    active = {
-        (i.validator_code, p)
+def _save_decisions(store: Store, run_id: str, payload: dict) -> None:
+    for data in payload.get("decisions", []):
+        decision = ResearcherDecision.model_validate(data)
+        if decision.run_id != run_id or decision.responses or decision.application:
+            raise WorkflowError("agent cannot author researcher responses")
+        decision.binding = store.binding(run_id)
+        store.save_decision(decision)
+
+
+def _cohort(deps: Deps, run_id: str):
+    cohorts = deps.store._artifact_records(run_id, "cohort", ReviewCohort)
+    cohort = cohorts[-1] if cohorts else None
+    if cohort is None or cohort.published_event_id is not None:
+        cohort = start_cohort(deps.store, run_id, deps.store.binding(run_id))
+    for role, module in (("methodologist", methodologist), ("skeptic", skeptic)):
+        task_id = cohort.member_task_ids[role]
+        try:
+            task = deps.store.task(task_id).task
+            ctx = review_context(deps.store, run_id, task)
+        except KeyError:
+            context = deps.store.context(run_id, cohort.binding.context_revision)
+            ctx = ToolContext(
+                deps.store,
+                run_id,
+                context.package,
+                deps.store.version(run_id, cohort.binding.design_version),
+                set(),
+                binding=cohort.binding,
+            )
+            ctx.binding = cohort.binding
+            ctx.cohort_id = cohort.id
+            ctx.issue_cutoff = cohort.binding.event_id
+        _agent(deps, run_id, module, ctx=ctx, task_id=task_id)
+    with deps.store.transaction():
+        publish_cohort(deps.store, run_id, cohort.id)
+        run = deps.store.run(run_id)
+        deps.store.update_run(
+            run_id,
+            reviewed_version=deps.store.version(run_id).version,
+            reviews_done=run.reviews_done + 1,
+        )
+
+
+def _refine(deps: Deps, run_id: str):
+    issues = [
+        i
         for i in deps.store.issues(run_id)
-        if i.status in {"open", "addressed", "rebutted", "unresolved"}
-        for p in i.paths
-    }
-    for f in validate_design(ctx.version.design, ctx.package, source_ids(ctx)):
-        if (f.code, f.path) not in active:
-            deps.store.save_issue(
-                ReviewIssue(
-                    run_id=run_id,
-                    raised_by="validator",
-                    version_raised=ctx.version.version,
-                    severity=f.severity,
-                    paths=[f.path],
-                    mechanism=f.message,
-                    consequence=f.consequence,
-                    basis="computation",
-                    validator_code=f.code,
-                )
-            )
-
-
-def _save_requests(store: Store, payload: dict) -> None:
-    for request in payload.get("requests", []):
-        store.save_request(ResearcherRequest.model_validate(request))
-
-
-def _finish_action(deps: Deps, run_id: str, **fields) -> None:
-    deps.store.update_run(
-        run_id,
-        actions_done=deps.store.run(run_id).actions_done + 1,
-        **fields,
-    )
-
-
-def _duplicates(deps: Deps, run_id: str, findings: list[tuple[Finding, str]]) -> dict[str, str]:
-    questions = {
-        str(index): Question(
-            f"Is this finding materially distinct from issue {f.duplicate_of}? "
-            + json.dumps(f.model_dump(mode="json")),
-            {
-                "distinct": "A distinct material concern",
-                "duplicate": "The same concern as the cited issue",
-            },
-        )
-        for index, (f, _) in enumerate(findings)
-        if f.duplicate_of
-    }
-    return _decide(deps, run_id, "issue_disposition", questions) if questions else {}
-
-
-def _save_findings(deps: Deps, run_id: str, findings, dispositions) -> None:
-    version = deps.store.version(run_id).version
-    for index, (finding, raised_by) in enumerate(findings):
-        data = finding.model_dump(mode="json")
-        duplicate = dispositions.get(str(index)) == "duplicate"
-        if not duplicate:
-            data["duplicate_of"] = None
-        deps.store.save_issue(
-            ReviewIssue(
-                **data,
-                run_id=run_id,
-                raised_by=raised_by,
-                version_raised=version,
-                status="duplicate" if duplicate else "open",
-            )
-        )
-
-
-def _review(deps: Deps, run_id: str) -> None:
-    ctx = _context(deps, run_id)
-    method = _agent(deps, ctx, methodologist)
-    ctx.pending_findings = [Finding.model_validate(f) for f in method["findings"]]
-    stress = _agent(deps, ctx, skeptic)
-    findings = [(f, "methodologist") for f in ctx.pending_findings] + [
-        (Finding.model_validate(f), "skeptic") for f in stress["findings"]
+        if i.status == "open" and i.severity in {"MAJOR", "BLOCKER"}
     ]
-    dispositions = _duplicates(deps, run_id, findings)
-    with deps.store.transaction():
-        _save_findings(deps, run_id, findings, dispositions)
-        _finish_action(
-            deps,
-            run_id,
-            reviewed_version=ctx.version.version,
-            reviews_done=deps.store.run(run_id).reviews_done + 1,
-        )
-
-
-def _revise(deps: Deps, run_id: str) -> None:
-    ctx = _context(deps, run_id)
-    batches = {}
-    for issue in deps.store.issues(run_id):
-        if _material(issue):
-            root = issue.paths[0].strip("/").split("/")[0] or "root"
-            batches.setdefault(root, []).append(issue)
-    root = _decide(
-        deps,
-        run_id,
-        "revision_batch",
-        {
-            "batch": Question(
-                "Choose one related batch to address together",
-                {
-                    name: "; ".join(f"{i.id}: {i.mechanism[:200]}" for i in issues)
-                    for name, issues in batches.items()
-                },
-            ),
-        },
-    )["batch"]
-    batch = batches[root]
-    payload = _agent(deps, ctx, design, mode="revise", batch=batch)
+    payload = _agent(deps, run_id, design, mode="revision", batch=issues).findings_or_changes
     patch = Patch.model_validate(payload["patch"])
-    proposed = apply_patch(ctx.version.design, patch, source_ids=source_ids(ctx))
-    parent_findings = {
-        (f.code, f.path) for f in validate_design(ctx.version.design, ctx.package, source_ids(ctx))
-    }
-    new_findings = [
-        f
-        for f in validate_design(proposed, ctx.package, source_ids(ctx))
-        if f.severity in {"BLOCKER", "MAJOR"} and (f.code, f.path) not in parent_findings
-    ]
-    revisions = 1
-    if new_findings:
-        outcome = _decide(
-            deps,
-            run_id,
-            "patch_outcome",
-            {
-                "patch_outcome": Question(
-                    "The patch introduced material findings. Choose keep, repair, or revert: "
-                    + json.dumps([f.model_dump(mode="json") for f in new_findings]),
-                    {
-                        "keep": "Keep the change and report the new concerns",
-                        "repair": "Make one further targeted repair before committing",
-                        "revert": "Discard the proposed design and leave batch issues open",
-                    },
-                ),
-            },
-        )["patch_outcome"]
-        if outcome == "revert":
-            with deps.store.transaction():
-                _finish_action(
-                    deps, run_id, revisions_done=deps.store.run(run_id).revisions_done + 1
-                )
-            return
-        if outcome == "repair":
-            repair_issues = [
-                ReviewIssue(
-                    id=f"repair:{index}",
-                    run_id=run_id,
-                    raised_by="validator",
-                    version_raised=ctx.version.version + 1,
-                    severity=f.severity,
-                    paths=[f.path],
-                    mechanism=f.message,
-                    consequence=f.consequence,
-                    basis="computation",
-                    validator_code=f.code,
-                )
-                for index, f in enumerate(new_findings)
-            ]
-            ctx.version = ctx.version.model_copy(update={"design": proposed})
-            repair = _agent(deps, ctx, design, mode="revise", batch=repair_issues)
-            repair_patch = Patch.model_validate(repair["patch"])
-            proposed = apply_patch(proposed, repair_patch, source_ids=source_ids(ctx))
-            patch = Patch(
-                ops=patch.ops + repair_patch.ops,
-                rationale=patch.rationale + "; repair: " + repair_patch.rationale,
-                addresses=patch.addresses,
-            )
-            payload["requests"] += repair["requests"]
-            revisions += 1
+    parent = deps.store.version(run_id)
     with deps.store.transaction():
-        parent = deps.store.version(run_id)
-        new_version = deps.store.add_version(
-            run_id,
-            proposed,
-            author="design",
-            parent=parent.version,
-            patch=patch,
-        )
-        rebuttals = {r["issue_id"]: r for r in payload["rebuttals"]}
-        for issue in batch:
-            if issue.id in patch.addresses:
-                issue.status, issue.addressed_in = "addressed", new_version.version
-            else:
-                issue.status, issue.rebuttal = "rebutted", rebuttals[issue.id]["argument"]
-                issue.evidence_refs = list(
-                    dict.fromkeys(
-                        issue.evidence_refs + rebuttals[issue.id]["evidence_refs"],
-                    )
-                )
+        if patch.ops:
+            commit_revision(
+                deps.store, run_id, parent=parent.version, patch=patch, issue_ids=patch.addresses
+            )
+        for rebuttal in payload.get("rebuttals", []):
+            issue = next(i for i in issues if i.id == rebuttal["issue_id"])
+            issue.status = "rebutted"
+            issue.rebuttal = rebuttal["argument"]
             deps.store.save_issue(issue)
-        _save_requests(deps.store, payload)
-        _validate_new(deps, run_id)
-        _finish_action(
-            deps,
-            run_id,
-            revisions_done=deps.store.run(run_id).revisions_done + revisions,
+        _save_decisions(deps.store, run_id, payload)
+        deps.store.update_run(run_id, revisions_done=deps.store.run(run_id).revisions_done + 1)
+    if deps.store.version(run_id).design_hash == parent.design_hash and not payload.get(
+        "rebuttals"
+    ):
+        deps.store.append_event(
+            run_id, "budget.stop", {"scope": "coordination", "reason": "no_progress"}
         )
+        raise _BudgetStop("no_progress")
 
 
-def _verify(deps: Deps, run_id: str) -> None:
-    ctx = _context(deps, run_id)
+def _verify(deps: Deps, run_id: str):
     issues = [i for i in deps.store.issues(run_id) if i.status in {"addressed", "rebutted"}]
-    payload = _agent(deps, ctx, verifier, issues=issues)
-    verdicts = {v["issue_id"]: v for v in payload["verdicts"]}
-    live = {
-        (f.code, f.path)
-        for f in validate_design(
-            ctx.version.design,
-            ctx.package,
-            source_ids(ctx),
-        )
-    }
+    result = _agent(deps, run_id, verifier, issues=issues)
+    live = validate_design(deps.store.version(run_id).design, deps.store.context(run_id).package)
     questions = {}
+    verdicts = {v["issue_id"]: v for v in result.findings_or_changes["verdicts"]}
     for issue in issues:
-        options = {
-            "resolved": "The concern is independently resolved",
-            "reopen": "Further correction is needed",
-            "uncertain": "Evidence is inconclusive",
-        }
-        if issue.validator_code and any((issue.validator_code, p) in live for p in issue.paths):
-            del options["resolved"]
+        verdict = verdicts[issue.id]
+        options = verification_options(issue, verdict["verdict"], live, verdict["evidence_refs"])
         questions[issue.id] = Question(
-            "Choose the effective verification outcome. Verifier recommendation: "
-            + json.dumps(verdicts[issue.id]),
-            options,
+            "Select disposition supported by independent verification: " + json.dumps(verdict),
+            {v: v for v in options},
         )
-    outcomes = _decide(deps, run_id, "verification", questions)
-    regressions = [(Finding.model_validate(f), "verifier") for f in payload["regressions"]]
-    dispositions = _duplicates(deps, run_id, regressions)
+    outcomes = _choose(deps, run_id, "verification", questions)
     with deps.store.transaction():
         for issue in issues:
-            outcome = outcomes[issue.id]
-            issue.status = {"resolved": "resolved", "reopen": "open", "uncertain": "unresolved"}[
-                outcome
-            ]
+            issue.status = outcomes[issue.id]
             deps.store.save_issue(issue)
             deps.store.append_event(
                 run_id,
                 "verification",
-                {
-                    "issue_id": issue.id,
-                    "verdict": verdicts[issue.id]["verdict"],
-                    "grounds": verdicts[issue.id]["grounds"],
-                    "evidence_refs": verdicts[issue.id]["evidence_refs"],
-                    "effective_outcome": outcome,
-                },
-                agent_id="verifier",
-                design_version=ctx.version.version,
+                {"issue_id": issue.id, "effective_outcome": issue.status, **verdicts[issue.id]},
             )
-        _save_findings(deps, run_id, regressions, dispositions)
-        _finish_action(deps, run_id)
-
-
-def _ask_researcher(deps: Deps, run_id: str) -> None:
-    with deps.store.transaction():
-        for request in deps.store.requests(run_id):
-            if request.status == "draft":
-                request.status = "open"
-                deps.store.save_request(request)
-        _finish_action(deps, run_id, status="NEEDS_RESEARCHER")
-
-
-def _mark_reviewable(deps: Deps, run_id: str) -> None:
-    with deps.store.transaction():
-        _finish_action(deps, run_id, status="REVIEWABLE")
-
-
-def _stop(deps: Deps, run_id: str) -> None:
-    blocked = any(
-        i.severity == "BLOCKER" and i.status in {"open", "unresolved"}
-        for i in deps.store.issues(run_id)
-    )
-    with deps.store.transaction():
-        _finish_action(deps, run_id, status="BLOCKED" if blocked else "INCONCLUSIVE")
-
-
-def _answer_value(request: ResearcherRequest, answer: str) -> str | float:
-    if not answer.strip():
-        raise WorkflowError("Researcher answer must be non-empty")
-    if request.kind != "decision":
-        return answer
-    if request.path not in {f"/claim/{field}" for field in CLAIM_FIELDS}:
-        raise WorkflowError(f"Invalid decision claim path {request.path}")
-    field = request.path.split("/")[-1]
-    if field == "margin":
-        try:
-            value = float(answer)
-            if not math.isfinite(value):
-                raise ValueError("not finite")
-            return value
-        except ValueError as exc:
-            raise WorkflowError("margin answer must be a finite number") from exc
-    choices = {
-        "contrast_type": {"superiority", "non_inferiority", "superiority_by_margin"},
-        "direction": {"increase", "decrease"},
-        "outcome_kind": {"continuous", "binary"},
-    }
-    if field in choices and answer not in choices[field]:
-        raise WorkflowError(f"{field} must be one of {', '.join(sorted(choices[field]))}")
-    return answer
-
-
-def _apply_answers(deps: Deps, run_id: str) -> None:
-    pending = [
-        r
-        for r in deps.store.requests(run_id)
-        if r.kind == "decision" and r.status == "answered" and r.applied_in is None
-    ]
-    if not pending:
-        return
-    parent = deps.store.version(run_id)
-    d = parent.design
-    changed = []
-    for request in pending:
-        field = request.path.split("/")[-1]
-        value = _answer_value(request, request.answer)
-        if getattr(d.claim, field).value != value:
-            changed.append(request)
-        d = set_claim(d, field, value, "researcher")
-    with deps.store.transaction():
-        version = deps.store.add_version(run_id, d, author="researcher", parent=parent.version)
-        for request in pending:
-            request.applied_in = version.version
-            deps.store.save_request(request)
-        for request in changed:
+        for finding in result.findings_or_changes["regressions"]:
             deps.store.save_issue(
                 ReviewIssue(
+                    **finding,
                     run_id=run_id,
-                    raised_by="researcher",
-                    version_raised=version.version,
-                    severity="MAJOR",
-                    paths=["/"],
-                    basis="reasoning",
-                    mechanism=(
-                        f"Reconcile the design with researcher decision {request.path}: "
-                        f"{request.answer}"
-                    ),
-                    consequence=(
-                        "Dependent measurements, analysis and decision rules may still "
-                        "express the earlier claim"
-                    ),
+                    raised_by="verifier",
+                    version_raised=deps.store.version(run_id).version,
                 )
             )
-        _validate_new(deps, run_id)
+        if all(i.status == "resolved" for i in issues):
+            for decision in deps.store.decisions(run_id):
+                if (
+                    decision.status == "APPLIED"
+                    and decision.purpose != "final_review"
+                    and decision.application.get("issue_id") in outcomes
+                    and outcomes[decision.application["issue_id"]] == "resolved"
+                ):
+                    decision.verification = {
+                        "status": "verified",
+                        "evidence_refs": verdicts[decision.application["issue_id"]][
+                            "evidence_refs"
+                        ],
+                    }
+                    deps.store.save_decision(decision)
+
+
+def run_stage(run_id: str, stage_id: StageId, deps: Deps) -> StageResult:
+    store = deps.store
+    _require_staged(store, run_id)
+    outputs, issues, status, reason = [], [], "COMPLETE", ""
+    if stage_id == "S1":
+        outputs = [store.source_snapshot(run_id).id]
+        reason = "Readable sources captured exactly"
+    elif stage_id == "S2":
+        payload = _agent(deps, run_id, understanding).findings_or_changes
+        pending = [ResearcherDecision.model_validate(d) for d in payload.get("decisions", [])]
+        choice = "CONTINUE"
+        if pending:
+            options = ["CONTINUE", "STOP"]
+            if any(d.options or d.dependencies for d in pending):
+                options.insert(0, "ASK_RESEARCHER")
+            choice = _choose(
+                deps,
+                run_id,
+                "understanding",
+                {
+                    "next_action": Question(
+                        "Continue synthesis or ask at an informative decision or dependency block.",
+                        {option: option for option in options},
+                    )
+                },
+            )["next_action"]
+        with store.transaction():
+            context = store.save_context(run_id, ResearchContext.model_validate(payload["context"]))
+            _save_decisions(store, run_id, payload)
+            outputs = [f"context:{context.revision}"]
+            reason = "Research understanding with provenance recorded"
+            if choice == "ASK_RESEARCHER":
+                for proposed in pending:
+                    decision = store.decision(run_id, proposed.id)
+                    decision.status = "AWAITING_RESEARCHER"
+                    store.save_decision(decision)
+                status, reason = "NEEDS_INPUT", "Research understanding needs a scientific decision"
+            elif choice == "STOP":
+                status, reason = (
+                    "STOPPED",
+                    "Research understanding stopped with uncertainty preserved",
+                )
+            result = StageResult(
+                stage_id="S2",
+                status=status,
+                binding=store.binding(run_id),
+                output_refs=outputs,
+                reason=reason,
+            )
+            store.commit_stage(run_id, result, "S3" if status == "COMPLETE" else "S2")
+            return result
+    elif stage_id == "S3":
+        if store.version(run_id) is None:
+            payload = _agent(deps, run_id, design, mode="initial").findings_or_changes
+            with store.transaction():
+                version = store.add_version(
+                    run_id, Design.model_validate(payload["design"]), author="design", parent=None
+                )
+                _save_decisions(store, run_id, payload)
+                for decision in store.decisions(run_id):
+                    if (
+                        decision.purpose == "scientific"
+                        and decision.status == "APPLIED"
+                        and decision.verification.get("status") == "pending"
+                    ):
+                        issue = store.save_issue(
+                            ReviewIssue(
+                                run_id=run_id,
+                                raised_by="researcher",
+                                version_raised=version.version,
+                                severity="MAJOR",
+                                status="addressed",
+                                addressed_in=version.version,
+                                paths=decision.affected_paths or ["/"],
+                                mechanism=(
+                                    f"Researcher decision {decision.id} requires reconciliation"
+                                ),
+                                consequence="Initial draft must implement clarified intent",
+                                basis="reasoning",
+                            )
+                        )
+                        decision.application["issue_id"] = issue.id
+                        store.save_decision(decision)
+                result = StageResult(
+                    stage_id="S3",
+                    status="COMPLETE",
+                    binding=store.binding(run_id),
+                    output_refs=[version.design_hash],
+                    reason="Structured draft committed",
+                )
+                store.commit_stage(run_id, result, "S4")
+                return result
+            outputs = [version.design_hash]
+        else:
+            _refine(deps, run_id)
+            outputs = [store.version(run_id).design_hash]
+        reason = "Structured draft committed"
+    elif stage_id == "S4":
+        while True:
+            _budget(deps, run_id)
+            cohorts = store._artifact_records(run_id, "cohort", ReviewCohort)
+            pending_cohort = bool(cohorts and cohorts[-1].published_event_id is None)
+            actions = review_actions(store, run_id, deps.run)
+            action = (
+                "REVIEW"
+                if pending_cohort
+                else _choose(
+                    deps,
+                    run_id,
+                    "next_action",
+                    {
+                        "next_action": Question(
+                            "Choose useful scientific work; qualify after material verification.",
+                            {a: a for a in actions},
+                        )
+                    },
+                )["next_action"]
+            )
+            if action == "QUALIFY":
+                outputs, reason = (
+                    [store.version(run_id).design_hash],
+                    "Review permits independent qualification",
+                )
+                break
+            if action == "STOP":
+                status, reason = "STOPPED", "Scientific coordination stopped with issues preserved"
+                break
+            if action == "ASK_RESEARCHER":
+                for decision in store.decisions(run_id):
+                    if decision.status in {"IDENTIFIED", "EXPLORING"}:
+                        decision.binding = store.binding(run_id)
+                        decision.status = "AWAITING_RESEARCHER"
+                        store.save_decision(decision)
+                status, reason = "NEEDS_INPUT", "Scientific decision requires researcher input"
+                break
+            {"REVIEW": _cohort, "REVISE": _refine, "VERIFY": _verify}[action](deps, run_id)
+            store.update_run(run_id, actions_done=store.run(run_id).actions_done + 1)
+    elif stage_id == "S5":
+        result = _agent(deps, run_id, handoff)
+        assessment = assess_readiness(store, run_id, result)
+        outputs = [assessment.id]
+        issues = [
+            i.id
+            for i in store.issues(run_id)
+            if i.status == "open" and i.severity in {"MAJOR", "BLOCKER"}
+        ]
+        status = (
+            "NEEDS_INPUT"
+            if assessment.review_status == "NEEDS_INPUT"
+            else "REVISION_REQUIRED"
+            if assessment.review_status == "NOT_READY"
+            else "COMPLETE"
+        )
+        reason = "; ".join(assessment.blockers) or "Independent handoff inspection complete"
+    elif stage_id == "S6":
+        finals = [
+            d
+            for d in store.decisions(run_id)
+            if d.purpose == "final_review"
+            and d.binding.design_hash == store.version(run_id).design_hash
+        ]
+        if not finals:
+            finals = [
+                store.save_decision(
+                    ResearcherDecision(
+                        id="final:" + uuid4().hex,
+                        run_id=run_id,
+                        purpose="final_review",
+                        status="AWAITING_RESEARCHER",
+                        binding=store.binding(run_id),
+                        problem="Review this exact design and its handoff assessment",
+                        dependencies=[store.assessment(run_id).id],
+                    )
+                )
+            ]
+        outputs, status, reason = (
+            [finals[-1].id],
+            "NEEDS_INPUT",
+            "Waiting for final researcher review",
+        )
+    else:
+        status, reason = "NEEDS_INPUT", "Publication needs explicit output destination"
+    return StageResult(
+        stage_id=stage_id,
+        status=status,
+        binding=store.binding(run_id),
+        output_refs=outputs,
+        issue_refs=issues,
+        reason=reason,
+    )
 
 
 def advance(run_id: str, deps: Deps) -> RunStatus:
     store = deps.store
-    if store.run(run_id).status == "NEEDS_RESEARCHER" and any(
-        r.status == "open" for r in store.requests(run_id)
-    ):
-        return "NEEDS_RESEARCHER"
+    _require_staged(store, run_id)
+    if store.run(run_id).stage_id == "S7":
+        return store.run(run_id).status
     store.update_run(run_id, status="RUNNING")
-    _apply_answers(deps, run_id)
-    handlers = {
-        "REVIEW": _review,
-        "REVISE": _revise,
-        "VERIFY": _verify,
-        "ASK_RESEARCHER": _ask_researcher,
-        "MARK_REVIEWABLE": _mark_reviewable,
-        "STOP": _stop,
-    }
     try:
-        if store.version(run_id) is None:
-            ctx = _context(deps, run_id)
-            payload = _agent(deps, ctx, design, mode="initial")
-            from experiment_design.contracts import Design
-
-            with store.transaction():
-                store.add_version(
-                    run_id, Design.model_validate(payload["design"]), author="design", parent=None
+        for decision in store.decisions(run_id):
+            if decision.purpose == "final_review" and decision.status == "ANSWERED":
+                response = decision.responses[-1]
+                store.check_binding(run_id, decision.binding)
+                if response.action == "REJECT":
+                    decision.status = "APPLIED"
+                    decision.application = {
+                        "response_id": response.response_id,
+                        "outcome": "REJECT",
+                    }
+                    store.save_decision(decision)
+                    store.update_run(run_id, status="INCONCLUSIVE")
+                    return "INCONCLUSIVE"
+                if response.action == "REQUEST_CHANGES":
+                    with store.transaction():
+                        issue = store.save_issue(
+                            ReviewIssue(
+                                run_id=run_id,
+                                raised_by="researcher",
+                                version_raised=store.version(run_id).version,
+                                severity="MAJOR",
+                                paths=response.affected_paths or decision.affected_paths or ["/"],
+                                mechanism=response.text,
+                                consequence="Researcher requests scientific revision",
+                                basis="reasoning",
+                            )
+                        )
+                        decision.status = "APPLIED"
+                        decision.application = {
+                            "response_id": response.response_id,
+                            "issue_id": issue.id,
+                        }
+                        store.save_decision(decision)
+                        store.commit_stage(
+                            run_id,
+                            StageResult(
+                                stage_id=store.run(run_id).stage_id,
+                                status="REVISION_REQUIRED",
+                                binding=store.binding(run_id),
+                                output_refs=[decision.id],
+                                reason=response.text,
+                            ),
+                            "S4",
+                        )
+            if decision.purpose == "scientific" and decision.status == "ANSWERED":
+                context = store.context(run_id)
+                result = _agent(deps, run_id, decision_interpretation, decision=decision)
+                interpreted = interpret(decision, context, result.findings_or_changes)
+                if interpreted.interpretation.get("ambiguous"):
+                    interpreted.revision += 1
+                    interpreted.status = "AWAITING_RESEARCHER"
+                    store.save_decision(interpreted)
+                    store.update_run(run_id, status="NEEDS_RESEARCHER")
+                    return "NEEDS_RESEARCHER"
+                store.save_decision(interpreted)
+                patch = (
+                    Patch.model_validate(interpreted.interpretation["patch"])
+                    if interpreted.interpretation.get("patch")
+                    else None
                 )
-                _save_requests(store, payload)
-                _validate_new(deps, run_id)
+                apply_decision(store, run_id, decision.id, context=context, patch=patch)
+                if store.version(run_id) and store.run(run_id).stage_id != "S2":
+                    store.commit_stage(
+                        run_id,
+                        StageResult(
+                            stage_id=store.run(run_id).stage_id,
+                            status="REVISION_REQUIRED",
+                            binding=store.binding(run_id),
+                            output_refs=[decision.id],
+                            reason="Researcher intent needs reconciliation",
+                        ),
+                        "S2",
+                    )
+        waiting = [d for d in store.decisions(run_id) if d.status == "AWAITING_RESEARCHER"]
+        if waiting:
+            for decision in waiting:
+                if decision.binding.model_dump(exclude={"event_id"}) != store.binding(
+                    run_id
+                ).model_dump(exclude={"event_id"}):
+                    decision.revision += 1
+                    decision.binding = store.binding(run_id)
+                    store.save_decision(decision)
+            status = "REVIEWABLE" if store.run(run_id).stage_id == "S6" else "NEEDS_RESEARCHER"
+            store.update_run(run_id, status=status)
+            return status
         while store.run(run_id).status == "RUNNING":
-            if store.usage(run_id).llm_tokens >= deps.run.llm_tokens:
-                raise _TaskExhausted(
-                    scope="run",
-                    reason="token_limit",
-                    tokens_used=store.usage(run_id).llm_tokens,
-                    tokens_limit=deps.run.llm_tokens,
+            stage = store.run(run_id).stage_id
+            result = run_stage(run_id, stage, deps)
+            target = "S" + str(int(stage[1]) + 1) if result.status == "COMPLETE" else stage
+            if result.status == "REVISION_REQUIRED" and result.issue_refs:
+                target = "S4"
+            committed = [e for e in store.events(run_id) if e.type == "stage.result"]
+            if not committed or any(
+                committed[-1].data.get(k) != v for k, v in result.model_dump(mode="json").items()
+            ):
+                store.commit_stage(run_id, result, target)
+            if result.status == "NEEDS_INPUT":
+                store.update_run(
+                    run_id, status="REVIEWABLE" if stage == "S6" else "NEEDS_RESEARCHER"
                 )
-            if store.run(run_id).actions_done >= deps.run.max_actions:
-                raise _TaskExhausted(
-                    scope="run",
-                    reason="action_limit",
-                    actions_used=store.run(run_id).actions_done,
-                    actions_limit=deps.run.max_actions,
-                )
-            action = _decide(
-                deps,
-                run_id,
-                "next_action",
-                {
-                    "next_action": Question(
-                        "Choose the next useful legal action. A good initial design may need no "
-                        "revision. Prioritize material concerns and researcher input.",
-                        {a: ACTION_DESCRIPTIONS[a] for a in legal_actions(store, run_id, deps.run)},
-                    ),
-                },
-            )["next_action"]
-            handlers[action](deps, run_id)
-    except _TaskExhausted as exc:
-        with store.transaction():
-            store.append_event(run_id, "budget.stop", exc.details)
-            store.update_run(run_id, status="BUDGET_STOP")
+            elif (
+                result.status in {"STOPPED", "FAILED"}
+                or result.status == "REVISION_REQUIRED"
+                and target == stage
+            ):
+                store.update_run(run_id, status="INCONCLUSIVE")
+    except _BudgetStop:
+        store.update_run(run_id, status="BUDGET_STOP")
+    except Exception:
+        store.append_event(
+            run_id,
+            "stage.result",
+            StageResult(
+                stage_id=store.run(run_id).stage_id,
+                status="FAILED",
+                binding=store.binding(run_id),
+                reason="Stage interrupted; durable artifacts preserved",
+            ).model_dump(mode="json"),
+        )
+        store.update_run(run_id, status="FAILED")
+        raise
     return store.run(run_id).status
 
 
 def answer_request(store: Store, run_id: str, request_id: str, answer: str) -> None:
-    requests = {r.id: r for r in store.requests(run_id)}
-    if request_id not in requests:
-        raise WorkflowError(f"unknown request {request_id}")
-    request = requests[request_id]
-    if request.status == "answered":
-        raise WorkflowError(f"request {request_id} is already answered")
-    if store.run(run_id).status != "NEEDS_RESEARCHER" or request.status != "open":
-        raise WorkflowError(f"request {request_id} is not open for researcher input")
-    _answer_value(request, answer)
-    request.status, request.answer = "answered", answer
-    with store.transaction():
-        store.save_request(request)
-        version = store.version(run_id)
-        if request.kind == "input" and version is not None:
-            store.save_issue(
-                ReviewIssue(
-                    run_id=run_id,
-                    raised_by="researcher",
-                    version_raised=version.version,
-                    severity="MAJOR",
-                    paths=[request.path or "/"],
-                    basis="reasoning",
-                    mechanism=f"Incorporate researcher input: {request.question}",
-                    consequence=(
-                        "The current design may use assumptions superseded by the supplied evidence"
-                    ),
-                    evidence_refs=[f"researcher:{request.id}"],
-                )
-            )
+    raise WorkflowError("Use decide with a ResearcherDecision revision; legacy answer is read-only")
 
 
-def request_changes(store: Store, run_id: str, text: str, path: str | None = None) -> ReviewIssue:
-    version = store.version(run_id)
-    if version is None or not text.strip():
-        raise WorkflowError("A design and non-empty change request are required")
-    try:
-        resolve(version.design, path or "/")
-    except ValueError as exc:
-        raise WorkflowError(str(exc)) from exc
-    with store.transaction():
-        issue = store.save_issue(
-            ReviewIssue(
-                run_id=run_id,
-                raised_by="researcher",
-                version_raised=version.version,
-                severity="MAJOR",
-                paths=[path or "/"],
-                mechanism=text,
-                consequence="Researcher cannot accept this design until the concern is addressed",
-                basis="reasoning",
-            )
-        )
-        if store.run(run_id).status in {"REVIEWABLE", "BLOCKED", "INCONCLUSIVE", "BUDGET_STOP"}:
-            store.update_run(run_id, status="RUNNING")
-    return issue
-
-
-def approve(store: Store, run_id: str, version: int, approver: str) -> Approval:
-    latest = store.version(run_id)
-    if store.run(run_id).status != "REVIEWABLE" or latest is None or version != latest.version:
-        raise WorkflowError("Approval requires REVIEWABLE status and the latest version")
-    if not approver.strip():
-        raise WorkflowError("Approver name must be non-empty")
-    approval = Approval(
-        run_id=run_id,
-        version=version,
-        design_hash=latest.design_hash,
-        approver=approver,
-        at=now(),
+def request_changes(
+    store: Store, run_id: str, text: str, path: str | None = None, *, researcher: str, revision: int
+) -> ResearcherDecision:
+    _require_staged(store, run_id)
+    finals = [
+        d
+        for d in store.decisions(run_id)
+        if d.purpose == "final_review" and d.status == "AWAITING_RESEARCHER"
+    ]
+    if not finals:
+        raise WorkflowError("Change request requires a presented final review decision")
+    return respond(
+        store,
+        run_id,
+        finals[-1].id,
+        DecisionResponse(
+            revision=revision,
+            action="REQUEST_CHANGES",
+            text=text,
+            researcher=researcher,
+            affected_paths=[path] if path else [],
+            response_id="response:" + uuid4().hex,
+        ),
     )
-    store.add_approval(approval)
-    return approval
+
+
+def approve(store: Store, run_id: str, version: int, approver: str):
+    _require_staged(store, run_id)
+    latest = store.version(run_id)
+    if latest is None or version != latest.version:
+        raise WorkflowError("Approval requires exact current version")
+    finals = [
+        d
+        for d in store.decisions(run_id)
+        if d.purpose == "final_review" and d.status == "AWAITING_RESEARCHER"
+    ]
+    if not finals:
+        raise WorkflowError("Approval requires final review decision")
+    decision = finals[-1]
+    return approve_version(
+        store,
+        run_id,
+        decision.id,
+        DecisionResponse(
+            revision=decision.revision,
+            action="APPROVE_VERSION",
+            researcher=approver,
+            response_id="response:" + uuid4().hex,
+        ),
+    )
