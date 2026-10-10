@@ -296,3 +296,6 @@ class AgentResult(Record):
     tokens_in: int = 0
     tokens_out: int = 0
     llm_calls: int = 0
+    tokens_cached: int = 0
+    cache_usage_missing_calls: int = 0
+    stop_reason: Literal["token_limit", "turn_limit"] | None = None

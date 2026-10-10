@@ -138,6 +138,60 @@ def test_happy_path_review_revise_verify_reviewable(state):
     assert any(e.type == "verification" for e in state.events(rid))
 
 
+def test_review_budget_stop_reports_agent_and_keeps_review_uncommitted(state):
+    rid = saved_run(state)
+    skeptic_response = tool_call("read_design", {})
+    skeptic_response.tokens_in = 90
+    skeptic_response.tokens_out = 10
+    skeptic_response.tokens_cached = 80
+    d = deps(
+        state,
+        [review([finding()])[0], skeptic_response],
+        [{"next_action": "REVIEW"}],
+        task_max_tokens=100,
+    )
+    assert advance(rid, d) == "BUDGET_STOP"
+    stop = [e for e in state.events(rid) if e.type == "budget.stop"][-1]
+    assert stop.data["scope"] == "task"
+    assert stop.data["agent_id"] == "skeptic"
+    assert stop.data["reason"] == "token_limit"
+    assert stop.data["tokens_used"] == stop.data["tokens_limit"] == 100
+    assert stop.data["llm_calls"] == 1
+    assert state.run(rid).reviewed_version == 0
+    assert state.issues(rid) == []
+
+
+def test_task_clipped_to_remaining_run_budget_reports_global_ceiling(state):
+    rid = saved_run(state)
+    state.append_event(rid, "task.finished", {"tokens_in": 90, "tokens_out": 0, "llm_calls": 1})
+    response = review()[0]
+    response.tokens_in, response.tokens_out = 8, 2
+    d = deps(
+        state,
+        [response],
+        [{"next_action": "REVIEW"}],
+        llm_tokens=100,
+        task_max_tokens=1000,
+    )
+    assert advance(rid, d) == "BUDGET_STOP"
+    stop = [e for e in state.events(rid) if e.type == "budget.stop"][-1]
+    assert stop.data["scope"] == "run" and stop.data["agent_id"] == "methodologist"
+    assert stop.data["tokens_used"] == stop.data["tokens_limit"] == 100
+    assert stop.data["task_tokens_used"] == stop.data["task_tokens_limit"] == 10
+    assert state.run(rid).reviewed_version == 0
+
+
+@pytest.mark.parametrize(
+    "config, reason", [(dict(llm_tokens=1), "token_limit"), (dict(max_actions=1), "action_limit")]
+)
+def test_run_budget_stop_reports_run_limit(state, config, reason):
+    rid = saved_run(state, actions_done=1)
+    state.append_event(rid, "task.finished", {"tokens_in": 1, "tokens_out": 0})
+    assert advance(rid, deps(state, **config)) == "BUDGET_STOP"
+    stop = [e for e in state.events(rid) if e.type == "budget.stop"][-1]
+    assert stop.data["scope"] == "run" and stop.data["reason"] == reason
+
+
 def test_legal_actions_initial(state):
     assert legal_actions(state, saved_run(state), RunConfig()) == ["REVIEW", "STOP"]
 
@@ -392,7 +446,7 @@ def test_answered_input_is_incorporated_before_reviewable(state):
     assert "MARK_REVIEWABLE" not in legal_actions(state, rid, RunConfig())
 
     def use_input(messages, tools):
-        source = json.loads(messages[-1]["content"])["researcher_inputs"][0]
+        source = json.loads(messages[-1]["content"])["result"]["researcher_inputs"][0]
         assert source["text"] == "District records show standard deviation 20 points"
         return revision(
             "/scenarios/0/sd",

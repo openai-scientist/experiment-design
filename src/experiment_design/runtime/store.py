@@ -24,6 +24,7 @@ EVENT_TYPES = (
     "run.status",
     "task.started",
     "task.finished",
+    "budget.stop",
     "tool.call",
     "decision",
     "design.version",
@@ -66,6 +67,8 @@ class Usage(Record):
     llm_calls: int
     jev_calls: int
     actions: int
+    llm_cached_tokens_reported: int = 0
+    llm_cache_usage_missing_calls: int = 0
 
 
 class Store:
@@ -317,4 +320,8 @@ class Store:
             llm_calls=sum(t.get("llm_calls", 0) for t in tasks),
             jev_calls=sum(e.type == "decision" and e.data.get("by") == "jev" for e in events),
             actions=self.run(run_id).actions_done,
+            llm_cached_tokens_reported=sum(t.get("tokens_cached", 0) for t in tasks),
+            llm_cache_usage_missing_calls=sum(
+                t.get("cache_usage_missing_calls", t.get("llm_calls", 0)) for t in tasks
+            ),
         )

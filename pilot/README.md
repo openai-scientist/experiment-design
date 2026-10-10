@@ -1,5 +1,20 @@
 # Researcher-reviewed pilot
 
+`exd status RUN` explains new budget stops with their scope (task or run), reason
+(tokens, turns or actions), agent and applicable limits. Earlier journals can lack
+the reason. A task's token ceiling counts cumulative input and output across calls;
+the final response can cross it before its tool calls are executed. Resume reruns
+an unfinished review action, including a methodologist task that already succeeded.
+
+Provider prompt caching can reuse stable tool schemas and earlier conversation
+prefixes. Support depends on the configured provider/model. Usage reports
+`llm_cached_tokens_reported` and `llm_cache_usage_missing_calls`: missing telemetry
+does not establish either a hit or a miss. Cache hits remain included in the task
+and run token ceilings; no billing estimate or token discount is inferred. The
+client generates a fresh LLM response on every call and sends no provider-specific
+cache options. See the [OpenAI caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+for provider behavior; an OpenAI-compatible gateway need not expose every option.
+
 Before a live run, review `hypothesis.example.md`: confirm the claim, the 3-point margin,
 the available classes and the operational constraints. Replace the draft district note
 with real data supporting the standard deviation. Confirm or revise the assumed ICC and

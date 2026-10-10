@@ -1,9 +1,10 @@
 """OpenAI-compatible synchronous tool-calling client with bounded retries."""
 
 import time
+from typing import Self
 
 import httpx
-from pydantic import ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from experiment_design.config import LLMConfig
 from experiment_design.contracts import Record
@@ -20,6 +21,13 @@ class LLMResponse(Record):
     tool_calls: list[ToolCall]
     tokens_in: int
     tokens_out: int
+    tokens_cached: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_cache_usage(self) -> Self:
+        if self.tokens_cached is not None and self.tokens_cached > self.tokens_in:
+            raise ValueError("Cached input tokens cannot exceed total input tokens")
+        return self
 
 
 class LLMError(RuntimeError):
@@ -82,6 +90,9 @@ class LLMClient:
                     ],
                     tokens_in=body["usage"]["prompt_tokens"],
                     tokens_out=body["usage"]["completion_tokens"],
+                    tokens_cached=(body["usage"].get("prompt_tokens_details") or {}).get(
+                        "cached_tokens"
+                    ),
                 )
             except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
                 raise LLMError(f"malformed LLM response: {exc}") from exc

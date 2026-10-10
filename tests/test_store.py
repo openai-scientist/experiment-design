@@ -99,7 +99,17 @@ def test_reopen_store_persists(tmp_path):
 
 def test_usage_sums_tasks_and_jev(state):
     store, run = state
-    store.append_event(run, "task.finished", {"tokens_in": 10, "tokens_out": 4, "llm_calls": 2})
+    store.append_event(
+        run,
+        "task.finished",
+        {
+            "tokens_in": 10,
+            "tokens_out": 4,
+            "llm_calls": 2,
+            "tokens_cached": 7,
+            "cache_usage_missing_calls": 1,
+        },
+    )
     store.append_event(run, "task.finished", {"tokens_in": 3, "tokens_out": 5, "llm_calls": 1})
     store.append_event(run, "decision", {"by": "jev", "choice": "REVIEW"})
     store.append_event(run, "decision", {"by": "only_option", "choice": "STOP"})
@@ -109,6 +119,8 @@ def test_usage_sums_tasks_and_jev(state):
         "llm_calls": 3,
         "jev_calls": 1,
         "actions": 2,
+        "llm_cached_tokens_reported": 7,
+        "llm_cache_usage_missing_calls": 2,
     }
 
 

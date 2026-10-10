@@ -38,13 +38,20 @@ def client(handler, retries=3):
     )
 
 
-def test_complete_parses_tool_calls():
+@pytest.mark.parametrize("cached", [None, 0, 9, 11])
+def test_complete_parses_tool_calls(cached):
+    requests = []
+
     def handler(request):
+        requests.append(request)
         assert request.url.path == "/v1/chat/completions"
         body = json.loads(request.content)
         assert body["model"] == "tool-model"
         assert body["messages"] == [{"role": "user", "content": "inspect"}]
-        return httpx.Response(200, json=response())
+        data = response()
+        if cached is not None:
+            data["usage"]["prompt_tokens_details"] = {"cached_tokens": cached}
+        return httpx.Response(200, json=data)
 
     llm = client(handler)
     try:
@@ -54,6 +61,21 @@ def test_complete_parses_tool_calls():
             '{"path":"/claim"}',
         )
         assert (r.tokens_in, r.tokens_out) == (11, 7)
+        assert r.tokens_cached == cached
+        assert llm.complete([{"role": "user", "content": "inspect"}], []).tokens_cached == cached
+        assert len(requests) == 2
+    finally:
+        llm.close()
+
+
+@pytest.mark.parametrize("cached", [-1, 12])
+def test_invalid_cached_token_accounting_is_rejected(cached):
+    data = response()
+    data["usage"]["prompt_tokens_details"] = {"cached_tokens": cached}
+    llm = client(lambda _: httpx.Response(200, json=data))
+    try:
+        with pytest.raises(LLMError, match="malformed LLM response"):
+            llm.complete([], [])
     finally:
         llm.close()
 

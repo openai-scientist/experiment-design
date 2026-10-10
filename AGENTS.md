@@ -45,6 +45,15 @@ the only event source. Input, state and output file access belongs to package,
 Store and export respectively; config and CLI may load configuration.
 Never use or delegate to Astra models unless the user explicitly requests Astra.
 
+After the initial design, scientific tools use the committed version and accept
+sensitivity overrides or patch previews. Tool observations expose an exact
+evidence_ref; computation findings cite an accepted call from the current task.
+Keep tool schemas and earlier messages stable within an agent task for provider
+prefix caching. Record reported cache hits separately from missing cache telemetry;
+cached input still counts toward token budgets. Do not replay cached LLM answers
+for independent review or verification. Budget stops record their scope and reason
+in the journal and appear in CLI status.
+
 ## Testing rules
 Each test protects a user-visible or downstream contract: statistical references,
 guards, journal/storage, commands or transitions. No assertion-free, duplicate,

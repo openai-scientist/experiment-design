@@ -50,7 +50,9 @@ class WorkflowError(ValueError):
 
 
 class _TaskExhausted(RuntimeError):
-    pass
+    def __init__(self, **details):
+        self.details = details
+        super().__init__(details["reason"])
 
 
 def start_run(package: ScientificPackage, deps: Deps, config_snapshot: dict) -> str:
@@ -174,7 +176,12 @@ def _context(deps: Deps, run_id: str) -> ToolContext:
 def _agent(deps: Deps, ctx: ToolContext, module, **focus) -> dict:
     remaining = deps.run.llm_tokens - deps.store.usage(ctx.run_id).llm_tokens
     if remaining <= 0:
-        raise _TaskExhausted()
+        raise _TaskExhausted(
+            scope="run",
+            reason="token_limit",
+            tokens_used=deps.store.usage(ctx.run_id).llm_tokens,
+            tokens_limit=deps.run.llm_tokens,
+        )
     ctx.accepted_call_ids.clear()
     task = AgentTask(
         objective=module.SPEC.system_prompt,
@@ -206,7 +213,20 @@ def _agent(deps: Deps, ctx: ToolContext, module, **focus) -> dict:
         ctx.accepted_call_ids,
     )
     if result.completion_status != "completed":
-        raise _TaskExhausted()
+        run_tokens = deps.store.usage(ctx.run_id).llm_tokens
+        run_exhausted = result.stop_reason == "token_limit" and run_tokens >= deps.run.llm_tokens
+        task_tokens = result.tokens_in + result.tokens_out
+        raise _TaskExhausted(
+            scope="run" if run_exhausted else "task",
+            reason=result.stop_reason,
+            agent_id=module.SPEC.agent_id,
+            tokens_used=run_tokens if run_exhausted else task_tokens,
+            tokens_limit=deps.run.llm_tokens if run_exhausted else task.budget.max_tokens,
+            task_tokens_used=task_tokens,
+            task_tokens_limit=task.budget.max_tokens,
+            llm_calls=result.llm_calls,
+            max_turns=task.budget.max_turns,
+        )
     return result.findings_or_changes
 
 
@@ -591,11 +611,20 @@ def advance(run_id: str, deps: Deps) -> RunStatus:
                 _save_requests(store, payload)
                 _validate_new(deps, run_id)
         while store.run(run_id).status == "RUNNING":
-            if (
-                store.usage(run_id).llm_tokens >= deps.run.llm_tokens
-                or store.run(run_id).actions_done >= deps.run.max_actions
-            ):
-                raise _TaskExhausted()
+            if store.usage(run_id).llm_tokens >= deps.run.llm_tokens:
+                raise _TaskExhausted(
+                    scope="run",
+                    reason="token_limit",
+                    tokens_used=store.usage(run_id).llm_tokens,
+                    tokens_limit=deps.run.llm_tokens,
+                )
+            if store.run(run_id).actions_done >= deps.run.max_actions:
+                raise _TaskExhausted(
+                    scope="run",
+                    reason="action_limit",
+                    actions_used=store.run(run_id).actions_done,
+                    actions_limit=deps.run.max_actions,
+                )
             action = _decide(
                 deps,
                 run_id,
@@ -609,8 +638,10 @@ def advance(run_id: str, deps: Deps) -> RunStatus:
                 },
             )["next_action"]
             handlers[action](deps, run_id)
-    except _TaskExhausted:
-        store.update_run(run_id, status="BUDGET_STOP")
+    except _TaskExhausted as exc:
+        with store.transaction():
+            store.append_event(run_id, "budget.stop", exc.details)
+            store.update_run(run_id, status="BUDGET_STOP")
     return store.run(run_id).status
 
 

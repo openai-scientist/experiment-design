@@ -24,6 +24,7 @@ def run(
     submit_handler=lambda a: a,
     allowed=("probe",),
     turns=3,
+    tokens=1000,
 ):
     store, rid = state
     task = AgentTask(
@@ -31,7 +32,7 @@ def run(
         package_ref="math",
         design_version=None,
         allowed_tools=list(allowed),
-        budget=TaskBudget(max_turns=turns, max_tokens=1000),
+        budget=TaskBudget(max_turns=turns, max_tokens=tokens),
         exit_conditions=["Submit"],
     )
     finish = Tool("finish", "Finish", {"type": "object"}, submit_handler)
@@ -52,10 +53,12 @@ def run(
 
 def test_observation_drives_next_call(state):
     def next_response(messages, tools):
-        assert json.loads(messages[-1]["content"]) == {"value": 7}
+        observed = json.loads(messages[-1]["content"])
+        assert observed["result"] == {"value": 7}
+        assert observed["evidence_ref"] == "tool:probe-result"
         return submit("finish", {"rationale": "Observed value 7"})
 
-    result, _, events = run(state, [tool_call("probe", {}), next_response])
+    result, _, events = run(state, [tool_call("probe", {}, call_id="probe-result"), next_response])
     assert result.completion_status == "completed"
     assert result.findings_or_changes["rationale"] == "Observed value 7"
     assert len([e for e in events if e.type == "tool.call"]) == 2
@@ -101,6 +104,44 @@ def test_budget_exhausted_turns(state):
     result, _, events = run(state, [tool_call("probe", {}), tool_call("probe", {})], turns=2)
     assert result.completion_status == "budget_exhausted"
     assert events[-1].data["llm_calls"] == 2
+    assert events[-1].data["stop_reason"] == "turn_limit"
+    assert events[-1].data["budget"] == {"max_turns": 2, "max_tokens": 1000}
+
+
+def test_cached_input_still_exhausts_token_budget_before_tools(state):
+    response = tool_call("probe", {})
+    response.tokens_in = 80
+    response.tokens_out = 20
+    response.tokens_cached = 75
+
+    def unexpected(_):
+        pytest.fail("Tool executed after the token ceiling was reached")
+
+    result, llm, events = run(state, [response], handler=unexpected, tokens=100)
+    assert result.completion_status == "budget_exhausted"
+    assert len(llm.calls) == 1
+    assert not any(e.type == "tool.call" for e in events)
+    assert events[-1].data["stop_reason"] == "token_limit"
+    assert events[-1].data["tokens_cached"] == 75
+
+
+def test_empty_task_budget_never_calls_provider(state):
+    result, llm, events = run(state, [], tokens=0)
+    assert result.completion_status == "budget_exhausted"
+    assert llm.calls == []
+    assert events[-1].data["stop_reason"] == "token_limit"
+
+
+def test_cache_reporting_distinguishes_missing_from_zero(state):
+    cached = tool_call("probe", {})
+    cached.tokens_cached = 8
+    zero = tool_call("probe", {})
+    zero.tokens_cached = 0
+    result, _, events = run(state, [cached, zero, submit("finish", {})])
+    assert result.completion_status == "completed"
+    assert events[-1].data["tokens_cached"] == 8
+    assert events[-1].data["cache_usage_missing_calls"] == 1
+    assert events[-1].data["stop_reason"] is None
 
 
 def test_tool_events_have_no_full_output(state):

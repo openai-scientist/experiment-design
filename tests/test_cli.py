@@ -77,6 +77,27 @@ def test_answer_unknown_request_exit_2(state, capsys):
     assert state[0].events(state[1]) == before
 
 
+def test_status_explains_budget_stop_from_journal(state, capsys):
+    store, rid, _, _ = state
+    store.append_event(
+        rid,
+        "budget.stop",
+        {
+            "scope": "task",
+            "reason": "token_limit",
+            "agent_id": "skeptic",
+            "tokens_used": 63979,
+            "tokens_limit": 60000,
+            "llm_calls": 10,
+        },
+    )
+    store.update_run(rid, status="BUDGET_STOP")
+    assert call(state, ["status", rid]) == 0
+    output = capsys.readouterr().out
+    assert "skeptic" in output and "token_limit" in output
+    assert "63979/60000" in output
+
+
 def test_answer_twice_exit_2(state, capsys):
     assert call(state, ["answer", state[1], state[2].id, "yes"]) == 0
     before = state[0].events(state[1])

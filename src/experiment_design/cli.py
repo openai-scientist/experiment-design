@@ -79,6 +79,24 @@ def _status(store: Store, rid: str, config: Path) -> None:
         + (", ".join(f"{key}={value}" for key, value in sorted(counts.items())) or "none")
     )
     print("usage: " + ", ".join(f"{key}={value}" for key, value in usage.model_dump().items()))
+    if record.status == "BUDGET_STOP":
+        stops = [event.data for event in store.events(rid) if event.type == "budget.stop"]
+        if stops:
+            stop = stops[-1]
+            detail = f"scope={stop['scope']}, reason={stop['reason']}"
+            if stop.get("agent_id"):
+                detail += f", agent={stop['agent_id']}"
+            if "tokens_used" in stop:
+                detail += f", tokens={stop['tokens_used']}/{stop['tokens_limit']}"
+            if "actions_used" in stop:
+                detail += f", actions={stop['actions_used']}/{stop['actions_limit']}"
+            if "llm_calls" in stop:
+                detail += f", calls={stop['llm_calls']}"
+                if "max_turns" in stop:
+                    detail += f"/{stop['max_turns']}"
+            print("budget stop: " + detail)
+        else:
+            print("budget stop: reason unavailable in this older journal")
     for request in store.requests(rid):
         if request.status == "open":
             print(request.question)

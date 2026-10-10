@@ -136,6 +136,32 @@ def test_compute_power_tool_overrides(ctx):
     assert ctx.store.version(ctx.run_id).design.sampling.cluster.icc.value == 0.10
 
 
+def test_review_sensitivity_schema_uses_committed_design(ctx):
+    tool = build_tools(ctx)["compute_power"]
+    assert "design" not in tool.parameters["properties"]
+    overrides = tool.parameters["properties"]["overrides"]
+    assert overrides["additionalProperties"] is False
+    assert "icc" in overrides["properties"]
+    assert "scenarios[0].effect" not in overrides["properties"]
+    with pytest.raises(ValueError, match="committed design"):
+        tool.handler({"design": design().model_dump(mode="json")})
+
+
+def test_initial_scientific_preview_remains_available(ctx):
+    ctx.version = None
+    tool = build_tools(ctx)["compute_power"]
+    assert "design" in tool.parameters["properties"]
+    assert tool.handler({"design": design().model_dump(mode="json")})[0]["status"] == "computed"
+
+
+def test_rejected_reference_feedback_lists_usable_evidence(ctx):
+    ctx.accepted_call_ids.add("sensitivity-result")
+    errors = validate_findings([finding(evidence_refs=["ICC sensitivity power 0.50"])], ctx)
+    feedback = " ".join(errors)
+    assert "Unknown evidence ref" in feedback
+    assert "tool:sensitivity-result" in feedback and "S1" in feedback
+
+
 def test_researcher_input_visible_as_source(ctx):
     ctx.store.save_request(
         ResearcherRequest(

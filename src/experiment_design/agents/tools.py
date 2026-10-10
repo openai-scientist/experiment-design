@@ -53,7 +53,11 @@ def source_ids(ctx: ToolContext) -> set[str]:
 
 def validate_refs(refs: list[str], ctx: ToolContext) -> list[str]:
     known = source_ids(ctx) | {f"tool:{call_id}" for call_id in ctx.accepted_call_ids}
-    return [f"Unknown evidence ref {ref}" for ref in refs if ref not in known]
+    return [
+        f"Unknown evidence ref {ref}. Use an exact reference from: {', '.join(sorted(known))}"
+        for ref in refs
+        if ref not in known
+    ]
 
 
 def validate_findings(findings: list[Finding], ctx: ToolContext) -> list[str]:
@@ -113,21 +117,35 @@ def submit_schema(name: str, model: type[Record], handler) -> Tool:
 def context_brief(ctx: ToolContext) -> str:
     package = ctx.package.model_dump(mode="json", exclude={"sources", "assumptions"})
     ledger = [i.model_dump(mode="json") for i in ctx.store.issues(ctx.run_id)]
-    return json.dumps(
+    guidance = (
+        "Tool observations contain result and evidence_ref. Copy evidence_ref exactly into "
+        "evidence_refs or scenarios_checked, e.g. tool:call_abc. Source references are exact "
+        "source IDs, never prose. Computation findings must cite a successful computation "
+        "from this task; pending reviewer references cannot be reused as your own. "
+        "For sensitivity use the committed design with overrides such as "
+        '{"icc":{"value":0.2,"unit":"","provenance":"assumption"}}. '
+        "Override keys are effect, sd, p_control, p_treatment, size and icc; "
+        "they are names, not design paths. Preserve the canonical claim and outcome units.\n"
+    )
+    return guidance + json.dumps(
         {
             "package": package,
             "intake_gaps": intake_gaps(ctx.package),
             "version": ctx.version.version if ctx.version else None,
             "issue_ledger": ledger,
             "pending_findings": [f.model_dump(mode="json") for f in ctx.pending_findings],
+            "source_ids": sorted(source_ids(ctx)),
         },
         ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
 def build_tools(ctx: ToolContext) -> dict[str, Tool]:
     def current(args):
         if args.get("design") is not None:
+            if ctx.version is not None:
+                raise ValueError("Use the committed design; supply overrides or patch operations")
             return Design.model_validate(args["design"])
         if ctx.version is None:
             raise ValueError("No committed design; pass the proposed design for preview")
@@ -214,10 +232,11 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
 
     string = {"type": "string"}
     ops = {"type": "array", "items": Patch.model_json_schema()["$defs"]["PatchOp"]}
-    draft = Design.model_json_schema()
-    definitions = draft.pop("$defs")
-    # Attach the referenced scientific definitions to each preview schema.
-    preview = {"design": draft}
+    preview, definitions = {}, {}
+    if ctx.version is None:
+        draft = Design.model_json_schema()
+        definitions = draft.pop("$defs")
+        preview = {"design": draft}
     result = {
         "read_package": tool(
             "read_package",
@@ -259,13 +278,22 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
         ),
         "compute_power": tool(
             "compute_power",
-            "Compute power with honest quantitative inputs",
+            "Compute power from the current design; before the first version supply design. "
+            "Sensitivity overrides use effect, sd, p_control, p_treatment, size or icc, "
+            "not design paths. Supply a Quantity with value, unit and provenance; "
+            "effect/sd use outcome units, size uses the canonical cluster-size unit, "
+            "icc uses an empty unit. "
+            "Cite the returned evidence_ref when submitting computation findings.",
             preview
             | {
                 "scenario": {"type": ["string", "null"]},
                 "overrides": {
                     "type": "object",
-                    "additionalProperties": Quantity.model_json_schema(),
+                    "properties": {
+                        name: {"$ref": "#/$defs/Quantity"}
+                        for name in ("effect", "sd", "p_control", "p_treatment", "size", "icc")
+                    },
+                    "additionalProperties": False,
                 },
             },
             [],
@@ -289,4 +317,7 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
             read_diff,
         ),
     }
+    result["compute_power"].parameters.setdefault("$defs", {})["Quantity"] = (
+        Quantity.model_json_schema()
+    )
     return result

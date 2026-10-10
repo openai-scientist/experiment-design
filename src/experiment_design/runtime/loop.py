@@ -55,6 +55,7 @@ def run_agent(
             "objective": task.objective,
             "allowed_tools": task.allowed_tools,
             "design_version": task.design_version,
+            "budget": task.budget.model_dump(),
         },
         **meta,
     )
@@ -79,12 +80,18 @@ def run_agent(
     try:
         for _ in range(task.budget.max_turns):
             if result.tokens_in + result.tokens_out >= task.budget.max_tokens:
+                result.stop_reason = "token_limit"
                 break
             result.llm_calls += 1
             response = llm.complete(messages, schemas)
             result.tokens_in += response.tokens_in
             result.tokens_out += response.tokens_out
+            if response.tokens_cached is None:
+                result.cache_usage_missing_calls += 1
+            else:
+                result.tokens_cached += response.tokens_cached
             if result.tokens_in + result.tokens_out >= task.budget.max_tokens:
+                result.stop_reason = "token_limit"
                 break
             messages.append(
                 {
@@ -138,7 +145,18 @@ def run_agent(
                     },
                     **meta,
                 )
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
+                feedback = observation
+                if ok and call.name != submit.name:
+                    feedback = {"result": observation, "evidence_ref": f"tool:{call.id}"}
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json.dumps(
+                            feedback, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                        ),
+                    }
+                )
                 if ok and call.name == submit.name:
                     result.findings_or_changes = observation
                     result.rationale = observation.get("rationale", "")
@@ -147,6 +165,7 @@ def run_agent(
                     result.completion_status = "completed"
                     return result
         result.completion_status = "budget_exhausted"
+        result.stop_reason = result.stop_reason or "turn_limit"
         return result
     finally:
         store.append_event(
@@ -157,6 +176,10 @@ def run_agent(
                 "tokens_in": result.tokens_in,
                 "tokens_out": result.tokens_out,
                 "llm_calls": result.llm_calls,
+                "tokens_cached": result.tokens_cached,
+                "cache_usage_missing_calls": result.cache_usage_missing_calls,
+                "stop_reason": result.stop_reason,
+                "budget": task.budget.model_dump(),
             },
             **meta,
         )
