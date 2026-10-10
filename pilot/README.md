@@ -45,7 +45,7 @@ exd request-changes <run> "<required change>" --path /analysis
 exd approve <run> --version <latest-version> --by "<researcher name>"
 ```
 
-Save both versions for comparison. Each directory receives `edp.md`, `design.json` and
+Save both versions for comparison. Each directory receives `experiment_design.md`, `experiment_design.json` and
 `manifest.json` from the selected canonical version:
 
 ```text
