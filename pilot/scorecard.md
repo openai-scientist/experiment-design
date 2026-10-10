@@ -9,8 +9,10 @@ Reviewer:
 Review date:
 Input snapshot:
 Configuration snapshot (environment variable names only):
-Initial export:
-Final export:
+Baseline commit/run/export:
+Migrated commit/run/initial/final export:
+Source field mapping:
+Provider/model IDs and budget comparability:
 
 | Dimension | Score (1–5) | Evidence | Reviewer comment |
 | --- | --- | --- | --- |
@@ -37,3 +39,19 @@ Verdict and failure modes:
 
 An unsuccessful pilot is useful when it identifies a concrete failure mode. Do not force
 approval or fill missing scientific inputs to make the run look successful.
+
+Independent handoff assessment (source, assumptions, SAP, power, protocol and remaining scientific choices):
+
+Per-dimension baseline comparison (investigate every drop):
+
+Comparison limitations and mechanisms not exercised live:
+
+Responsibility worksheet:
+
+stage-responsibility: NOT_PROVEN
+EDP-quality: NOT_PROVEN
+overall: NOT_PROVEN
+
+Change a verdict only when its evidence is recorded. Overall PASS requires both axes
+PASS; scores are not an automatic READY threshold. An unfilled human scorecard remains
+NOT_PROVEN. Baseline weaknesses never reduce the scientific acceptance bar.
