@@ -166,6 +166,24 @@ def resolve(design: Record, path: str) -> Any:
     return _read(design.model_dump(mode="json"), _parts(path), path)
 
 
+def apply_context_patch(context: ResearchContext, patch: Patch) -> ResearchContext:
+    """Replace proposed package fields without retransmitting immutable context metadata."""
+    data = context.model_dump(mode="json")
+    for op in patch.ops:
+        parts = _parts(op.path)
+        if parts[:2] != ["context", "package"]:
+            raise PatchError(["context patch must address package fields"])
+        parts = parts[1:]
+        _read(data, parts, op.path)
+        parent = _read(data, parts[:-1], op.path)
+        if isinstance(parent, list):
+            parent[int(parts[-1])] = op.value
+        else:
+            parent[parts[-1]] = op.value
+    data["revision"] = context.revision + 1
+    return ResearchContext.model_validate(data)
+
+
 def apply_patch(
     design: Design,
     patch: Patch,

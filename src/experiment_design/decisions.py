@@ -10,6 +10,7 @@ from experiment_design.contracts import (
 )
 from experiment_design.package import all_sources
 from experiment_design.patch import (
+    apply_context_patch,
     apply_patch,
     design_diff,
     package_claim,
@@ -157,6 +158,16 @@ def interpret(
         raise ValueError("decision has no answer to interpret")
     if decision.binding.source_snapshot_id != context.source_snapshot_id:
         raise ValueError("interpretation source binding differs")
+    result = dict(result)
+    context_patch = result.pop("context_patch", None)
+    if context_patch is not None:
+        if result.get("context") is not None or result.get("patch") is not None:
+            raise ValueError("context_patch cannot be combined with context or design patch")
+        if decision.binding.design_version is not None:
+            raise ValueError("context patch requires a pre-design decision; use a design patch")
+        result["context"] = apply_context_patch(
+            context, Patch.model_validate(context_patch)
+        ).model_dump(mode="json")
     allowed_paths = [scientific_path(path) for path in decision.affected_paths]
     proposed = Patch.model_validate(result["patch"]) if result.get("patch") is not None else None
     if proposed and any(

@@ -436,3 +436,88 @@ def test_interpretation_submit_rejects_invalid_context_before_committing(tmp_pat
     )
     assert store.context(run) == context
     store.close()
+
+
+@pytest.mark.parametrize("invalid", [None, "scope", "metadata", "combined", "after_design"])
+def test_scoped_context_answer_preserves_snapshot_and_applies_only_authorized_fields(
+    tmp_path, invalid
+):
+    from test_stage_pipeline import source_context
+
+    from experiment_design.agents import decision_interpretation
+    from experiment_design.agents.tools import ToolContext
+    from experiment_design.runtime.loop import SubmitRejected
+
+    store = Store(tmp_path / "context-answer.db")
+    run, _ = staged(store)
+    context = source_context()
+    store.save_context(run, context)
+    if invalid == "after_design":
+        store.add_version(run, design(), author="design", parent=None)
+    decision = store.save_decision(
+        ResearcherDecision(
+            id="estimand",
+            run_id=run,
+            binding=store.binding(run),
+            status="AWAITING_RESEARCHER",
+            problem="Confirm estimand",
+            affected_paths=[
+                "/context/unknowns"
+                if invalid == "metadata"
+                else "/context/package/inference/estimand"
+            ],
+        )
+    )
+    text = "Mean final-score difference AI minus teacher, ITT among class-randomized pupils."
+    answered = respond(
+        store,
+        run,
+        decision.id,
+        DecisionResponse(
+            revision=1,
+            action="PROPOSE_ALTERNATIVE",
+            text=text,
+            researcher="PI",
+            response_id="estimand-answer",
+        ),
+    )
+    path = {
+        "scope": "/context/package/hypothesis/method",
+        "metadata": "/context/unknowns",
+    }.get(invalid, "/context/package/inference/estimand")
+    payload = {
+        "authorized": True,
+        "ambiguous": False,
+        "explanation": "Apply the recorded estimand without resubmitting the source snapshot",
+        "context_patch": {
+            "ops": [{"path": path, "value": [] if invalid == "metadata" else text}],
+            "rationale": "Researcher answer",
+        },
+    }
+    if invalid == "combined":
+        proposed = context.model_copy(deep=True)
+        proposed.revision += 1
+        proposed.package.inference.estimand = text
+        payload["context"] = proposed.model_dump(mode="json")
+    ctx = ToolContext(store, run, context.package, store.version(run), set())
+    tool = decision_interpretation.submit_tool(ctx, decision=answered)
+    if invalid:
+        with pytest.raises(SubmitRejected, match="scope|context_patch|context patch"):
+            tool.handler(payload)
+    else:
+        accepted = tool.handler(payload)
+        interpreted = interpret(answered, context, accepted)
+        store.save_decision(interpreted)
+        apply_decision(store, run, decision.id, context=context, patch=None)
+        applied = store.context(run)
+        assert applied.package.inference.estimand == text
+        assert applied.package.sources == context.package.sources
+        assert applied.unknowns == context.unknowns
+        assert applied.decision_ids == context.decision_ids
+        assert applied.field_annotations["estimand"].status == "researcher-confirmed"
+        assert store.decision(run, decision.id).responses[-1].text == text
+    if invalid:
+        assert store.context(run) == context
+    else:
+        assert store.context(run).revision == 2
+    store.close()

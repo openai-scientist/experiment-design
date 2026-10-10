@@ -716,6 +716,7 @@ def advance(run_id: str, deps: Deps) -> RunStatus:
                     decision_interpretation,
                     decision=decision,
                     allowed_paths=[scientific_path(path) for path in decision.affected_paths],
+                    context_patch_allowed=decision.binding.design_version is None,
                 )
                 interpreted = interpret(decision, context, result.findings_or_changes)
                 if interpreted.interpretation.get("ambiguous"):
