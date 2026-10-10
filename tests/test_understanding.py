@@ -234,3 +234,43 @@ def test_margin_rejection_identifies_the_recoverable_context_key(tmp_path):
     assert accepted["context"]["package"]["inference"]["margin"] == 3
     assert accepted["context"]["field_annotations"]["margin"]["status"] == "source-stated"
     store.close()
+
+
+@pytest.mark.parametrize(
+    "annotation, detail",
+    [
+        ("hypothesis.statement", "hypothesis"),
+        ("/assumptions/A1", "JSON pointer"),
+        ("/analysis/alpha", "typed commitment value"),
+    ],
+)
+def test_understanding_rejects_context_that_cannot_bind_scientific_commitments(
+    tmp_path, annotation, detail
+):
+    store, _, snapshot, ctx, data = setup_context(tmp_path)
+    data["context"]["field_annotations"][annotation] = {
+        "status": "source-stated",
+        "source_ref": snapshot.artifacts[0].ref,
+        "source_span": "AI feedback is non-inferior",
+    }
+    with pytest.raises(SubmitRejected) as rejected:
+        understanding.submit_tool(ctx).handler(data)
+    assert annotation in " ".join(rejected.value.errors)
+    assert detail in " ".join(rejected.value.errors)
+    del data["context"]["field_annotations"][annotation]
+    accepted = understanding.submit_tool(ctx).handler(data)
+    assert accepted["context"]["field_annotations"]["margin"]["status"] == "source-stated"
+    store.close()
+
+
+def test_understanding_decision_feedback_explains_permitted_agent_status(tmp_path):
+    store, _, _, ctx, data = setup_context(tmp_path)
+    data["decisions"][0]["status"] = "AWAITING_RESEARCHER"
+    with pytest.raises(SubmitRejected) as rejected:
+        understanding.submit_tool(ctx).handler(data)
+    feedback = " ".join(rejected.value.errors)
+    assert "IDENTIFIED" in feedback and "EXPLORING" in feedback
+    data["decisions"][0]["status"] = "IDENTIFIED"
+    accepted = understanding.submit_tool(ctx).handler(data)
+    assert accepted["decisions"][0]["status"] == "IDENTIFIED"
+    store.close()

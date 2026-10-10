@@ -6,9 +6,15 @@ import re
 from pydantic import Field
 
 from experiment_design.agents.tools import ToolContext, sources, submit_schema
-from experiment_design.contracts import CLAIM_FIELDS, Record, ResearchContext, ResearcherDecision
-from experiment_design.patch import package_claim, resolve
-from experiment_design.runtime.loop import AgentSpec
+from experiment_design.contracts import (
+    CLAIM_FIELDS,
+    Design,
+    Record,
+    ResearchContext,
+    ResearcherDecision,
+)
+from experiment_design.patch import PatchError, package_claim, resolve, scientific_commitments
+from experiment_design.runtime.loop import AgentSpec, SubmitRejected
 
 SPEC = AgentSpec(
     "understanding", "Understand the supplied research, preserving intent and uncertainty."
@@ -34,12 +40,17 @@ def brief(ctx: ToolContext, **focus) -> str:
         "If package.inference.margin is supplied, context.field_annotations['margin'] is required. "
         "Keep field_annotations, unknowns and decision_ids inside context; the only top-level "
         "submission fields are context and decisions. Use JSON pointers for other "
-        "scientific commitments, especially /analysis/model. Do not invent missing claims "
-        "or mark proposals researcher-confirmed. "
+        "scientific commitments, especially /analysis/model. "
+        "Design pointers must match the Design schema and carry a typed value for source-stated "
+        "commitments. List pointers use numeric indices, never assumption IDs. Context metadata "
+        "uses /context/package/... pointers, for example /context/package/constraints. "
+        "Do not invent missing claims or mark proposals researcher-confirmed. "
         "Record contradictions and missing scientific decisions even before a design exists. "
         "Quantities from sources require a verbatim span supporting value and unit; otherwise "
         "mark an explicit planning assumption, or leave missing. Context package.sources will "
-        "be populated from immutable sources. Bind each decision to this run and binding.\n"
+        "be populated from immutable sources. Bind each decision to this run and binding. "
+        "Submit decisions only as IDENTIFIED or EXPLORING; workflow presents them to the "
+        "researcher. Do not submit AWAITING_RESEARCHER or any researcher responses.\n"
         + json.dumps(
             {
                 "run_id": ctx.run_id,
@@ -128,15 +139,51 @@ def submit_tool(ctx: ToolContext, **focus):
                     or (quantity.unit and quantity.unit.casefold() not in span.casefold())
                 ):
                     raise ValueError("quantity source span does not support value/unit")
+        errors = []
+        schema = Design.model_json_schema()
+        for path in context.field_annotations:
+            if path in CLAIM_FIELDS:
+                continue
+            if path.startswith("/context/"):
+                try:
+                    resolve(context, path.removeprefix("/context"))
+                except PatchError as exc:
+                    errors.extend(exc.errors)
+            elif not path.startswith("/"):
+                errors.append(
+                    f"Unknown claim annotation {path}; use exact claim keys: "
+                    + ", ".join(CLAIM_FIELDS)
+                    + ". For context metadata use /context/package/..."
+                )
+            elif re.search(r"~(?![01])", path) or not _schema_path(
+                schema,
+                [part.replace("~1", "/").replace("~0", "~") for part in path[1:].split("/")],
+                schema.get("$defs", {}),
+            ):
+                errors.append(
+                    f"{path} is not a Design JSON pointer; use schema field names and numeric "
+                    "list indices. Package assumptions belong under /context/package/assumptions."
+                )
+        if not errors:
+            try:
+                scientific_commitments(context)
+            except PatchError as exc:
+                errors.extend(exc.errors)
         for decision in payload.decisions:
             if decision.run_id != ctx.run_id or decision.binding != binding:
-                raise ValueError("decision binding differs")
+                errors.append(f"decision {decision.id} binding differs")
             if (
                 decision.responses
                 or decision.application
                 or decision.status not in {"IDENTIFIED", "EXPLORING"}
             ):
-                raise ValueError("agent cannot supply researcher responses or authorization")
+                errors.append(
+                    f"decision {decision.id}: agent cannot supply researcher responses or "
+                    "authorization; submit status IDENTIFIED or EXPLORING with no responses "
+                    "or application. Workflow controls AWAITING_RESEARCHER."
+                )
+        if errors:
+            raise SubmitRejected(errors)
         context.package.sources = list(supplied.values())
         return {
             "context": context.model_dump(mode="json"),
@@ -144,6 +191,20 @@ def submit_tool(ctx: ToolContext, **focus):
         }
 
     return submit_schema("submit_understanding", UnderstandingSubmission, accept)
+
+
+def _schema_path(schema: dict, parts: list[str], definitions: dict) -> bool:
+    if not parts:
+        return True
+    if "$ref" in schema:
+        return _schema_path(definitions[schema["$ref"].rsplit("/", 1)[-1]], parts, definitions)
+    if "anyOf" in schema:
+        return any(_schema_path(option, parts, definitions) for option in schema["anyOf"])
+    if parts[0] in schema.get("properties", {}):
+        return _schema_path(schema["properties"][parts[0]], parts[1:], definitions)
+    if "items" in schema and re.fullmatch(r"0|[1-9][0-9]*", parts[0]):
+        return _schema_path(schema["items"], parts[1:], definitions)
+    return False
 
 
 def supports_number(value: float | None, span: str | None) -> bool:
