@@ -119,13 +119,33 @@ def test_export_binds_version(state, tmp_path):
 def test_export_old_version_shows_concerns_as_of_that_version(state, tmp_path):
     store, run = state
     concern = store.save_issue(issue(run))
-    store.add_version(run, design(), author="design", parent=1)
+    d = design()
+    d.analysis.alpha = 0.05
+    store.add_version(run, d, author="design", parent=1)
     concern.status, concern.addressed_in = "resolved", 2
     store.save_issue(concern)
+    store.save_request(
+        ResearcherRequest(
+            run_id=run,
+            kind="input",
+            question="Confirm the revised analysis",
+            status="open",
+            raised_by="design",
+        )
+    )
     old = export(store, run, tmp_path / "old", version=1)
     latest = export(store, run, tmp_path / "latest")
-    assert len(json.loads(old["experiment_design.json"].read_bytes())["open_concerns"]) == 1
-    assert json.loads(latest["experiment_design.json"].read_bytes())["open_concerns"] == []
+    old_data = json.loads(old["experiment_design.json"].read_bytes())
+    latest_data = json.loads(latest["experiment_design.json"].read_bytes())
+    assert old_data["design"]["analysis"]["alpha"] == 0.025
+    assert latest_data["design"]["analysis"]["alpha"] == 0.05
+    assert (old_data["version"], old_data["latest_version"]) == (1, 2)
+    assert old_data["pending_requests"] == []
+    assert latest_data["pending_requests"] == [
+        {"kind": "input", "question": "Confirm the revised analysis", "path": None}
+    ]
+    assert len(old_data["open_concerns"]) == 1
+    assert latest_data["open_concerns"] == []
     assert (
         old["experiment_design.md"]
         .read_text(encoding="utf-8")
@@ -137,18 +157,6 @@ def test_export_old_version_shows_concerns_as_of_that_version(state, tmp_path):
     assert "Unresolved concern: Class correlation may be uncertain" in old[
         "experiment_design.md"
     ].read_text(encoding="utf-8")
-
-
-def test_export_old_version(state, tmp_path):
-    store, run = state
-    d = design()
-    d.analysis.alpha = 0.05
-    store.add_version(run, d, author="design", parent=1)
-    files = export(store, run, tmp_path / "old", version=1)
-    data = json.loads(files["experiment_design.json"].read_bytes())
-    assert data["design"]["analysis"]["alpha"] == 0.025
-    assert data["version"] == 1 and data["latest_version"] == 2
-    assert data["pending_requests"] == []
 
 
 def test_export_keeps_unresolved_after_patch(state, tmp_path):

@@ -145,11 +145,14 @@ def test_cache_reporting_distinguishes_missing_from_zero(state):
 
 
 def test_tool_events_have_no_full_output(state):
-    result, _, events = run(
+    observation = {"text": "x" * 5000 + "observation-tail"}
+    result, llm, events = run(
         state,
         [tool_call("probe", {}), submit("finish", {})],
-        handler=lambda _: {"text": "x" * 5000},
+        handler=lambda _: observation,
     )
     event = [e for e in events if e.type == "tool.call"][0]
     assert len(event.data["summary"]) == 300
+    assert "observation-tail" not in json.dumps([e.data for e in events])
+    assert json.loads(llm.calls[1][0][-1]["content"])["result"] == observation
     assert result.completion_status == "completed"

@@ -30,6 +30,7 @@ a readable EDP and authoritative JSON from the same canonical design version.
 - Edit loop: `uv run pytest tests/test_<module>.py -q`.
 - Live: `uv run pytest -m live -q` (requires real provider keys).
 The default lane excludes `live`. The marker set in pyproject.toml is the lane map.
+See [local testing](docs/testing.md) for owner commands and shared-change checks.
 
 ## Architecture rules
 JEV selects workflow WHAT/NEXT among legal options. Code enumerates and validates
