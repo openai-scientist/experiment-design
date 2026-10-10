@@ -465,8 +465,10 @@ def run_stage(run_id: str, stage_id: StageId, deps: Deps) -> StageResult:
             return result
     elif stage_id == "S3":
         if store.version(run_id) is None:
-            payload = _agent(deps, run_id, design, mode="initial").findings_or_changes
+            ctx = _context(deps, run_id)
+            payload = _agent(deps, run_id, design, ctx=ctx, mode="initial").findings_or_changes
             with store.transaction():
+                store.check_binding(run_id, ctx.binding)
                 version = store.add_version(
                     run_id, Design.model_validate(payload["design"]), author="design", parent=None
                 )

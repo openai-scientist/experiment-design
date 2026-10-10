@@ -52,6 +52,7 @@ def brief(ctx: ToolContext, **focus) -> str:
         "Every quantitative input must have honest provenance. Unknown values are assumptions with "
         "a note, never invented sources. Inspect evidence and compute_power before submitting. "
         "For an initial draft, pass your proposed design to compute_power and run_validators. "
+        "Preserve scientific_commitments at their exact design paths and values. "
         "For revision use check_patch; fix the batch together or rebut with evidence.\n"
         + context_brief(ctx)
         + "\nFocus: "
@@ -63,7 +64,10 @@ def submit_tool(ctx: ToolContext, **mode):
     if mode.get("mode", "initial") == "initial":
 
         def initial(payload):
-            d = initial_design(ctx.package, payload.design, context=ctx.store.context(ctx.run_id))
+            context = ctx.store.context(
+                ctx.run_id, ctx.binding.context_revision if ctx.binding else None
+            )
+            d = initial_design(ctx.package, payload.design, context=context)
             d = apply_patch(
                 d,
                 Patch(ops=[], rationale="Validate quantitative provenance"),

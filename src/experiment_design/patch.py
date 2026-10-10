@@ -90,7 +90,10 @@ def initial_design(
     if context:
         for path, value in scientific_commitments(context).items():
             if resolve(result, path) != value:
-                errors.append(f"{path} is researcher-owned; proposed value differs from source")
+                errors.append(
+                    f"{path} is researcher-owned; proposed value differs from source; "
+                    f"preserve exact committed value: {json.dumps(value, ensure_ascii=False)}"
+                )
     if errors:
         raise PatchError(errors)
     return result

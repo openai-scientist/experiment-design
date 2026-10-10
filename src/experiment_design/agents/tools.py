@@ -27,6 +27,7 @@ from experiment_design.patch import (
     preview_design,
     quantities,
     resolve,
+    scientific_commitments,
 )
 from experiment_design.runtime.loop import SubmitRejected, Tool
 from experiment_design.runtime.store import Store
@@ -219,6 +220,7 @@ def submit_schema(name: str, model: type[Record], handler) -> Tool:
 
 def context_brief(ctx: ToolContext) -> str:
     package = ctx.package.model_dump(mode="json", exclude={"sources", "assumptions"})
+    context = ctx.store.context(ctx.run_id, ctx.binding.context_revision) if ctx.binding else None
     ledger = [i.model_dump(mode="json") for i in visible_issues(ctx)]
     guidance = (
         "Tool observations contain result and evidence_ref. Copy evidence_ref exactly into "
@@ -233,6 +235,7 @@ def context_brief(ctx: ToolContext) -> str:
     return guidance + json.dumps(
         {
             "package": package,
+            "scientific_commitments": scientific_commitments(context) if context else {},
             "intake_gaps": intake_gaps(ctx.package),
             "version": ctx.version.version if ctx.version else None,
             "issue_ledger": ledger,

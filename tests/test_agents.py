@@ -88,6 +88,76 @@ def test_design_initial_submit_rejects_claim_change(ctx):
         )
 
 
+def test_designer_can_implement_bound_commitments_without_unavailable_context_tool(tmp_path):
+    import json
+
+    from fakes import ScriptedLLM, submit
+    from test_stage_pipeline import source_context, supported_design
+    from test_stages import staged
+
+    from experiment_design.contracts import AgentTask, FieldAnnotation, TaskBudget
+    from experiment_design.runtime.loop import run_agent
+
+    store = Store(tmp_path / "commitments.db")
+    run, _ = staged(store)
+    context = source_context()
+    context.field_annotations["/analysis/model"] = FieldAnnotation(
+        status="researcher-confirmed",
+        source_ref="researcher:model-answer",
+        value="Mixed model with class random effect.",
+    )
+    store.save_context(run, context)
+    bound = ToolContext(store, run, context.package, None, set())
+    changed = context.model_copy(deep=True)
+    changed.revision += 1
+    changed.field_annotations["/analysis/model"].value = "Later model choice"
+    store.save_context(run, changed)
+    wrong = supported_design()
+    wrong.analysis.model = "Unrequested model"
+    with pytest.raises(SubmitRejected) as rejected:
+        designer.submit_tool(bound, mode="initial").handler(
+            {"design": wrong.model_dump(mode="json"), "rationale": "Draft"}
+        )
+    assert json.dumps(context.field_annotations["/analysis/model"].value) in str(rejected.value)
+
+    def compose(messages, tools):
+        data = json.loads(messages[1]["content"].split("\n")[-2])
+        proposed = supported_design()
+        proposed.analysis.model = data["scientific_commitments"]["/analysis/model"]
+        return submit(
+            "submit_design",
+            {"design": proposed.model_dump(mode="json"), "rationale": "Bound intent"},
+        )
+
+    task = AgentTask(
+        id="bound-designer",
+        binding=bound.binding,
+        stage_id="S3",
+        design_version=None,
+        objective="Compose the bound initial draft",
+        package_ref=context.package.id,
+        allowed_tools=list(designer.TOOLS),
+        budget=TaskBudget(max_turns=1, max_tokens=1000),
+        exit_conditions=["Valid draft"],
+    )
+    result = run_agent(
+        designer.SPEC,
+        task,
+        designer.brief(bound, mode="initial"),
+        build_tools(bound),
+        designer.submit_tool(bound, mode="initial"),
+        ScriptedLLM([compose]),
+        store,
+        run,
+        bound.accepted_call_ids,
+    )
+    assert result.completion_status == "completed"
+    assert result.findings_or_changes["design"]["analysis"]["model"] == (
+        "Mixed model with class random effect."
+    )
+    store.close()
+
+
 def test_initial_submit_rejects_unattested_computation(ctx):
     d = design()
     d.scenarios[0].sd.value = 1

@@ -329,6 +329,35 @@ def test_understanding_stage_commit_failure_keeps_submission_and_rolls_back_cont
     store.close()
 
 
+def test_context_change_during_drafting_cannot_commit_a_stale_initial_design(tmp_path):
+    from test_stages import staged
+
+    from experiment_design.workflow import run_stage
+
+    store = Store(tmp_path / "stale-draft.db")
+    run, _ = staged(store)
+    context = source_context()
+    store.save_context(run, context)
+    store.update_run(run, stage_id="S3")
+
+    def compose(messages, tools):
+        changed = context.model_copy(deep=True)
+        changed.revision += 1
+        changed.package.hypothesis.method = "New researcher method"
+        store.save_context(run, changed)
+        return submit(
+            "submit_design",
+            {"design": supported_design().model_dump(mode="json"), "rationale": "Earlier context"},
+        )
+
+    deps = Deps(store, ScriptedLLM([compose]), ScriptedJudge([]), RunConfig())
+    with pytest.raises(ValueError, match="stale"):
+        run_stage(run, "S3", deps)
+    assert store.version(run) is None
+    assert store.context(run).package.hypothesis.method == "New researcher method"
+    store.close()
+
+
 def test_partial_decision_answers_resume_only_independent_work(tmp_path):
     from test_decisions import decision_state
 
