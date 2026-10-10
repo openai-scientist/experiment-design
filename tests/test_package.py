@@ -67,7 +67,7 @@ def test_unknown_section_rejected(tmp_path):
 
 
 def test_unknown_key_rejected(tmp_path):
-    with pytest.raises(PackageFormatError, match="margn"):
+    with pytest.raises(PackageFormatError, match="line 7.*unknown key 'margn'.*margin"):
         load_package(input_file(tmp_path, "## Inference\n- margn: 3\n"))
 
 
