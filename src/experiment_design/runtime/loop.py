@@ -111,6 +111,8 @@ def run_agent(
                 result.stop_reason = "token_limit"
                 break
             result.llm_calls += 1
+            if durable:
+                store.append_event(run_id, "provider.attempt", {"provider": "llm"}, **meta)
             response = llm.complete(messages, schemas)
             if durable:
                 store.append_event(
@@ -157,6 +159,7 @@ def run_agent(
                 )
             for call in response.tool_calls:
                 ok = False
+                observation_id = task_id + ":" + call.id if durable else call.id
                 try:
                     if call.name not in offered:
                         raise ValueError(f"tool {call.name!r} is unknown or not allowed")
@@ -165,14 +168,12 @@ def run_agent(
                         raise ValueError("tool arguments must be a JSON object")
                     observation = offered[call.name].handler(args)
                     content = json.dumps(observation, ensure_ascii=False, allow_nan=False)
-                    ok = True
                     if call.name != submit.name:
-                        call_ids.add(call.id)
                         if durable:
                             store.save_observation(
                                 run_id,
                                 Observation(
-                                    id=call.id,
+                                    id=observation_id,
                                     task_id=task_id,
                                     binding=task.binding,
                                     tool_name=call.name,
@@ -181,16 +182,18 @@ def run_agent(
                                     if isinstance(observation, dict)
                                     else {"value": observation},
                                     accepted=True,
-                                    evidence_ref=f"tool:{call.id}",
+                                    evidence_ref=f"tool:{observation_id}",
                                 ),
                             )
+                        call_ids.add(observation_id)
+                    ok = True
                 except SubmitRejected as exc:
                     observation = {"error": exc.errors}
                     content = json.dumps(observation, ensure_ascii=False)
                 except Exception as exc:
                     observation = {"error": str(exc)}
                     content = json.dumps(observation, ensure_ascii=False)
-                result.tool_observations.append(call.id)
+                result.tool_observations.append(observation_id)
                 store.append_event(
                     run_id,
                     "tool.call",
@@ -204,7 +207,7 @@ def run_agent(
                 )
                 feedback = observation
                 if ok and call.name != submit.name:
-                    feedback = {"result": observation, "evidence_ref": f"tool:{call.id}"}
+                    feedback = {"result": observation, "evidence_ref": f"tool:{observation_id}"}
                 messages.append(
                     {
                         "role": "tool",

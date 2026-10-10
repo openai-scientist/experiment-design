@@ -70,20 +70,24 @@ def revision(
 
 
 def verification(verdict="resolved"):
-    return submit(
-        "submit_verdicts",
-        {
-            "verdicts": [
-                {
-                    "issue_id": "I1",
-                    "verdict": verdict,
-                    "grounds": "Independent calculation and actual diff inspected",
-                    "evidence_refs": ["tool:verify-power"],
-                }
-            ],
-            "regressions": [],
-        },
-    )
+    def response(messages, tools):
+        evidence_ref = json.loads(messages[-1]["content"])["evidence_ref"]
+        return submit(
+            "submit_verdicts",
+            {
+                "verdicts": [
+                    {
+                        "issue_id": "I1",
+                        "verdict": verdict,
+                        "grounds": "Independent calculation and actual diff inspected",
+                        "evidence_refs": [evidence_ref],
+                    }
+                ],
+                "regressions": [],
+            },
+        )
+
+    return response
 
 
 @pytest.fixture
@@ -119,6 +123,8 @@ def saved_issue(store, run, **fields):
 
 
 def test_happy_path_review_revise_verify_reviewable(state):
+    from test_stage_pipeline import inspection_response
+
     run = saved_run(state)
     d = deps(
         state,
@@ -127,7 +133,7 @@ def test_happy_path_review_revise_verify_reviewable(state):
             revision(),
             tool_call("compute_power", {}, "verify-power"),
             verification(),
-            tool_call("compute_power", {}),
+            inspection_response(),
             submit(
                 "submit_handoff",
                 {"handoff_complete": True, "risks": [], "findings": [], "evidence_refs": []},

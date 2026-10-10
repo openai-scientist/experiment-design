@@ -150,3 +150,68 @@ def test_explicit_missing_input_cannot_be_hidden_by_a_reference(tmp_path):
 
     with pytest.raises(PackageFormatError, match="cannot read input"):
         snapshot_sources([main, missing])
+
+
+@pytest.mark.parametrize("change", ["value", "downgrade", "remove"])
+def test_understanding_preserves_confirmed_intent(tmp_path, change):
+    from experiment_design.contracts import FieldAnnotation, ResearchContext
+
+    store, rid, snapshot, ctx, data = setup_context(tmp_path)
+    previous = ResearchContext.model_validate(data["context"])
+    previous.field_annotations["margin"] = FieldAnnotation(
+        status="researcher-confirmed", source_ref="researcher:D1:reply"
+    )
+    store.save_context(rid, previous)
+    ctx.binding = store.binding(rid)
+    revised = previous.model_copy(deep=True)
+    revised.revision = 2
+    if change == "value":
+        revised.package.inference.margin = 2
+    elif change == "downgrade":
+        revised.field_annotations["margin"].status = "agent-proposed"
+    else:
+        del revised.field_annotations["margin"]
+    with pytest.raises(SubmitRejected, match="confirmed"):
+        understanding.submit_tool(ctx).handler(
+            {"context": revised.model_dump(mode="json"), "decisions": []}
+        )
+    assert store.context(rid) == previous
+    store.close()
+
+
+def test_understanding_preserves_confirmed_context_constraint(tmp_path):
+    from experiment_design.agents.tools import sources
+    from experiment_design.contracts import FieldAnnotation, ResearchContext
+
+    store, rid, snapshot, ctx, data = setup_context(tmp_path)
+    previous = ResearchContext.model_validate(data["context"])
+    previous.package.sources = sources(ctx)
+    previous.package.constraints = ["At most 60 classes"]
+    previous.field_annotations["/context/package/constraints"] = FieldAnnotation(
+        status="researcher-confirmed", source_ref="researcher:resources:reply"
+    )
+    store.save_context(rid, previous)
+    ctx.binding = store.binding(rid)
+    revised = previous.model_copy(deep=True)
+    revised.revision = 2
+    revised.package.constraints = ["Unlimited classes"]
+    with pytest.raises(SubmitRejected, match="confirmed"):
+        understanding.submit_tool(ctx).handler(
+            {"context": revised.model_dump(mode="json"), "decisions": []}
+        )
+    assert store.context(rid) == previous
+    store.close()
+
+
+def test_typed_source_commitment_cannot_claim_unsupported_number(tmp_path):
+    store, rid, snapshot, ctx, data = setup_context(tmp_path)
+    data["context"]["field_annotations"]["/analysis/alpha"] = {
+        "status": "source-stated",
+        "source_ref": snapshot.artifacts[0].ref,
+        "source_span": "Margin 3 points",
+        "value": 0.025,
+    }
+    with pytest.raises(SubmitRejected, match="commitment"):
+        understanding.submit_tool(ctx).handler(data)
+    assert store.context(rid) is None
+    store.close()

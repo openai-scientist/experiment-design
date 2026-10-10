@@ -12,6 +12,7 @@ from experiment_design.contracts import (
     ClaimField,
     Design,
     Patch,
+    Record,
     ResearchContext,
     ResearcherDecision,
     ScientificPackage,
@@ -66,17 +67,45 @@ def initial_design(
             setattr(result.claim, name, ClaimField(value=known, origin=origin))
         else:
             field.origin = "designer_default" if field.value is not None else "missing"
-    method_annotation = context.field_annotations.get("/analysis/model") if context else None
-    if (
-        method_annotation
-        and method_annotation.status in {"source-stated", "researcher-confirmed"}
-        and package.hypothesis.method
-        and result.analysis.model != package.hypothesis.method
-    ):
-        errors.append("analysis/model is researcher-owned; proposed SAP differs from source")
+    if context:
+        for path, value in scientific_commitments(context).items():
+            if resolve(result, path) != value:
+                errors.append(f"{path} is researcher-owned; proposed value differs from source")
     if errors:
         raise PatchError(errors)
     return result
+
+
+def scientific_commitments(context: ResearchContext) -> dict[str, Any]:
+    """Resolve source/confirmed commitments and their required measurement mirrors."""
+    values = {}
+    for name, path in (
+        ("primary_outcome", "/measurement/primary_metric/name"),
+        ("outcome_unit", "/measurement/primary_metric/unit"),
+        ("outcome_kind", "/measurement/primary_metric/kind"),
+    ):
+        annotation = context.field_annotations.get(name)
+        if annotation and annotation.status in {"source-stated", "researcher-confirmed"}:
+            values[path] = package_claim(context.package)[name]
+    for path, annotation in context.field_annotations.items():
+        if path.startswith("/context/"):
+            continue
+        if not path.startswith("/") or annotation.status not in {
+            "source-stated",
+            "researcher-confirmed",
+        }:
+            continue
+        value = annotation.value
+        if value is None and path == "/analysis/model":
+            value = context.package.hypothesis.method
+        if value is None and path == "/analysis/alpha":
+            numbers = re.findall(r"[-+]?(?:\d*\.\d+|\d+)", annotation.source_span or "")
+            if len(numbers) == 1:
+                value = float(numbers[0])
+        if value is None:
+            raise PatchError([f"{path} is researcher-owned; typed commitment value is missing"])
+        values[path] = value
+    return values
 
 
 def quantities(value: Any, path: str = ""):
@@ -113,7 +142,7 @@ def _read(data: Any, parts: list[str], path: str) -> Any:
         raise PatchError([f"Bad pointer: {path}"]) from exc
 
 
-def resolve(design: Design, path: str) -> Any:
+def resolve(design: Record, path: str) -> Any:
     return _read(design.model_dump(mode="json"), _parts(path), path)
 
 
@@ -136,7 +165,14 @@ def apply_patch(
         response = authorization.responses[-1]
         if (
             response.action not in {"SELECT_OPTION", "PROPOSE_ALTERNATIVE"}
-            or response.revision != authorization.revision
+            or (
+                response.revision != authorization.revision
+                and not (
+                    authorization.reconciliation.get("independent") is True
+                    and authorization.reconciliation.get("response_id") == response.response_id
+                    and authorization.reconciliation.get("response_revision") == response.revision
+                )
+            )
             or authorization.binding.design_hash != design_hash(design)
             or not authorization.interpretation.get("authorized")
             or authorization.application
@@ -159,11 +195,7 @@ def apply_patch(
 
 
 def scientific_impact(before: Design, after: Design, context: ResearchContext) -> list[str]:
-    owned = {
-        path
-        for path, annotation in context.field_annotations.items()
-        if path.startswith("/") and annotation.status in {"source-stated", "researcher-confirmed"}
-    }
+    owned = scientific_commitments(context)
     return [
         change["path"]
         for change in design_diff(before, after)
@@ -171,7 +203,8 @@ def scientific_impact(before: Design, after: Design, context: ResearchContext) -
             change["path"] == path
             or change["path"].startswith(path + "/")
             or path.startswith(change["path"] + "/")
-            for path in owned
+            for path, value in owned.items()
+            if resolve(after, path) != value
         )
     ]
 
@@ -235,7 +268,7 @@ def _apply_patch(design: Design, patch: Patch, *, source_ids: set[str], author: 
     return result
 
 
-def design_diff(before: Design, after: Design) -> list[dict]:
+def record_diff(before: Record, after: Record) -> list[dict]:
     changes = []
 
     def walk(a, b, path):
@@ -250,6 +283,10 @@ def design_diff(before: Design, after: Design) -> list[dict]:
 
     walk(before.model_dump(mode="json"), after.model_dump(mode="json"), "")
     return changes
+
+
+def design_diff(before: Design, after: Design) -> list[dict]:
+    return record_diff(before, after)
 
 
 def design_hash(design: Design) -> str:

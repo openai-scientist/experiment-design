@@ -195,7 +195,8 @@ def test_committed_submission_resumes_without_provider(tmp_path):
     resumed = run_agent(*args, reopened, rid, set())
     assert resumed.findings_or_changes == result.findings_or_changes
     assert len(llm.calls) == 2
-    assert reopened.accepted_observations(task.id)[0].evidence_ref == "tool:independent-probe"
+    observation = reopened.accepted_observations(task.id)[0]
+    assert observation.task_id == task.id and observation.result == {"value": 7}
     assert reopened.usage(rid).llm_tokens == tokens > 0
     reopened.close()
 
@@ -242,4 +243,90 @@ def test_unrecorded_provider_response_retries_as_new_attempt(tmp_path):
         e.type == "budget.stop" and e.data["reason"] == "provider_failure"
         for e in store.events(rid)
     )
+    store.close()
+
+
+def test_provider_call_ids_are_isolated_by_task(tmp_path):
+    from test_stages import staged
+
+    store = Store(tmp_path / "collision.db")
+    run_id, binding = staged(store)
+    refs = []
+    for name, value in (("method", 7), ("skeptic", 11)):
+        task = AgentTask(
+            id=name,
+            binding=binding,
+            objective="Inspect",
+            package_ref="source",
+            design_version=None,
+            allowed_tools=["probe"],
+            budget=TaskBudget(max_turns=3, max_tokens=1000),
+            exit_conditions=["Submit"],
+        )
+
+        def observed(messages, tools, value=value):
+            feedback = json.loads(messages[-1]["content"])
+            assert feedback["result"] == {"value": value}
+            refs.append(feedback["evidence_ref"])
+            return submit("finish", {"evidence_refs": [feedback["evidence_ref"]]})
+
+        result = run_agent(
+            AgentSpec(name, "Inspect"),
+            task,
+            "Brief",
+            {"probe": Tool("probe", "Probe", {}, lambda a, value=value: {"value": value})},
+            Tool("finish", "Finish", {}, lambda a: a),
+            ScriptedLLM([tool_call("probe", {}, "same-provider-id"), observed]),
+            store,
+            run_id,
+            set(),
+        )
+        assert result.completion_status == "completed"
+    assert refs[0] != refs[1]
+    store.close()
+
+
+def test_failed_observation_commit_returns_error_without_evidence(tmp_path):
+    from test_stages import staged
+
+    store = Store(tmp_path / "observation.db")
+    run_id, binding = staged(store)
+    task = AgentTask(
+        id="probe-task",
+        binding=binding,
+        objective="Inspect",
+        package_ref="source",
+        design_version=None,
+        allowed_tools=["probe"],
+        budget=TaskBudget(max_turns=4, max_tokens=1000),
+        exit_conditions=["Submit"],
+    )
+
+    def rejected(messages, tools):
+        feedback = json.loads(messages[-1]["content"])
+        assert "immutable" in feedback["error"]
+        assert "evidence_ref" not in feedback
+        return submit("finish", {})
+
+    result = run_agent(
+        AgentSpec("review", "Inspect"),
+        task,
+        "Brief",
+        {"probe": Tool("probe", "Probe", {}, lambda a: {"value": a["value"]})},
+        Tool("finish", "Finish", {}, lambda a: a),
+        ScriptedLLM(
+            [
+                tool_call("probe", {"value": 7}, "repeat"),
+                tool_call("probe", {"value": 11}, "repeat"),
+                rejected,
+            ]
+        ),
+        store,
+        run_id,
+        set(),
+    )
+    calls = [e for e in store.events(run_id) if e.type == "tool.call"]
+    assert [e.data["ok"] for e in calls] == [True, False, True]
+    assert result.completion_status == "completed"
+    assert len(store.accepted_observations(task.id)) == 1
     store.close()

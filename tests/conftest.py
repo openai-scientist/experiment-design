@@ -11,6 +11,7 @@ from experiment_design.contracts import (
     Metric,
     Outcome,
     PowerScenario,
+    Protocol,
     Quantity,
     Sampling,
     ScientificPackage,
@@ -102,6 +103,7 @@ def design():
             alpha=0.025,
             uncertainty="Lower 97.5% one-sided confidence bound",
             decision_rule="Non-inferior if the lower bound exceeds -3 points",
+            stopping="Fixed end-of-term analysis; no interim efficacy analysis",
         ),
         scenarios=[
             PowerScenario(
@@ -110,4 +112,13 @@ def design():
                 sd=Quantity(value=10, unit="points", provenance="source", source_ref="S1"),
             )
         ],
+        protocol=Protocol(
+            steps=[
+                "Assign classes using recorded allocation",
+                "Deliver weekly feedback",
+                "Collect end-of-term scores",
+                "Analyze assigned classes using the specified SAP",
+            ],
+            stop_conditions=["Suspend collection if research consent is withdrawn"],
+        ),
     )

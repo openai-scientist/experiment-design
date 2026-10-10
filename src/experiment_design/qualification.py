@@ -12,6 +12,7 @@ from experiment_design.contracts import (
     StageResult,
 )
 from experiment_design.decisions import respond
+from experiment_design.package import all_sources
 from experiment_design.runtime.store import Store, now
 from experiment_design.science.validators import validate_design
 
@@ -21,10 +22,13 @@ def assess_readiness(store: Store, run_id: str, handoff_result: AgentResult) -> 
     binding = store.binding(run_id)
     payload = handoff_result.findings_or_changes or {}
     checks = validate_design(
-        snapshot.version.design, snapshot.context.package, calculations=snapshot.calculations
+        snapshot.version.design,
+        snapshot.context.package,
+        source_ids={s.id for s in all_sources(snapshot.context, snapshot.decisions)},
+        calculations=snapshot.calculations,
     )
     blockers = [f.message for f in checks if f.severity in {"MAJOR", "BLOCKER"}]
-    for name in (
+    essential = [
         "hypothesis",
         "primary_outcome",
         "outcome_unit",
@@ -32,7 +36,13 @@ def assess_readiness(store: Store, run_id: str, handoff_result: AgentResult) -> 
         "direction",
         "contrast_type",
         "estimand",
-    ):
+    ]
+    if snapshot.version.design.claim.contrast_type.value in {
+        "non_inferiority",
+        "superiority_by_margin",
+    }:
+        essential.append("margin")
+    for name in essential:
         annotation = snapshot.context.field_annotations.get(name)
         if not annotation or annotation.status not in {"source-stated", "researcher-confirmed"}:
             blockers.append(
@@ -170,4 +180,5 @@ def approve_version(
             "S7",
         )
         store.update_run(run_id, status="APPROVED")
+        store.freeze_publication(run_id)
         return approval

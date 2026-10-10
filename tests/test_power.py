@@ -280,3 +280,21 @@ def test_t_method_refuses_inputs_outside_its_applicability(case):
     )
     assert result.status == "not_computed" and result.reasons
     assert result.power is None and result.required_n_per_arm is None
+
+
+@pytest.mark.parametrize("unit", ["%", "kg", "people"])
+def test_cluster_size_override_requires_canonical_count_unit(unit):
+    from test_stage_pipeline import supported_design
+
+    from experiment_design.contracts import ArtifactBinding, CalculationRequest
+    from experiment_design.science.power import calculate
+
+    result = calculate(
+        CalculationRequest(
+            binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
+            scenario_id="base",
+            design=supported_design(),
+            overrides={"size": q(25, unit)},
+        )
+    )
+    assert result.status == "not_computed" and any("unit" in r for r in result.reasons)

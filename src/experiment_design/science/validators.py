@@ -60,6 +60,9 @@ def validate_design(
         "/analysis/model",
         "/analysis/uncertainty",
         "/analysis/decision_rule",
+        "/analysis/stopping",
+        "/protocol/steps",
+        "/protocol/stop_conditions",
     )
     for path in required:
         if not resolve(design, path):
@@ -90,7 +93,9 @@ def validate_design(
             add("claim_missing", "MAJOR", f"/claim/{field}", f"{field} is needed for the contrast")
     metric = design.measurement.primary_metric
     if metric and (
-        metric.unit.strip().casefold()
+        metric.name.strip().casefold()
+        != str(design.claim.primary_outcome.value or "").strip().casefold()
+        or metric.unit.strip().casefold()
         != str(design.claim.outcome_unit.value or "").strip().casefold()
         or metric.kind != design.claim.outcome_kind.value
     ):

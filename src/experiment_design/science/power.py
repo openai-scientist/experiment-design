@@ -326,6 +326,35 @@ def calculate(request: CalculationRequest) -> CalculationResult:
     quantities = {"effect": scenario.effect, "sd": scenario.sd}
     if cluster:
         quantities.update(size=cluster.size, icc=cluster.icc)
+        if cluster.size and cluster.size.unit.strip().casefold() not in {
+            "student",
+            "students",
+            "participant",
+            "participants",
+            "person",
+            "persons",
+            "people",
+            "subject",
+            "subjects",
+            "individual",
+            "individuals",
+            "animal",
+            "animals",
+            "observation",
+            "observations",
+            "unit",
+            "units",
+            "sample",
+            "samples",
+        }:
+            reasons.append("cluster size unit must denote a count of individuals")
+        size_override = request.overrides.get("size")
+        if (
+            size_override
+            and cluster.size
+            and (size_override.unit.strip().casefold() != cluster.size.unit.strip().casefold())
+        ):
+            reasons.append("size override unit differs from canonical cluster-size unit")
     reasons.extend(
         f"unsupported override {key}" for key in request.overrides if key not in quantities
     )

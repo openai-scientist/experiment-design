@@ -92,12 +92,18 @@ def normal_responses():
             {"design": supported_design().model_dump(mode="json"), "rationale": "Draft"},
         ),
         *review_responses(),
-        tool_call("compute_power", {}),
+        inspection_response(),
         submit(
             "submit_handoff",
             {"handoff_complete": True, "risks": [], "findings": [], "evidence_refs": []},
         ),
     ]
+
+
+def inspection_response():
+    response = tool_call("read_design", {})
+    response.tool_calls.extend(tool_call("compute_power", {}).tool_calls)
+    return response
 
 
 def test_stages_reach_exact_researcher_review_and_publication_wait(tmp_path):
@@ -132,6 +138,30 @@ def test_stages_reach_exact_researcher_review_and_publication_wait(tmp_path):
     assert reopened.context(run) == store.context(run)
     assert reopened.version(run).design_hash == store.version(run).design_hash
     reopened.close()
+    store.close()
+
+
+def test_proposed_margin_cannot_reach_final_approval(tmp_path):
+    context = source_context()
+    context.field_annotations["margin"].status = "agent-proposed"
+    responses = normal_responses()
+    responses[0] = submit(
+        "submit_understanding", {"context": context.model_dump(mode="json"), "decisions": []}
+    )
+    store = Store(tmp_path / "proposed.db")
+    deps = Deps(
+        store,
+        ScriptedLLM(responses),
+        ScriptedJudge([{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}]),
+        RunConfig(),
+    )
+    run = start_run(source_snapshot(), deps, {})
+    assert advance(run, deps) != "REVIEWABLE"
+    assert not store.assessment(run).handoff_complete
+    assert any("margin" in reason for reason in store.assessment(run).blockers)
+    with pytest.raises((ValueError, WorkflowError)):
+        approve(store, run, 1, "PI")
+    assert not store.approvals(run)
     store.close()
 
 
@@ -351,6 +381,149 @@ def test_partial_decision_answers_resume_only_independent_work(tmp_path):
     store.close()
 
 
+def test_two_independent_recorded_answers_apply_without_stale_failure(tmp_path):
+    from test_decisions import decision_state
+
+    from experiment_design.contracts import DecisionResponse, ResearcherDecision
+    from experiment_design.decisions import respond
+
+    store, run, context, first = decision_state(tmp_path)
+    store.update_run(run, stage_id="S4", status="NEEDS_RESEARCHER")
+    second = store.save_decision(
+        ResearcherDecision(
+            id="inclusion",
+            run_id=run,
+            binding=store.binding(run),
+            status="AWAITING_RESEARCHER",
+            problem="Confirm inclusion",
+            affected_paths=["/sampling/inclusion"],
+        )
+    )
+    for decision, text in ((first, "Margin two points"), (second, "Include all classes")):
+        respond(
+            store,
+            run,
+            decision.id,
+            DecisionResponse(
+                revision=1,
+                action="PROPOSE_ALTERNATIVE",
+                text=text,
+                researcher="PI",
+                response_id=decision.id + "-reply",
+            ),
+        )
+    store.save_decision(
+        ResearcherDecision(
+            id="remaining",
+            run_id=run,
+            binding=store.binding(run),
+            status="AWAITING_RESEARCHER",
+            problem="Confirm resources",
+            affected_paths=["/protocol/resources"],
+        )
+    )
+    responses = [
+        submit(
+            "submit_interpretation",
+            {
+                "authorized": True,
+                "ambiguous": False,
+                "explanation": "Researcher answer",
+                "patch": {
+                    "ops": [{"path": path, "value": value}],
+                    "rationale": "Researcher response",
+                },
+            },
+        )
+        for path, value in (("/claim/margin", 2), ("/sampling/inclusion", "All classes"))
+    ]
+    deps = Deps(store, ScriptedLLM(responses), ScriptedJudge([]), RunConfig())
+    assert advance(run, deps) == "NEEDS_RESEARCHER"
+    other = store.decision(run, second.id)
+    assert other.status == "APPLIED"
+    assert other.revision == 2
+    assert other.responses[-1].text == "Include all classes"
+    assert store.decision(run, first.id).status == "APPLIED"
+    assert store.version(run).design.sampling.inclusion == "All classes"
+    assert len(deps.llm.calls) == 2
+    store.close()
+
+
+def test_overlapping_recorded_answer_is_represented_with_raw_reply(tmp_path):
+    from test_decisions import decision_state
+
+    from experiment_design.contracts import DecisionResponse, ResearcherDecision
+    from experiment_design.decisions import respond
+
+    store, run, context, first = decision_state(tmp_path)
+    store.update_run(run, stage_id="S4")
+    second = store.save_decision(
+        ResearcherDecision(
+            id="also-margin",
+            run_id=run,
+            binding=store.binding(run),
+            status="AWAITING_RESEARCHER",
+            problem="Which margin?",
+            affected_paths=["/claim/margin"],
+        )
+    )
+    for decision, text in ((first, "Two points"), (second, "Keep three points")):
+        respond(
+            store,
+            run,
+            decision.id,
+            DecisionResponse(
+                revision=1,
+                action="PROPOSE_ALTERNATIVE",
+                text=text,
+                researcher="PI",
+                response_id=decision.id,
+            ),
+        )
+    deps = Deps(
+        store,
+        ScriptedLLM(
+            [
+                submit(
+                    "submit_interpretation",
+                    {
+                        "authorized": True,
+                        "ambiguous": False,
+                        "explanation": "Two points",
+                        "patch": {
+                            "ops": [{"path": "/claim/margin", "value": 2}],
+                            "rationale": "PI",
+                        },
+                    },
+                )
+            ]
+        ),
+        ScriptedJudge([]),
+        RunConfig(),
+    )
+    assert advance(run, deps) == "NEEDS_RESEARCHER"
+    waiting = store.decision(run, second.id)
+    assert waiting.status == "AWAITING_RESEARCHER" and waiting.revision == 2
+    assert waiting.responses[-1].text == "Keep three points"
+    assert len(deps.llm.calls) == 1
+    assert (
+        respond(
+            store,
+            run,
+            waiting.id,
+            DecisionResponse(
+                revision=2,
+                action="PROPOSE_ALTERNATIVE",
+                text="Keep three points",
+                researcher="PI",
+                response_id="confirmed",
+            ),
+        ).status
+        == "ANSWERED"
+    )
+    store.close()
+
+
 def test_two_deterministic_stages_do_not_call_provider_or_judge(tmp_path):
     from experiment_design.workflow import run_stage
 
@@ -421,4 +594,80 @@ def test_qualification_returns_to_refinement_with_originating_issue(tmp_path):
     )
     assert event.data["target"] == "S4" and event.data["originating_ref"] == issue.id
     assert store.run(run).stage_id == "S4" and not store.assessment(run).handoff_complete
+    store.close()
+
+
+def test_qualification_presents_required_identified_decision(tmp_path):
+    from experiment_design.contracts import DecisionResponse, ResearcherDecision
+    from experiment_design.decisions import respond
+    from experiment_design.workflow import run_stage
+
+    store = Store(tmp_path / "required.db")
+    run = store.create_staged_run(source_snapshot(), {})
+    store.save_context(run, source_context())
+    store.add_version(run, supported_design(), author="design", parent=None)
+    store.update_run(run, stage_id="S5")
+    decision = store.save_decision(
+        ResearcherDecision(
+            id="needed",
+            run_id=run,
+            binding=store.binding(run),
+            problem="Confirm interpretation",
+            affected_paths=["/claim/estimand"],
+        )
+    )
+    deps = Deps(store, ScriptedLLM(normal_responses()[4:]), ScriptedJudge([]), RunConfig())
+    result = run_stage(run, "S5", deps)
+    assert result.status == "NEEDS_INPUT"
+    presented = store.decision(run, decision.id)
+    assert presented.status == "AWAITING_RESEARCHER"
+    reply = respond(
+        store,
+        run,
+        presented.id,
+        DecisionResponse(
+            revision=presented.revision,
+            action="PROPOSE_ALTERNATIVE",
+            text="Use ITT class means",
+            researcher="PI",
+            response_id="needed-reply",
+        ),
+    )
+    assert reply.status == "ANSWERED"
+    store.close()
+
+
+def test_resolved_handoff_issue_gets_fresh_inspection(tmp_path):
+    from experiment_design.workflow import run_stage
+
+    store = Store(tmp_path / "inspection.db")
+    run = store.create_staged_run(source_snapshot(), {})
+    store.save_context(run, source_context())
+    store.add_version(run, supported_design(), author="design", parent=None)
+    store.update_run(run, stage_id="S5")
+    finding = {
+        "severity": "MAJOR",
+        "paths": ["/measurement/data_collection"],
+        "mechanism": "Data collection needs confirmation",
+        "consequence": "Cannot execute",
+        "basis": "reasoning",
+        "evidence_refs": ["S1"],
+    }
+    first = submit(
+        "submit_handoff",
+        {"handoff_complete": False, "risks": [], "findings": [finding], "evidence_refs": []},
+    )
+    deps = Deps(
+        store, ScriptedLLM([tool_call("compute_power", {}), first]), ScriptedJudge([]), RunConfig()
+    )
+    assert run_stage(run, "S5", deps).status == "REVISION_REQUIRED"
+    issue = store.issues(run)[0]
+    issue.status = "resolved"
+    store.save_issue(issue)
+    store.update_run(run, stage_id="S5")
+    deps.llm = ScriptedLLM(normal_responses()[4:])
+    assert run_stage(run, "S5", deps).status == "COMPLETE"
+    assert len(deps.llm.calls) == 2
+    assert len(store.issues(run)) == 1
+    assert store.issues(run)[0].status == "resolved"
     store.close()

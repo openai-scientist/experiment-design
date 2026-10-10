@@ -36,7 +36,7 @@ These modules also affect commands and exported scientific results.
 | `decisions.py` | `tests/test_decisions.py` |
 | `review.py` | `tests/test_review.py` |
 | `qualification.py` | `tests/test_qualification.py` |
-| `workflow.py` | `tests/test_workflow.py`, `tests/test_stage_pipeline.py` |
+| `workflow.py` | `tests/test_workflow.py`, `tests/test_stage_pipeline.py`, `tests/test_recovery_contracts.py` |
 | `output.py` | `tests/test_output.py`, `tests/test_publication.py` |
 | `cli.py` | `tests/test_cli.py` |
 | Shared contracts, test support, configuration, or an unknown owner | Complete local suite |

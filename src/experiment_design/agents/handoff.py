@@ -49,6 +49,14 @@ def submit_tool(ctx: ToolContext, **focus):
             payload.risks or any(f.severity in {"MAJOR", "BLOCKER"} for f in payload.findings)
         ):
             errors.append("Material handoff risks conflict with complete handoff")
+        if payload.handoff_complete and not any(
+            o.id in ctx.accepted_call_ids
+            and o.binding == ctx.binding
+            and o.tool_name == "read_design"
+            and o.arguments.get("path", "/") == "/"
+            for o in ctx.store.accepted_observations(ctx.task_id)
+        ):
+            errors.append("Complete handoff requires inspection of the bound design")
         if errors:
             raise SubmitRejected(errors)
         return payload.model_dump(mode="json")

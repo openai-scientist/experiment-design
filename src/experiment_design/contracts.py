@@ -349,6 +349,7 @@ class FieldAnnotation(Record):
     source_ref: str | None = None
     source_span: str | None = None
     note: str = ""
+    value: Any = None
 
 
 class ResearchContext(Record):
@@ -425,6 +426,7 @@ class ResearcherDecision(Record):
     interpretation: dict = Field(default_factory=dict)
     application: dict = Field(default_factory=dict)
     verification: dict = Field(default_factory=dict)
+    reconciliation: dict = Field(default_factory=dict)
 
 
 class ReviewCohort(Record):
@@ -434,6 +436,7 @@ class ReviewCohort(Record):
     member_task_ids: dict[str, str]
     submission_refs: list[str] = Field(default_factory=list)
     published_event_id: int | None = None
+    superseded_by: str | None = None
 
 
 class Observation(Record):

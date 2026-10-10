@@ -218,3 +218,87 @@ def test_source_quantity_cannot_use_unrelated_span(tmp_path):
         )
     assert store.version(run).version == 1
     store.close()
+
+
+def test_bound_power_preview_is_counterfactual_and_does_not_mutate(tmp_path):
+    from test_stage_pipeline import source_context, source_snapshot, supported_design
+
+    store = Store(tmp_path / "preview.db")
+    run = store.create_staged_run(source_snapshot(), {})
+    context = source_context()
+    store.save_context(run, context)
+    version = store.add_version(run, supported_design(), author="design", parent=None)
+    bound = ToolContext(store, run, context.package, version, set(), binding=store.binding(run))
+    tool = build_tools(bound)["compute_power"]
+    base = tool.handler({})[0]
+    preview = tool.handler({"ops": [{"path": "/claim/margin/value", "value": 2}]})[0]
+    assert preview["counterfactual"] is True
+    assert preview["power"] < base["power"]
+    assert store.version(run).design_hash == version.design_hash
+    assert store.context(run) == context
+    store.close()
+
+
+def test_bound_power_rejects_forged_source_override(tmp_path):
+    from test_stage_pipeline import source_context, source_snapshot, supported_design
+
+    store = Store(tmp_path / "override.db")
+    run = store.create_staged_run(source_snapshot(), {})
+    context = source_context()
+    store.save_context(run, context)
+    version = store.add_version(run, supported_design(), author="design", parent=None)
+    bound = ToolContext(store, run, context.package, version, set(), binding=store.binding(run))
+    with pytest.raises(ValueError, match="source span"):
+        build_tools(bound)["compute_power"].handler(
+            {
+                "overrides": {
+                    "sd": {
+                        "value": 100,
+                        "unit": "points",
+                        "provenance": "source",
+                        "source_ref": "S1",
+                        "source_span": "Standard deviation 10 points",
+                    }
+                }
+            }
+        )
+    assert store.version(run).design_hash == version.design_hash
+    store.close()
+
+
+@pytest.mark.parametrize("owner", ["methodologist", "skeptic"])
+def test_computation_ref_cannot_borrow_peer_observation(tmp_path, owner):
+    from test_stage_pipeline import source_context, source_snapshot, supported_design
+
+    from experiment_design.contracts import Observation
+
+    store = Store(tmp_path / "peer.db")
+    run = store.create_staged_run(source_snapshot(), {})
+    context = source_context()
+    store.save_context(run, context)
+    version = store.add_version(run, supported_design(), author="design", parent=None)
+    bound = ToolContext(
+        store,
+        run,
+        context.package,
+        version,
+        {"peer"},
+        binding=store.binding(run),
+        task_id="skeptic",
+    )
+    store.save_observation(
+        run,
+        Observation(
+            id="peer",
+            task_id=owner,
+            binding=bound.binding,
+            tool_name="compute_power",
+            arguments={},
+            result={"value": []},
+            accepted=True,
+            evidence_ref="tool:peer",
+        ),
+    )
+    errors = validate_findings([finding(basis="computation", evidence_refs=["tool:peer"])], bound)
+    assert bool(errors) == (owner != "skeptic")
+    store.close()

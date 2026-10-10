@@ -8,8 +8,84 @@ from experiment_design.contracts import (
     ResearcherDecision,
     ReviewIssue,
 )
-from experiment_design.patch import apply_patch, design_diff, package_claim, resolve
+from experiment_design.package import all_sources
+from experiment_design.patch import apply_patch, design_diff, package_claim, record_diff, resolve
 from experiment_design.runtime.store import Store
+
+
+def context_change_paths(before: ResearchContext, after: ResearchContext) -> list[str]:
+    aliases = {
+        "/package/hypothesis/statement": "/claim/hypothesis",
+        "/package/hypothesis/prediction": "/claim/prediction",
+        "/package/hypothesis/failure_condition": "/claim/failure_condition",
+        "/package/hypothesis/exposure": "/claim/exposure",
+        "/package/scope": "/claim/inference_scope",
+        "/package/outcome/name": "/claim/primary_outcome",
+        "/package/outcome/unit": "/claim/outcome_unit",
+        "/package/outcome/kind": "/claim/outcome_kind",
+        "/package/outcome/direction": "/claim/direction",
+        "/package/inference/contrast_type": "/claim/contrast_type",
+        "/package/inference/margin": "/claim/margin",
+        "/package/inference/estimand": "/claim/estimand",
+        "/package/hypothesis/method": "/analysis/model",
+    }
+    return [
+        aliases.get(d["path"], "/context" + d["path"])
+        for d in record_diff(before, after)
+        if d["path"] != "/revision" and not d["path"].startswith("/field_annotations/")
+    ]
+
+
+def reconcile_answer(store: Store, run_id: str, decision: ResearcherDecision) -> ResearcherDecision:
+    """Keep independent recorded intent; re-present intent affected by intervening changes."""
+    current = store.binding(run_id)
+    if decision.binding.model_dump(exclude={"event_id"}) == current.model_dump(
+        exclude={"event_id"}
+    ):
+        return decision
+    before = store.context(run_id, decision.binding.context_revision)
+    after = store.context(run_id)
+    changes = context_change_paths(before, after)
+    if decision.binding.design_version and current.design_version:
+        changes += [
+            d["path"]
+            for d in design_diff(
+                store.version(run_id, decision.binding.design_version).design,
+                store.version(run_id).design,
+            )
+        ]
+    dependent = bool(decision.dependencies) or any(
+        path.startswith(
+            (
+                "/context/package/constraints",
+                "/context/package/assumptions",
+                "/context/package/sources",
+                "/context/package/budget",
+            )
+        )
+        or any(
+            path == scope or path.startswith(scope + "/") or scope.startswith(path + "/")
+            for scope in decision.affected_paths
+        )
+        for path in changes
+    )
+    response = decision.responses[-1]
+    decision.reconciliation = {
+        "response_id": response.response_id,
+        "response_revision": response.revision,
+        "previous_binding": decision.binding.model_dump(),
+        "independent": not dependent,
+        "changed_paths": changes,
+    }
+    decision.revision += 1
+    decision.binding = current
+    decision.interpretation = {}
+    if dependent:
+        decision.status = "AWAITING_RESEARCHER"
+        decision.recommendation = (
+            "Review the recorded answer against the changed scientific context."
+        )
+    return store.save_decision(decision)
 
 
 def clarification_options(
@@ -78,6 +154,7 @@ def respond(
         )
         decision.interpretation = {}
         decision.application = {}
+        decision.reconciliation = {}
         return store.save_decision(decision)
 
 
@@ -102,14 +179,7 @@ def interpret(
             or proposed_context.revision != context.revision + 1
         ):
             raise ValueError("authorized context revision differs")
-        old_claim, new_claim = (
-            package_claim(context.package),
-            package_claim(proposed_context.package),
-        )
-        changed_paths = [f"/claim/{key}" for key in old_claim if old_claim[key] != new_claim[key]]
-        for key in ("research_question", "constraints", "budget", "assumptions", "sources"):
-            if getattr(context.package, key) != getattr(proposed_context.package, key):
-                changed_paths.append(f"/context/package/{key}")
+        changed_paths = context_change_paths(context, proposed_context)
         if any(
             not any(
                 path == allowed or path.startswith(allowed + "/")
@@ -157,7 +227,7 @@ def apply_decision(
             changed = apply_patch(
                 version.design,
                 patch,
-                source_ids={s.id for s in context.package.sources},
+                source_ids={s.id for s in all_sources(context, store.decisions(run_id))},
                 author="researcher",
                 context=context,
                 authorization=decision,
@@ -188,6 +258,17 @@ def apply_decision(
             }
             for op in patch.ops:
                 parts = op.path.strip("/").split("/")
+                if len(parts) in {2, 3} and parts[:2] == ["claim", "inference_scope"]:
+                    next_context.package.scope = op.value
+                if parts[0] != "claim":
+                    if op.path == "/analysis/model":
+                        next_context.package.hypothesis.method = op.value
+                    next_context.field_annotations[op.path] = FieldAnnotation(
+                        status="researcher-confirmed",
+                        source_ref=f"researcher:{decision.id}:{response.response_id}",
+                        note=response.text,
+                        value=resolve(version.design, op.path) if version else op.value,
+                    )
                 if len(parts) in {2, 3} and parts[0] == "claim" and parts[1] in mapping:
                     group, field = mapping[parts[1]]
                     record = getattr(next_context.package, group)

@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from experiment_design.agents.tools import ToolContext
 from experiment_design.contracts import AgentTask, ArtifactBinding, ReviewCohort, ReviewIssue
+from experiment_design.package import all_sources
 from experiment_design.runtime.store import Store
 
 
@@ -27,7 +28,7 @@ def commit_revision(
             version.design,
             patch,
             context=context,
-            source_ids={s.id for s in context.package.sources},
+            source_ids={s.id for s in all_sources(context, store.decisions(run_id))},
         )
         version = store.add_version(run_id, changed, author="design", parent=parent, patch=patch)
         known = {i.id: i for i in store.issues(run_id)}

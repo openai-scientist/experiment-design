@@ -195,3 +195,131 @@ def test_context_interpretation_cannot_change_unapproved_claim(tmp_path):
         )
     assert store.context(run) == context
     store.close()
+
+
+@pytest.mark.parametrize(
+    "path,value", [("/analysis/model", "Pooled t test of cluster means"), ("/analysis/alpha", 0.05)]
+)
+def test_authorized_sap_change_records_confirmed_commitment(tmp_path, path, value):
+    store, run, context, _ = decision_state(tmp_path)
+    decision = store.save_decision(
+        ResearcherDecision(
+            id="SAP",
+            run_id=run,
+            binding=store.binding(run),
+            status="AWAITING_RESEARCHER",
+            problem="Revise SAP",
+            affected_paths=[path],
+        )
+    )
+    answered = respond(
+        store,
+        run,
+        decision.id,
+        DecisionResponse(
+            revision=1,
+            action="PROPOSE_ALTERNATIVE",
+            text=f"Use {value}",
+            researcher="PI",
+            response_id="SAP-reply",
+        ),
+    )
+    proposed = Patch(ops=[{"path": path, "value": value}], rationale="PI SAP")
+    store.save_decision(
+        interpret(answered, context, {"authorized": True, "patch": proposed.model_dump()})
+    )
+    apply_decision(store, run, decision.id, context=context, patch=proposed)
+    updated = store.context(run)
+    assert updated.field_annotations[path].status == "researcher-confirmed"
+    assert updated.field_annotations[path].value == value
+    if path == "/analysis/model":
+        assert updated.package.hypothesis.method == value
+    store.close()
+
+
+def test_researcher_evidence_can_supply_source_quantity_for_independent_review(tmp_path):
+    from test_stage_pipeline import source_context, source_snapshot, supported_design
+
+    from experiment_design.agents.tools import build_tools
+    from experiment_design.contracts import AgentTask, TaskBudget
+    from experiment_design.review import commit_revision, review_context, start_cohort
+    from experiment_design.runtime.store import TaskRecord
+
+    store = Store(tmp_path / "evidence.db")
+    run = store.create_staged_run(source_snapshot(), {})
+    context = source_context()
+    store.save_context(run, context)
+    store.add_version(run, supported_design(), author="design", parent=None)
+    decision = store.save_decision(
+        ResearcherDecision(
+            id="SD",
+            run_id=run,
+            binding=store.binding(run),
+            status="AWAITING_RESEARCHER",
+            problem="Confirm SD",
+            affected_paths=["/scenarios/0/sd"],
+        )
+    )
+    answered = respond(
+        store,
+        run,
+        decision.id,
+        DecisionResponse(
+            revision=1,
+            action="PROPOSE_ALTERNATIVE",
+            text="Observed standard deviation 12 points",
+            researcher="PI",
+            response_id="SD-reply",
+        ),
+    )
+    source_ref = "researcher:SD:SD-reply"
+    proposed = Patch(
+        ops=[
+            {
+                "path": "/scenarios/0/sd",
+                "value": {
+                    "value": 12,
+                    "unit": "points",
+                    "provenance": "source",
+                    "source_ref": source_ref,
+                    "source_span": "Observed standard deviation 12 points",
+                },
+            }
+        ],
+        rationale="Observed SD",
+    )
+    store.save_decision(
+        interpret(answered, context, {"authorized": True, "patch": proposed.model_dump()})
+    )
+    apply_decision(store, run, decision.id, context=context, patch=proposed)
+    cohort = start_cohort(store, run, store.binding(run))
+    task = AgentTask(
+        id=cohort.member_task_ids["skeptic"],
+        binding=cohort.binding,
+        cohort_id=cohort.id,
+        stage_id="S4",
+        objective="Review",
+        package_ref="source",
+        design_version=2,
+        allowed_tools=[],
+        budget=TaskBudget(max_turns=3, max_tokens=1000),
+        exit_conditions=["Submit"],
+    )
+    store.save_task(run, TaskRecord(task=task))
+    ctx = review_context(store, run, task)
+    hits = build_tools(ctx)["lookup_evidence"].handler({"query": "Observed standard deviation"})
+    assert any(h["source_id"] == source_ref for h in hits)
+    result = build_tools(ctx)["compute_power"].handler({})[0]
+    assert result["status"] == "computed" and result["normalized_inputs"]["sd"] == 12
+    updated = commit_revision(
+        store,
+        run,
+        parent=2,
+        patch=Patch(
+            ops=[{"path": "/protocol/resources", "value": ["District test records"]}],
+            rationale="Operational refinement",
+        ),
+        issue_ids=[],
+    )
+    assert updated.design.scenarios[0].sd.source_ref == source_ref
+    store.close()

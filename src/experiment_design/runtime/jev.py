@@ -30,6 +30,10 @@ class JudgeError(RuntimeError):
     pass
 
 
+class JudgeBudgetStop(JudgeError):
+    pass
+
+
 class Judge(Protocol):
     def decide(self, state: dict, questions: dict[str, Question]) -> dict[str, Decision]: ...
 
@@ -49,7 +53,7 @@ def bounded_decide(
     ]
     if len(calls) >= cfg.jev_max_calls:
         store.append_event(run_id, "budget.stop", {"scope": "run", "reason": "jev_call_limit"})
-        raise JudgeError("jev_call_limit")
+        raise JudgeBudgetStop("jev_call_limit")
     try:
         decisions = judge.decide(state, questions)
     except Exception:

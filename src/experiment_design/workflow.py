@@ -14,7 +14,7 @@ from experiment_design.agents import (
     understanding,
     verifier,
 )
-from experiment_design.agents.tools import ToolContext, build_tools
+from experiment_design.agents.tools import ToolContext, build_tools, source_ids
 from experiment_design.config import RunConfig
 from experiment_design.contracts import (
     AgentTask,
@@ -31,7 +31,7 @@ from experiment_design.contracts import (
     StageResult,
     TaskBudget,
 )
-from experiment_design.decisions import apply_decision, interpret, respond
+from experiment_design.decisions import apply_decision, interpret, reconcile_answer, respond
 from experiment_design.qualification import approve_version, assess_readiness
 from experiment_design.review import (
     commit_revision,
@@ -41,7 +41,13 @@ from experiment_design.review import (
     start_cohort,
     verification_options,
 )
-from experiment_design.runtime.jev import Judge, JudgeError, Question, bounded_decide
+from experiment_design.runtime.jev import (
+    Judge,
+    JudgeBudgetStop,
+    JudgeError,
+    Question,
+    bounded_decide,
+)
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.runtime.loop import run_agent
 from experiment_design.runtime.store import Store
@@ -109,14 +115,20 @@ def jev_state(store: Store, run_id: str, cfg: RunConfig) -> dict:
     }
 
 
-def _choose(deps: Deps, run_id: str, point: str, questions: dict[str, Question]) -> dict[str, str]:
+def _choose(
+    deps: Deps,
+    run_id: str,
+    point: str,
+    questions: dict[str, Question],
+    *,
+    proposed_understanding: dict | None = None,
+) -> dict[str, str]:
     multi = {k: q for k, q in questions.items() if len(q.options) > 1}
+    state = jev_state(deps.store, run_id, deps.run)
+    if proposed_understanding is not None:
+        state["proposed_understanding"] = proposed_understanding
     decisions = (
-        bounded_decide(
-            deps.judge, deps.store, run_id, deps.run, jev_state(deps.store, run_id, deps.run), multi
-        )
-        if multi
-        else {}
+        bounded_decide(deps.judge, deps.store, run_id, deps.run, state, multi) if multi else {}
     )
     chosen = {}
     for key, q in questions.items():
@@ -230,6 +242,7 @@ def _agent(
             ),
             exit_conditions=["Valid structured submission"],
         )
+    ctx.task_id = task_id
     result = run_agent(
         module.SPEC,
         task,
@@ -270,6 +283,19 @@ def _save_decisions(store: Store, run_id: str, payload: dict) -> None:
 def _cohort(deps: Deps, run_id: str):
     cohorts = deps.store._artifact_records(run_id, "cohort", ReviewCohort)
     cohort = cohorts[-1] if cohorts else None
+    if (
+        cohort
+        and cohort.published_event_id is None
+        and (
+            cohort.binding.model_dump(exclude={"event_id"})
+            != deps.store.binding(run_id).model_dump(exclude={"event_id"})
+        )
+    ):
+        with deps.store.transaction():
+            replacement = start_cohort(deps.store, run_id, deps.store.binding(run_id))
+            cohort.superseded_by = replacement.id
+            deps.store.save_cohort(cohort)
+        cohort = replacement
     if cohort is None or cohort.published_event_id is not None:
         cohort = start_cohort(deps.store, run_id, deps.store.binding(run_id))
     for role, module in (("methodologist", methodologist), ("skeptic", skeptic)):
@@ -334,7 +360,11 @@ def _refine(deps: Deps, run_id: str):
 def _verify(deps: Deps, run_id: str):
     issues = [i for i in deps.store.issues(run_id) if i.status in {"addressed", "rebutted"}]
     result = _agent(deps, run_id, verifier, issues=issues)
-    live = validate_design(deps.store.version(run_id).design, deps.store.context(run_id).package)
+    live = validate_design(
+        deps.store.version(run_id).design,
+        deps.store.context(run_id).package,
+        source_ids(_context(deps, run_id)),
+    )
     questions = {}
     verdicts = {v["issue_id"]: v for v in result.findings_or_changes["verdicts"]}
     for issue in issues:
@@ -405,6 +435,7 @@ def run_stage(run_id: str, stage_id: StageId, deps: Deps) -> StageResult:
                         {option: option for option in options},
                     )
                 },
+                proposed_understanding=payload,
             )["next_action"]
         with store.transaction():
             context = store.save_context(run_id, ResearchContext.model_validate(payload["context"]))
@@ -518,28 +549,78 @@ def run_stage(run_id: str, stage_id: StageId, deps: Deps) -> StageResult:
             {"REVIEW": _cohort, "REVISE": _refine, "VERIFY": _verify}[action](deps, run_id)
             store.update_run(run_id, actions_done=store.run(run_id).actions_done + 1)
     elif stage_id == "S5":
-        result = _agent(deps, run_id, handoff)
-        assessment = assess_readiness(store, run_id, result)
-        outputs = [assessment.id]
-        issues = [
-            i.id
-            for i in store.issues(run_id)
-            if i.status == "open" and i.severity in {"MAJOR", "BLOCKER"}
-        ]
-        status = (
-            "NEEDS_INPUT"
-            if assessment.review_status == "NEEDS_INPUT"
-            else "REVISION_REQUIRED"
-            if assessment.review_status == "NOT_READY"
-            else "COMPLETE"
-        )
-        reason = "; ".join(assessment.blockers) or "Independent handoff inspection complete"
+        inspections = {
+            e.task_id
+            for e in store.events(run_id)
+            if e.type == "task.started" and e.agent_id == "handoff"
+        }
+        checkpoint = {
+            "issues": [i.model_dump(mode="json") for i in store.issues(run_id)],
+            "decisions": [
+                d.model_dump(mode="json")
+                for d in store.decisions(run_id)
+                if d.purpose != "final_review"
+            ],
+            "evidence_events": [
+                e.event_id
+                for e in store.events(run_id)
+                if e.type == "artifact"
+                and e.data["kind"] == "observation"
+                and e.data["record"]["task_id"] not in inspections
+            ],
+        }
+        result = _agent(deps, run_id, handoff, support_checkpoint=checkpoint)
+        with store.transaction():
+            assessment = assess_readiness(store, run_id, result)
+            for decision_id in assessment.decision_ids:
+                decision = store.decision(run_id, decision_id)
+                if decision.status in {"IDENTIFIED", "EXPLORING"}:
+                    decision.binding = store.binding(run_id)
+                    decision.status = "AWAITING_RESEARCHER"
+                    store.save_decision(decision)
+            if assessment.decision_ids:
+                assessment.binding = store.binding(run_id)
+                store.save_assessment(assessment)
+            outputs = [assessment.id]
+            issues = [
+                i.id
+                for i in store.issues(run_id)
+                if i.status == "open" and i.severity in {"MAJOR", "BLOCKER"}
+            ]
+            status = (
+                "NEEDS_INPUT"
+                if assessment.review_status == "NEEDS_INPUT"
+                else "REVISION_REQUIRED"
+                if assessment.review_status == "NOT_READY"
+                else "COMPLETE"
+            )
+            reason = "; ".join(assessment.blockers) or "Independent handoff inspection complete"
+            result = StageResult(
+                stage_id="S5",
+                status=status,
+                binding=store.binding(run_id),
+                output_refs=outputs,
+                issue_refs=issues,
+                reason=reason,
+            )
+            target = (
+                "S6"
+                if status == "COMPLETE"
+                else "S4"
+                if status == "REVISION_REQUIRED" and issues
+                else "S5"
+            )
+            store.commit_stage(run_id, result, target)
+            return result
     elif stage_id == "S6":
         finals = [
             d
             for d in store.decisions(run_id)
             if d.purpose == "final_review"
-            and d.binding.design_hash == store.version(run_id).design_hash
+            and d.status == "AWAITING_RESEARCHER"
+            and d.binding.model_dump(exclude={"event_id"})
+            == store.binding(run_id).model_dump(exclude={"event_id"})
+            and d.dependencies == [store.assessment(run_id).id]
         ]
         if not finals:
             finals = [
@@ -624,6 +705,9 @@ def advance(run_id: str, deps: Deps) -> RunStatus:
                             "S4",
                         )
             if decision.purpose == "scientific" and decision.status == "ANSWERED":
+                decision = reconcile_answer(store, run_id, decision)
+                if decision.status == "AWAITING_RESEARCHER":
+                    continue
                 context = store.context(run_id)
                 result = _agent(deps, run_id, decision_interpretation, decision=decision)
                 interpreted = interpret(decision, context, result.findings_or_changes)
@@ -685,7 +769,7 @@ def advance(run_id: str, deps: Deps) -> RunStatus:
                 and target == stage
             ):
                 store.update_run(run_id, status="INCONCLUSIVE")
-    except _BudgetStop:
+    except (_BudgetStop, JudgeBudgetStop):
         store.update_run(run_id, status="BUDGET_STOP")
     except Exception:
         store.append_event(

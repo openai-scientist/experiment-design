@@ -70,9 +70,14 @@ def sources(ctx: ToolContext):
             for a in ctx.store.source_snapshot(ctx.run_id).artifacts
         ]
         context = ctx.store.context(ctx.run_id, ctx.binding.context_revision)
-        if ctx.cohort_id:
-            return list(context.package.sources) if context else raw
-        return all_sources(context, ctx.store.decisions(ctx.run_id)) if context else raw
+        decisions = ctx.store._artifact_records(
+            ctx.run_id,
+            "researcher_decision",
+            ResearcherDecision,
+            ctx.issue_cutoff if ctx.cohort_id else None,
+        )
+        supplied = all_sources(context, decisions) if context else []
+        return list({s.id: s for s in supplied + raw}.values())
     return all_sources(ctx.package, ctx.store.requests(ctx.run_id))
 
 
@@ -81,7 +86,21 @@ def source_ids(ctx: ToolContext) -> set[str]:
 
 
 def validate_refs(refs: list[str], ctx: ToolContext) -> list[str]:
-    known = source_ids(ctx) | {f"tool:{call_id}" for call_id in ctx.accepted_call_ids}
+    known = source_ids(ctx)
+    for call_id in ctx.accepted_call_ids:
+        if ctx.binding is None:
+            known.add(f"tool:{call_id}")
+            continue
+        try:
+            observation = ctx.store.observation(ctx.run_id, call_id)
+        except KeyError:
+            continue
+        if (
+            observation.accepted
+            and observation.task_id == ctx.task_id
+            and observation.binding == ctx.binding
+        ):
+            known.add(observation.evidence_ref)
     return [
         f"Unknown evidence ref {ref}. Use an exact reference from: {', '.join(sorted(known))}"
         for ref in refs
@@ -120,13 +139,14 @@ def validate_findings(findings: list[Finding], ctx: ToolContext) -> list[str]:
     return errors
 
 
-def validate_source_quantities(design: Design, ctx: ToolContext) -> None:
+def validate_source_quantities(design: Design | dict, ctx: ToolContext) -> None:
     if ctx.binding is None:
         return
     from experiment_design.agents.understanding import supports_number
 
     known = {s.id: s for s in sources(ctx)}
-    for path, quantity in quantities(design.model_dump(mode="json")):
+    data = design.model_dump(mode="json") if isinstance(design, Design) else design
+    for path, quantity in quantities(data):
         if quantity["provenance"] != "source":
             continue
         source = known.get(quantity.get("source_ref"))
@@ -153,6 +173,7 @@ def computation_refs(ctx: ToolContext) -> set[str]:
             observation.accepted
             and observation.tool_name == "compute_power"
             and observation.binding == ctx.binding
+            and observation.task_id == ctx.task_id
         ):
             refs.add(observation.evidence_ref)
     return refs
@@ -293,6 +314,7 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
 
     def compute(args):
         d = current(args)
+        candidate(args)
         selected = d.scenarios
         if args.get("scenario") is not None:
             selected = [s for s in selected if s.name == args["scenario"]]
@@ -301,16 +323,30 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
         overrides = {
             k: Quantity.model_validate(v) for k, v in (args.get("overrides") or {}).items()
         }
+        validate_source_quantities(
+            {k: q.model_dump(mode="json") for k, q in overrides.items()}, ctx
+        )
         if ctx.binding:
             return [
                 calculate(
                     CalculationRequest(
-                        binding=ctx.binding, scenario_id=s.name, design=d, overrides=overrides
+                        binding=ctx.binding,
+                        scenario_id=s.name,
+                        design=d,
+                        overrides=overrides,
+                        preview_patch=Patch(ops=args["ops"], rationale="Read-only power preview")
+                        if args.get("ops") is not None
+                        else None,
                     )
                 ).model_dump(mode="json")
                 for s in selected
             ]
-        return [compute_scenario(d, s, overrides).model_dump(mode="json") for s in selected]
+        previewed = candidate(args)
+        return [
+            compute_scenario(previewed, s, overrides).model_dump(mode="json")
+            for s in previewed.scenarios
+            if args.get("scenario") in {None, s.name}
+        ]
 
     def check_patch(args):
         before = current({})
@@ -423,6 +459,7 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
             "Cite the returned evidence_ref when submitting computation findings.",
             preview
             | {
+                "ops": ops,
                 "scenario": {"type": ["string", "null"]},
                 "overrides": {
                     "type": "object",

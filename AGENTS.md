@@ -64,6 +64,12 @@ Schema-1 runs support historical reads/exports only; never silently migrate thei
 scientific meaning. Qualification and publication use bound observations, never
 recompute numbers while rendering. Researcher responses record exact revision,
 identity and timestamp; final review uses the same ResearcherDecision lifecycle.
+Preserve confirmed context values and source/confirmed scientific commitments,
+including their measurement mirrors. Typed path annotations carry commitment values.
+Complete handoff requires inspecting the bound design, an execution protocol and
+stopping policies. Requalify after supporting evidence or issues change; present
+final review against the current assessment. Historical exports use frozen supporting
+snapshots. Journal provider attempts so unknown usage remains visible after failure.
 
 ## Testing rules
 Each test protects a user-visible or downstream contract: statistical references,

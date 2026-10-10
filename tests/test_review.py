@@ -89,6 +89,41 @@ def test_context_change_prevents_mixed_snapshot_publication(tmp_path):
     store.close()
 
 
+def test_cohort_sources_exclude_later_researcher_response(tmp_path):
+    from experiment_design.contracts import DecisionResponse, ResearcherDecision
+    from experiment_design.decisions import respond
+
+    store, run, cohort = review_state(tmp_path)
+    task = member(store, run, cohort, "skeptic")
+    decision = store.save_decision(
+        ResearcherDecision(
+            id="later",
+            run_id=run,
+            binding=store.binding(run),
+            status="AWAITING_RESEARCHER",
+            problem="New data",
+            affected_paths=["/scenarios/0/sd"],
+        )
+    )
+    respond(
+        store,
+        run,
+        decision.id,
+        DecisionResponse(
+            revision=1,
+            action="PROPOSE_ALTERNATIVE",
+            text="Late measurement: standard deviation 12 points",
+            researcher="PI",
+            response_id="late-data",
+        ),
+    )
+    ctx = review_context(store, run, task)
+    hits = build_tools(ctx)["lookup_evidence"].handler({"query": "Late measurement"})
+    assert not any(h["source_id"] == "researcher:later:late-data" for h in hits)
+    assert validate_refs(["researcher:later:late-data"], ctx)
+    store.close()
+
+
 def test_revision_parent_and_verification_guard(tmp_path):
     from experiment_design.contracts import Patch, PatchOp, ReviewIssue
     from experiment_design.review import commit_revision, verification_options

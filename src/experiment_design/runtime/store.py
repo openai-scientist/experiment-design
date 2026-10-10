@@ -51,6 +51,7 @@ EVENT_TYPES = (
     "run.updated",
     "publication",
     "provider.usage",
+    "provider.attempt",
     "budget.changed",
 )
 
@@ -93,6 +94,7 @@ class Usage(Record):
     actions: int
     llm_cached_tokens_reported: int = 0
     llm_cache_usage_missing_calls: int = 0
+    llm_usage_missing_calls: int = 0
     jev_tokens_reported: int = 0
     jev_usage_missing_calls: int = 0
 
@@ -418,10 +420,15 @@ class Store:
             if (e.type == "provider.usage" and e.data.get("provider") != "jev")
             or (e.type == "task.finished" and not e.data.get("usage_accounted"))
         ]
+        attempts = sum(
+            e.type == "provider.attempt" and e.data.get("provider") == "llm" for e in events
+        )
+        reported_calls = sum(t.get("llm_calls", 0) for t in tasks)
+        missing = max(0, attempts - reported_calls)
         return Usage(
             llm_tokens=sum(t.get("tokens_in", 0) + t.get("tokens_out", 0) for t in tasks)
             + sum(t["tokens"] or 0 for t in routing),
-            llm_calls=sum(t.get("llm_calls", 0) for t in tasks),
+            llm_calls=reported_calls + missing,
             jev_calls=len(routing)
             if routing
             else sum(e.type == "decision" and e.data.get("by") == "jev" for e in events),
@@ -429,7 +436,9 @@ class Store:
             llm_cached_tokens_reported=sum(t.get("tokens_cached", 0) for t in tasks),
             llm_cache_usage_missing_calls=sum(
                 t.get("cache_usage_missing_calls", t.get("llm_calls", 0)) for t in tasks
-            ),
+            )
+            + missing,
+            llm_usage_missing_calls=missing,
             jev_tokens_reported=sum(t["tokens"] or 0 for t in routing),
             jev_usage_missing_calls=sum(t["tokens"] is None for t in routing),
         )
@@ -624,7 +633,19 @@ class Store:
         return self._artifact(run_id, "cohort", cohort_id, ReviewCohort)
 
     def save_assessment(self, assessment: ReadinessAssessment) -> ReadinessAssessment:
-        return self._put_artifact(assessment.run_id, "assessment", assessment.id, assessment)
+        with self.transaction():
+            self._put_artifact(assessment.run_id, "assessment", assessment.id, assessment)
+            self.freeze_publication(assessment.run_id)
+        return assessment
+
+    def freeze_publication(self, run_id: str) -> PublicationSnapshot:
+        snapshot = self.publication_snapshot(run_id)
+        return self._put_artifact(
+            run_id,
+            "publication_snapshot",
+            f"version:{snapshot.version.version}:event:{snapshot.binding.event_id}",
+            snapshot,
+        )
 
     def assessment(
         self, run_id: str, assessment_id: str | None = None
@@ -687,6 +708,15 @@ class Store:
             events = self.events(run_id)
             cutoff = event_id if event_id is not None else events[-1].event_id
             if version is not None:
+                frozen = [
+                    s
+                    for s in self._artifact_records(
+                        run_id, "publication_snapshot", PublicationSnapshot, cutoff
+                    )
+                    if s.version.version == version
+                ]
+                if frozen:
+                    return frozen[-1]
                 later = [
                     e.event_id
                     for e in events
