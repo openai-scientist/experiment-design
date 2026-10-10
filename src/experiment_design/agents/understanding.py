@@ -50,6 +50,13 @@ def brief(ctx: ToolContext, **focus) -> str:
         "Read the current context when one exists. Preserve existing researcher-confirmed "
         "values and annotations verbatim, including status, reference, span, note and value. "
         "Do not invent missing claims or mark new proposals researcher-confirmed. "
+        "A recorded answer supplied as an immutable source can support source-stated intent "
+        "in a new run: cite its exact source_ref and verbatim source_span, preserving the "
+        "stated value. Do not discard that value or request confirmation solely because the "
+        "answer was recorded in another run. This does not import a decision response or "
+        "approval into this run. Distinguish an acknowledged limitation from a new choice: "
+        "record existing instructions and planning assumptions rather than asking permission "
+        "to retain them. Request a decision for a genuinely unresolved scientific choice. "
         "Record contradictions and missing scientific decisions even before a design exists. "
         "Quantities from sources require a verbatim span supporting value and unit; otherwise "
         "mark an explicit planning assumption, or leave missing. Context package.sources will "
@@ -110,7 +117,18 @@ def submit_tool(ctx: ToolContext, **focus):
             if annotation.status == "researcher-confirmed" and (
                 previous is None or previous.field_annotations.get(path) != annotation
             ):
-                raise ValueError("agent cannot confer researcher-confirmed authority")
+                message = (
+                    f"agent cannot confer researcher-confirmed authority for {path}. "
+                    "Preserve any value explicitly stated in a supplied source as source-stated "
+                    "with its exact source_ref and verbatim source_span; a recorded answer from "
+                    "another run can support source-stated intent without a new confirmation. "
+                    "It cannot create a current-run decision response or approval."
+                )
+                source = supplied.get(annotation.source_ref)
+                if source and annotation.source_span and annotation.source_span in source.text:
+                    alternative = annotation.model_copy(update={"status": "source-stated"})
+                    message += " source-stated alternative: " + alternative.model_dump_json()
+                raise ValueError(message)
             if annotation.status == "source-stated":
                 source = supplied.get(annotation.source_ref)
                 if (

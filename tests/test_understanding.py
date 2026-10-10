@@ -274,3 +274,34 @@ def test_understanding_decision_feedback_explains_permitted_agent_status(tmp_pat
     accepted = understanding.submit_tool(ctx).handler(data)
     assert accepted["decisions"][0]["status"] == "IDENTIFIED"
     store.close()
+
+
+def test_recorded_answer_can_recover_authority_without_losing_the_estimand(tmp_path):
+    import json
+
+    stated_estimand = "ITT mean end-of-term score difference, AI minus teacher."
+    path = tmp_path / "recorded-answer.md"
+    path.write_text("Margin 3 points.\nResearcher answer: " + stated_estimand, encoding="utf-8")
+    snapshot = snapshot_sources([path])
+    data = payload(snapshot)
+    store = Store(tmp_path / "recorded-answer.db")
+    rid = store.create_staged_run(snapshot, {})
+    ctx = ToolContext(store, rid, None, None, set())
+    data["decisions"] = []
+    data["context"]["package"]["inference"]["estimand"] = stated_estimand
+    data["context"]["field_annotations"]["estimand"] = {
+        "status": "researcher-confirmed",
+        "source_ref": snapshot.artifacts[0].ref,
+        "source_span": stated_estimand,
+    }
+    with pytest.raises(SubmitRejected) as rejected:
+        understanding.submit_tool(ctx).handler(data)
+    feedback = " ".join(rejected.value.errors)
+    alternative = json.loads(feedback.split("source-stated alternative: ", 1)[1])
+    data["context"]["field_annotations"]["estimand"] = alternative
+    accepted = understanding.submit_tool(ctx).handler(data)
+    assert accepted["context"]["package"]["inference"]["estimand"] == stated_estimand
+    assert accepted["context"]["field_annotations"]["estimand"]["status"] == "source-stated"
+    assert accepted["decisions"] == []
+    assert store.context(rid) is None
+    store.close()

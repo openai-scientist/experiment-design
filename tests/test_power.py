@@ -298,3 +298,33 @@ def test_cluster_size_override_requires_canonical_count_unit(unit):
         )
     )
     assert result.status == "not_computed" and any("unit" in r for r in result.reasons)
+
+
+@pytest.mark.parametrize("method", ["linear_mixed_model", "independent_pooled_t"])
+def test_cluster_diagnostics_distinguish_unsupported_and_independent_methods(method):
+    from test_stage_pipeline import supported_design
+
+    from experiment_design.contracts import ArtifactBinding, CalculationRequest
+    from experiment_design.science.power import calculate
+
+    d = supported_design()
+    d.analysis.method_id = method
+    d.analysis.model = (
+        "Mixed model with class random effect."
+        if method == "linear_mixed_model"
+        else "Pooled two-sample t test"
+    )
+    result = calculate(
+        CalculationRequest(
+            binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
+            scenario_id="base",
+            design=d,
+        )
+    )
+    assert result.status == "not_computed" and result.power is None
+    independent_error = "independent method does not support cluster dependence"
+    if method == "linear_mixed_model":
+        assert "analysis method/model missing, mismatched or unsupported" in result.reasons
+        assert independent_error not in result.reasons
+    else:
+        assert independent_error in result.reasons

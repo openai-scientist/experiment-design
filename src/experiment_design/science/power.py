@@ -319,9 +319,12 @@ def calculate(request: CalculationRequest) -> CalculationResult:
             or design.sampling.unit_of_randomization != cluster.unit
         ):
             reasons.append("cluster method requires assignment and analysis at cluster level")
-    elif cluster is not None:
+    elif method == "independent_pooled_t" and cluster is not None:
         reasons.append("independent method does not support cluster dependence")
-    elif design.sampling.unit_of_analysis != design.sampling.unit_of_randomization:
+    elif (
+        method == "independent_pooled_t"
+        and design.sampling.unit_of_analysis != design.sampling.unit_of_randomization
+    ):
         reasons.append("independent method requires matching independent assigned/analysis units")
     quantities = {"effect": scenario.effect, "sd": scenario.sd}
     if cluster:
