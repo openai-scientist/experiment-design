@@ -1,5 +1,6 @@
 """Independent read-only review of actual revisions and possible regressions."""
 
+import json
 from typing import Literal
 
 from experiment_design.agents.tools import (
@@ -37,13 +38,21 @@ class Submission(Record):
 
 def brief(ctx: ToolContext, **focus) -> str:
     return (
-        "For each addressed issue call read_diff on addressed_in - 1 → addressed_in. Check the "
+        "For each addressed issue use its supplied comparison. When parent_version is present, "
+        "call read_diff from that actual parent to addressed_version. An initial design has no "
+        "parent: never request version 0. For initial researcher clarifications, compare the "
+        "recorded response and application with read_design and the bound context commitments. "
+        "Source provenance does not establish verified district data or scientific acceptance. "
+        "Check the "
         "actual diff, original issue and affected paths independently; inspect the latest version "
         "for regressions. Rebutted issues have no patch: judge the argument and cited evidence. "
         "You are read-only; verdicts are recommendations to JEV, never approval.\n"
         + context_brief(ctx)
         + "\nVerification focus: "
-        + str(focus)
+        + json.dumps(
+            {**focus, "issues": [i.model_dump(mode="json") for i in focus.get("issues", [])]},
+            ensure_ascii=False,
+        )
     )
 
 

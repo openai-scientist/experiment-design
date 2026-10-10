@@ -360,7 +360,35 @@ def _refine(deps: Deps, run_id: str):
 
 def _verify(deps: Deps, run_id: str):
     issues = [i for i in deps.store.issues(run_id) if i.status in {"addressed", "rebutted"}]
-    result = _agent(deps, run_id, verifier, issues=issues)
+    issue_ids = {i.id for i in issues}
+    clarifications = [
+        {
+            "decision_id": d.id,
+            "affected_paths": d.affected_paths,
+            "response": d.responses[-1].model_dump(mode="json"),
+            "application": d.application,
+        }
+        for d in deps.store.decisions(run_id)
+        if d.application.get("issue_id") in issue_ids and d.responses
+    ]
+    comparisons = [
+        {
+            "issue_id": i.id,
+            "addressed_version": i.addressed_in,
+            "parent_version": deps.store.version(run_id, i.addressed_in).parent
+            if i.addressed_in
+            else None,
+        }
+        for i in issues
+    ]
+    result = _agent(
+        deps,
+        run_id,
+        verifier,
+        issues=issues,
+        comparisons=comparisons,
+        researcher_clarifications=clarifications,
+    )
     live = validate_design(
         deps.store.version(run_id).design,
         deps.store.context(run_id).package,
