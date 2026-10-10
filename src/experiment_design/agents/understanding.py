@@ -47,7 +47,9 @@ def brief(ctx: ToolContext, **focus) -> str:
         "Design pointers must match the Design schema and carry a typed value for source-stated "
         "commitments. List pointers use numeric indices, never assumption IDs. Context metadata "
         "uses /context/package/... pointers, for example /context/package/constraints. "
-        "Do not invent missing claims or mark proposals researcher-confirmed. "
+        "Read the current context when one exists. Preserve existing researcher-confirmed "
+        "values and annotations verbatim, including status, reference, span, note and value. "
+        "Do not invent missing claims or mark new proposals researcher-confirmed. "
         "Record contradictions and missing scientific decisions even before a design exists. "
         "Quantities from sources require a verbatim span supporting value and unit; otherwise "
         "mark an explicit planning assumption, or leave missing. Context package.sources will "
@@ -95,7 +97,15 @@ def submit_tool(ctx: ToolContext, **focus):
                         and previous.package.hypothesis.method != context.package.hypothesis.method
                     )
                 ):
-                    raise ValueError(f"researcher-confirmed intent cannot change: {path}")
+                    expected = {
+                        "value": old_claim.get(path, annotation.value),
+                        "annotation": annotation.model_dump(mode="json"),
+                    }
+                    raise ValueError(
+                        f"researcher-confirmed intent cannot change: {path}; preserve "
+                        "the current value and annotation verbatim: "
+                        + json.dumps(expected, ensure_ascii=False)
+                    )
         for path, annotation in context.field_annotations.items():
             if annotation.status == "researcher-confirmed" and (
                 previous is None or previous.field_annotations.get(path) != annotation
