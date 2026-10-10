@@ -9,28 +9,20 @@ from experiment_design.contracts import (
     ReviewIssue,
 )
 from experiment_design.package import all_sources
-from experiment_design.patch import apply_patch, design_diff, package_claim, record_diff, resolve
+from experiment_design.patch import (
+    apply_patch,
+    design_diff,
+    package_claim,
+    record_diff,
+    resolve,
+    scientific_path,
+)
 from experiment_design.runtime.store import Store
 
 
 def context_change_paths(before: ResearchContext, after: ResearchContext) -> list[str]:
-    aliases = {
-        "/package/hypothesis/statement": "/claim/hypothesis",
-        "/package/hypothesis/prediction": "/claim/prediction",
-        "/package/hypothesis/failure_condition": "/claim/failure_condition",
-        "/package/hypothesis/exposure": "/claim/exposure",
-        "/package/scope": "/claim/inference_scope",
-        "/package/outcome/name": "/claim/primary_outcome",
-        "/package/outcome/unit": "/claim/outcome_unit",
-        "/package/outcome/kind": "/claim/outcome_kind",
-        "/package/outcome/direction": "/claim/direction",
-        "/package/inference/contrast_type": "/claim/contrast_type",
-        "/package/inference/margin": "/claim/margin",
-        "/package/inference/estimand": "/claim/estimand",
-        "/package/hypothesis/method": "/analysis/model",
-    }
     return [
-        aliases.get(d["path"], "/context" + d["path"])
+        scientific_path("/context" + d["path"])
         for d in record_diff(before, after)
         if d["path"] != "/revision" and not d["path"].startswith("/field_annotations/")
     ]
@@ -65,7 +57,7 @@ def reconcile_answer(store: Store, run_id: str, decision: ResearcherDecision) ->
         )
         or any(
             path == scope or path.startswith(scope + "/") or scope.startswith(path + "/")
-            for scope in decision.affected_paths
+            for scope in map(scientific_path, decision.affected_paths)
         )
         for path in changes
     )
@@ -165,9 +157,10 @@ def interpret(
         raise ValueError("decision has no answer to interpret")
     if decision.binding.source_snapshot_id != context.source_snapshot_id:
         raise ValueError("interpretation source binding differs")
+    allowed_paths = [scientific_path(path) for path in decision.affected_paths]
     proposed = Patch.model_validate(result["patch"]) if result.get("patch") is not None else None
     if proposed and any(
-        not any(op.path == p or op.path.startswith(p + "/") for p in decision.affected_paths)
+        not any(op.path == p or op.path.startswith(p + "/") for p in allowed_paths)
         for op in proposed.ops
     ):
         raise ValueError("interpretation exceeds allowed scope")
@@ -181,13 +174,16 @@ def interpret(
             raise ValueError("authorized context revision differs")
         changed_paths = context_change_paths(context, proposed_context)
         if any(
-            not any(
-                path == allowed or path.startswith(allowed + "/")
-                for allowed in decision.affected_paths
-            )
+            not any(path == allowed or path.startswith(allowed + "/") for allowed in allowed_paths)
             for path in changed_paths
         ):
-            raise ValueError("context interpretation exceeds allowed scope")
+            raise ValueError(
+                "context interpretation exceeds allowed scope; changed_paths="
+                + repr(changed_paths)
+                + "; allowed_paths="
+                + repr(allowed_paths)
+                + ". Preserve sources, unknowns, decision_ids and all other unrequested fields."
+            )
         if proposed_context.field_annotations != context.field_annotations:
             raise ValueError("context authority is assigned during application")
     updated = decision.model_copy(deep=True)

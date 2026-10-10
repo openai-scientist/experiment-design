@@ -4,6 +4,8 @@ import json
 
 from experiment_design.agents.tools import ToolContext, context_brief, submit_schema
 from experiment_design.contracts import Patch, Record, ResearchContext
+from experiment_design.decisions import interpret
+from experiment_design.patch import scientific_path
 from experiment_design.runtime.loop import AgentSpec
 
 SPEC = AgentSpec(
@@ -28,7 +30,13 @@ def brief(ctx: ToolContext, **focus) -> str:
         "not constrained to suggested options. If intent is ambiguous, return ambiguous=true, "
         "authorized=false with a precise clarification. Do not change the hypothesis to make "
         "an unsupported calculator run. Before a design exists, supply a new context revision. "
-        "After a design exists, supply exact patch operations. Retain unimplemented choices.\n"
+        "After a design exists, supply exact patch operations. Retain unimplemented choices. "
+        "Copy the current context before editing: retain source text and field_annotations "
+        "verbatim, keep unknowns and decision_ids unchanged, increment revision by one, and "
+        "change only authorized scientific fields. Authority is assigned during application. "
+        "Canonical allowed paths: "
+        + json.dumps([scientific_path(p) for p in decision.affected_paths])
+        + "\n"
         + json.dumps(decision.model_dump(mode="json"), ensure_ascii=False)
         + "\n"
         + context_brief(ctx)
@@ -36,4 +44,9 @@ def brief(ctx: ToolContext, **focus) -> str:
 
 
 def submit_tool(ctx: ToolContext, **focus):
-    return submit_schema("submit_interpretation", Submission, lambda p: p.model_dump(mode="json"))
+    def accept(payload: Submission):
+        result = payload.model_dump(mode="json")
+        interpret(focus["decision"], ctx.store.context(ctx.run_id), result)
+        return result
+
+    return submit_schema("submit_interpretation", Submission, accept)

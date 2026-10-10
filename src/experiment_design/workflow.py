@@ -32,6 +32,7 @@ from experiment_design.contracts import (
     TaskBudget,
 )
 from experiment_design.decisions import apply_decision, interpret, reconcile_answer, respond
+from experiment_design.patch import scientific_path
 from experiment_design.qualification import approve_version, assess_readiness
 from experiment_design.review import (
     commit_revision,
@@ -709,7 +710,13 @@ def advance(run_id: str, deps: Deps) -> RunStatus:
                 if decision.status == "AWAITING_RESEARCHER":
                     continue
                 context = store.context(run_id)
-                result = _agent(deps, run_id, decision_interpretation, decision=decision)
+                result = _agent(
+                    deps,
+                    run_id,
+                    decision_interpretation,
+                    decision=decision,
+                    allowed_paths=[scientific_path(path) for path in decision.affected_paths],
+                )
                 interpreted = interpret(decision, context, result.findings_or_changes)
                 if interpreted.interpretation.get("ambiguous"):
                     interpreted.revision += 1

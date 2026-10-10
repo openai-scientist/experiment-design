@@ -323,3 +323,116 @@ def test_researcher_evidence_can_supply_source_quantity_for_independent_review(t
     )
     assert updated.design.scenarios[0].sd.source_ref == source_ref
     store.close()
+
+
+def test_context_scope_alias_authorizes_only_the_same_scientific_field(tmp_path):
+    store, run, context, decision = decision_state(tmp_path)
+    decision.affected_paths = ["/context/package/inference/margin"]
+    decision.revision += 1
+    store.save_decision(decision)
+    answered = respond(
+        store,
+        run,
+        decision.id,
+        DecisionResponse(
+            revision=decision.revision,
+            action="PROPOSE_ALTERNATIVE",
+            text="Use margin 2",
+            researcher="researcher",
+            response_id="scope-answer",
+        ),
+    )
+    proposed = context.model_copy(deep=True)
+    proposed.revision += 1
+    proposed.package.inference.margin = 2
+    accepted = interpret(
+        answered,
+        context,
+        {
+            "authorized": True,
+            "ambiguous": False,
+            "context": proposed.model_dump(mode="json"),
+        },
+    )
+    assert accepted.interpretation["context"]["package"]["inference"]["margin"] == 2
+    proposed.package.hypothesis.method = "Unauthorized method change"
+    with pytest.raises(ValueError, match="scope"):
+        interpret(
+            answered,
+            context,
+            {
+                "authorized": True,
+                "ambiguous": False,
+                "context": proposed.model_dump(mode="json"),
+            },
+        )
+    patch = Patch(ops=[{"path": "/claim/margin", "value": 2}], rationale="Researcher answer")
+    interpreted = interpret(
+        answered,
+        context,
+        {"authorized": True, "ambiguous": False, "patch": patch.model_dump(mode="json")},
+    )
+    store.save_decision(interpreted)
+    applied = apply_decision(store, run, decision.id, context=context, patch=patch)
+    assert applied.status == "APPLIED"
+    assert store.version(run).design.claim.margin.value == 2
+    assert store.version(run).design.claim.margin.origin == "researcher"
+    store.close()
+
+
+@pytest.mark.parametrize("invalid", ["unknowns", "sources", "authority"])
+def test_interpretation_submit_rejects_invalid_context_before_committing(tmp_path, invalid):
+    from experiment_design.agents import decision_interpretation
+    from experiment_design.agents.tools import ToolContext
+    from experiment_design.runtime.loop import SubmitRejected
+
+    store, run, context, decision = decision_state(tmp_path)
+    answered = respond(
+        store,
+        run,
+        decision.id,
+        DecisionResponse(
+            revision=1,
+            action="PROPOSE_ALTERNATIVE",
+            text="Use margin 2",
+            researcher="researcher",
+            response_id="scope-answer",
+        ),
+    )
+    ctx = ToolContext(store, run, context.package, store.version(run), set())
+    proposed = context.model_copy(deep=True)
+    proposed.revision += 1
+    proposed.package.inference.margin = 2
+    if invalid == "unknowns":
+        proposed.unknowns.append("Unrequested metadata change")
+    elif invalid == "sources":
+        proposed.package.sources[0].text = "Rewritten immutable source"
+    else:
+        proposed.field_annotations = {}
+    tool = decision_interpretation.submit_tool(ctx, decision=answered)
+    with pytest.raises(SubmitRejected):
+        tool.handler(
+            {
+                "authorized": True,
+                "ambiguous": False,
+                "explanation": "Researcher answer",
+                "context": proposed.model_dump(mode="json"),
+            }
+        )
+    corrected = context.model_copy(deep=True)
+    corrected.revision += 1
+    corrected.package.inference.margin = 2
+    accepted = tool.handler(
+        {
+            "authorized": True,
+            "ambiguous": False,
+            "explanation": "Scoped researcher answer",
+            "context": corrected.model_dump(mode="json"),
+        }
+    )
+    assert (
+        accepted["context"]["field_annotations"]
+        == context.model_dump(mode="json")["field_annotations"]
+    )
+    assert store.context(run) == context
+    store.close()

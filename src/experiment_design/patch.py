@@ -27,6 +27,26 @@ class PatchError(ValueError):
         super().__init__("; ".join(errors))
 
 
+def scientific_path(path: str) -> str:
+    """Name the same scientific field consistently across context and design records."""
+    aliases = {
+        "/context/package/hypothesis/statement": "/claim/hypothesis",
+        "/context/package/hypothesis/prediction": "/claim/prediction",
+        "/context/package/hypothesis/failure_condition": "/claim/failure_condition",
+        "/context/package/hypothesis/exposure": "/claim/exposure",
+        "/context/package/scope": "/claim/inference_scope",
+        "/context/package/outcome/name": "/claim/primary_outcome",
+        "/context/package/outcome/unit": "/claim/outcome_unit",
+        "/context/package/outcome/kind": "/claim/outcome_kind",
+        "/context/package/outcome/direction": "/claim/direction",
+        "/context/package/inference/contrast_type": "/claim/contrast_type",
+        "/context/package/inference/margin": "/claim/margin",
+        "/context/package/inference/estimand": "/claim/estimand",
+        "/context/package/hypothesis/method": "/analysis/model",
+    }
+    return aliases.get(path, path)
+
+
 def package_claim(package: ScientificPackage) -> dict[str, str | float | None]:
     h, o, i = package.hypothesis, package.outcome, package.inference
     return {
@@ -181,7 +201,7 @@ def apply_patch(
         if any(
             not any(
                 op.path == path or op.path.startswith(path + "/")
-                for path in authorization.affected_paths
+                for path in map(scientific_path, authorization.affected_paths)
             )
             for op in patch.ops
         ):
