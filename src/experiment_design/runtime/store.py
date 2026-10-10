@@ -240,6 +240,10 @@ class Store:
         with self.transaction():
             self.run(run_id)
             previous = self.version(run_id)
+            if self.run(run_id).schema_version == 2 and parent != (
+                previous.version if previous else None
+            ):
+                raise ValueError("stale version parent")
             version = DesignVersion(
                 run_id=run_id,
                 version=previous.version + 1 if previous else 1,
@@ -628,10 +632,35 @@ class Store:
                 if e.type == "issue" and "record" in e.data:
                     issues[e.data["id"]] = ReviewIssue.model_validate(e.data["record"])
             assessments = self._artifact_records(run_id, "assessment", ReadinessAssessment, cutoff)
+            material_events = [
+                e.event_id
+                for e in history
+                if e.type in {"design.version", "issue"}
+                or (
+                    e.type == "artifact"
+                    and (
+                        e.data["kind"] == "context"
+                        or (
+                            e.data["kind"] == "researcher_decision"
+                            and e.data["record"]["purpose"] != "final_review"
+                        )
+                    )
+                )
+            ]
+            last_material = max(material_events, default=0)
+            assessment_events = [
+                e.event_id
+                for e in history
+                if e.type == "artifact" and e.data["kind"] == "assessment"
+            ]
+            if assessment_events and last_material > assessment_events[-1]:
+                assessments = []
             approvals = [
                 Approval.model_validate(e.data)
                 for e in history
-                if e.type == "approval" and e.data["design_hash"] == selected.design_hash
+                if e.type == "approval"
+                and e.data["design_hash"] == selected.design_hash
+                and e.event_id > last_material
             ]
             observations = self._artifact_records(run_id, "observation", Observation, cutoff)
             calculations = [
