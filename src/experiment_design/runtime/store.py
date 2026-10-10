@@ -5,18 +5,31 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from experiment_design.contracts import (
+    AgentResult,
+    AgentTask,
     Approval,
+    ArtifactBinding,
     Design,
     DesignVersion,
+    Observation,
     Patch,
+    PublicationSnapshot,
+    ReadinessAssessment,
     Record,
+    ResearchContext,
+    ResearcherDecision,
     ResearcherRequest,
+    ReviewCohort,
     ReviewIssue,
     RunStatus,
     ScientificPackage,
+    SourceSnapshot,
+    StageId,
+    StageResult,
 )
 from experiment_design.patch import design_diff, design_hash
 
@@ -32,6 +45,11 @@ EVENT_TYPES = (
     "verification",
     "researcher.request",
     "approval",
+    "artifact",
+    "stage.result",
+    "run.updated",
+    "publication",
+    "provider.usage",
 )
 
 
@@ -52,7 +70,11 @@ class Event(Record):
 
 class RunRecord(Record):
     run_id: str
-    package: ScientificPackage
+    package: ScientificPackage | None = None
+    schema_version: int = 1
+    stage_id: StageId | None = None
+    source_snapshot_id: str | None = None
+    context_revision: int | None = None
     status: RunStatus
     config: dict
     reviewed_version: int = 0
@@ -69,6 +91,18 @@ class Usage(Record):
     actions: int
     llm_cached_tokens_reported: int = 0
     llm_cache_usage_missing_calls: int = 0
+
+
+class TaskRecord(Record):
+    task: AgentTask
+    run_id: str = ""
+    attempt: int = 1
+    messages: list[dict] = []
+    schema_hash: str = ""
+    observations: list[str] = []
+    submission: AgentResult | None = None
+    status: Literal["running", "completed", "interrupted", "failed", "stopped"] = "running"
+    usage: dict = {}
 
 
 class Store:
@@ -93,6 +127,9 @@ class Store:
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
                 timestamp TEXT NOT NULL, type TEXT NOT NULL, agent_id TEXT, task_id TEXT,
                 design_version INTEGER, data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS artifacts (
+                run_id TEXT, kind TEXT, id TEXT, data TEXT NOT NULL,
+                PRIMARY KEY(run_id, kind, id));
         """)
 
     def close(self) -> None:
@@ -148,6 +185,8 @@ class Store:
             )
             if old.status != record.status:
                 self.append_event(run_id, "run.status", {"status": record.status})
+            if record.schema_version == 2:
+                self.append_event(run_id, "run.updated", record.model_dump(mode="json"))
 
     def append_event(
         self,
@@ -222,6 +261,7 @@ class Store:
                     "parent": parent,
                     "design_hash": version.design_hash,
                     "diff_paths": paths,
+                    "record": version.model_dump(mode="json"),
                 },
                 design_version=version.version,
             )
@@ -282,6 +322,7 @@ class Store:
                     "status": issue.status,
                     "severity": issue.severity,
                     "raised_by": issue.raised_by,
+                    "record": issue.model_dump(mode="json"),
                 },
                 design_version=issue.version_raised,
             )
@@ -325,3 +366,244 @@ class Store:
                 t.get("cache_usage_missing_calls", t.get("llm_calls", 0)) for t in tasks
             ),
         )
+
+    def _put_artifact(self, run_id: str, kind: str, id: str, record: Record) -> Record:
+        with self.transaction():
+            self.run(run_id)
+            self.connection.execute(
+                "INSERT INTO artifacts VALUES (?,?,?,?) ON CONFLICT(run_id,kind,id) "
+                "DO UPDATE SET data=excluded.data",
+                (run_id, kind, id, record.model_dump_json()),
+            )
+            self.append_event(
+                run_id,
+                "artifact",
+                {"kind": kind, "id": id, "record": record.model_dump(mode="json")},
+            )
+        return record
+
+    def _artifact_records(self, run_id: str, kind: str, model, cutoff: int | None = None):
+        records = {}
+        for event in self.events(run_id):
+            if cutoff is not None and event.event_id > cutoff:
+                break
+            if event.type == "artifact" and event.data["kind"] == kind:
+                records[event.data["id"]] = model.model_validate(event.data["record"])
+        return list(records.values())
+
+    def _artifact(self, run_id: str, kind: str, id: str, model, revision: int | None = None):
+        matches = [
+            e.data["record"]
+            for e in self.events(run_id)
+            if e.type == "artifact"
+            and e.data["kind"] == kind
+            and e.data["id"] == id
+            and (revision is None or e.data["record"].get("revision") == revision)
+        ]
+        if not matches:
+            raise KeyError(f"unknown {kind} {id}")
+        return model.model_validate(matches[-1])
+
+    def create_staged_run(self, snapshot: SourceSnapshot, config: dict) -> str:
+        run_id = "r" + uuid4().hex[:8]
+        record = RunRecord(
+            run_id=run_id,
+            config=config,
+            status="RUNNING",
+            created_at=now(),
+            schema_version=2,
+            stage_id="S1",
+            source_snapshot_id=snapshot.id,
+        )
+        with self.transaction():
+            self.connection.execute(
+                "INSERT INTO runs VALUES (?,?)", (run_id, record.model_dump_json())
+            )
+            self.append_event(run_id, "run.updated", record.model_dump(mode="json"))
+            self._put_artifact(run_id, "source", snapshot.id, snapshot)
+        return run_id
+
+    def source_snapshot(self, run_id: str) -> SourceSnapshot:
+        return self._artifact(run_id, "source", self.run(run_id).source_snapshot_id, SourceSnapshot)
+
+    def save_context(self, run_id: str, context: ResearchContext) -> ResearchContext:
+        with self.transaction():
+            run = self.run(run_id)
+            previous = self.context(run_id)
+            if context.source_snapshot_id != run.source_snapshot_id:
+                raise ValueError("context source binding differs")
+            if context.revision != (previous.revision + 1 if previous else 1):
+                raise ValueError("context revision must advance exactly once")
+            self._put_artifact(run_id, "context", context.id, context)
+            self.update_run(
+                run_id, context_revision=context.revision, package=context.package.model_dump()
+            )
+        return context
+
+    def context(self, run_id: str, revision: int | None = None) -> ResearchContext | None:
+        records = [
+            e.data["record"]
+            for e in self.events(run_id)
+            if e.type == "artifact"
+            and e.data["kind"] == "context"
+            and (revision is None or e.data["record"]["revision"] == revision)
+        ]
+        return ResearchContext.model_validate(records[-1]) if records else None
+
+    def binding(self, run_id: str) -> ArtifactBinding:
+        run = self.run(run_id)
+        version = self.version(run_id)
+        return ArtifactBinding(
+            source_snapshot_id=run.source_snapshot_id,
+            context_revision=run.context_revision,
+            design_version=version.version if version else None,
+            design_hash=version.design_hash if version else None,
+            event_id=self.events(run_id)[-1].event_id,
+        )
+
+    def check_binding(self, run_id: str, binding: ArtifactBinding) -> None:
+        current = self.binding(run_id)
+        if binding.model_dump(exclude={"event_id"}) != current.model_dump(exclude={"event_id"}):
+            raise ValueError("stale artifact binding")
+
+    def commit_stage(self, run_id: str, result: StageResult, target: StageId) -> None:
+        from experiment_design.stages import stage_specs
+
+        with self.transaction():
+            self.check_binding(run_id, result.binding)
+            if self.run(run_id).stage_id != result.stage_id:
+                raise ValueError("stage binding differs")
+            stages = list(stage_specs())
+            is_return = stages.index(target) < stages.index(result.stage_id)
+            if is_return:
+                if target not in stage_specs()[result.stage_id].permitted_return_targets:
+                    raise ValueError("unpermitted return target")
+                if not result.reason.strip() or not (result.issue_refs or result.output_refs):
+                    raise ValueError("return requires originating issue or decision")
+            elif target != result.stage_id:
+                if (
+                    stages.index(target) != stages.index(result.stage_id) + 1
+                    or result.status != "COMPLETE"
+                ):
+                    raise ValueError("unpermitted stage target")
+            self.append_event(
+                run_id,
+                "stage.result",
+                {
+                    **result.model_dump(mode="json"),
+                    "target": target,
+                    "originating_ref": (result.issue_refs + result.output_refs or [None])[0],
+                },
+            )
+            self.update_run(run_id, stage_id=target)
+
+    def save_decision(self, decision: ResearcherDecision) -> ResearcherDecision:
+        return self._put_artifact(decision.run_id, "researcher_decision", decision.id, decision)
+
+    def decision(
+        self, run_id: str, decision_id: str, revision: int | None = None
+    ) -> ResearcherDecision:
+        return self._artifact(
+            run_id, "researcher_decision", decision_id, ResearcherDecision, revision
+        )
+
+    def decisions(self, run_id: str) -> list[ResearcherDecision]:
+        return self._artifact_records(run_id, "researcher_decision", ResearcherDecision)
+
+    def save_cohort(self, cohort: ReviewCohort) -> ReviewCohort:
+        return self._put_artifact(cohort.run_id, "cohort", cohort.id, cohort)
+
+    def cohort(self, run_id: str, cohort_id: str) -> ReviewCohort:
+        return self._artifact(run_id, "cohort", cohort_id, ReviewCohort)
+
+    def save_assessment(self, assessment: ReadinessAssessment) -> ReadinessAssessment:
+        return self._put_artifact(assessment.run_id, "assessment", assessment.id, assessment)
+
+    def assessment(
+        self, run_id: str, assessment_id: str | None = None
+    ) -> ReadinessAssessment | None:
+        rows = self._artifact_records(run_id, "assessment", ReadinessAssessment)
+        return next(
+            (r for r in reversed(rows) if assessment_id is None or r.id == assessment_id), None
+        )
+
+    def save_observation(self, run_id: str, observation: Observation) -> Observation:
+        try:
+            previous = self.observation(run_id, observation.id)
+        except KeyError:
+            return self._put_artifact(run_id, "observation", observation.id, observation)
+        if previous != observation:
+            raise ValueError("observation is immutable")
+        return previous
+
+    def observation(self, run_id: str, observation_id: str) -> Observation:
+        return self._artifact(run_id, "observation", observation_id, Observation)
+
+    def save_task(self, run_id: str, record: TaskRecord) -> TaskRecord:
+        record = record.model_copy(update={"run_id": run_id})
+        return self._put_artifact(run_id, "task", record.task.id, record)
+
+    def task(self, task_id: str) -> TaskRecord:
+        row = self.connection.execute(
+            "SELECT run_id FROM artifacts WHERE kind='task' AND id=?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown task {task_id}")
+        return self._artifact(row["run_id"], "task", task_id, TaskRecord)
+
+    def publication_snapshot(
+        self, run_id: str, version: int | None = None, event_id: int | None = None
+    ) -> PublicationSnapshot:
+        with self.transaction():
+            events = self.events(run_id)
+            cutoff = event_id if event_id is not None else events[-1].event_id
+            if version is not None:
+                later = [
+                    e.event_id
+                    for e in events
+                    if e.type == "design.version" and e.design_version > version
+                ]
+                if later:
+                    cutoff = min(cutoff, later[0] - 1)
+            history = [e for e in events if e.event_id <= cutoff]
+            versions = [
+                e
+                for e in history
+                if e.type == "design.version" and (version is None or e.design_version == version)
+            ]
+            if not versions:
+                raise ValueError("publication requires a design version")
+            selected = self.version(run_id, versions[-1].design_version)
+            runs = [e.data for e in history if e.type == "run.updated"]
+            run = runs[-1] if runs else self.run(run_id).model_dump(mode="json")
+            contexts = self._artifact_records(run_id, "context", ResearchContext, cutoff)
+            context = contexts[-1] if contexts else None
+            binding = ArtifactBinding(
+                source_snapshot_id=run["source_snapshot_id"],
+                context_revision=context.revision if context else None,
+                design_version=selected.version,
+                design_hash=selected.design_hash,
+                event_id=cutoff,
+            )
+            issues = {}
+            for e in history:
+                if e.type == "issue" and "record" in e.data:
+                    issues[e.data["id"]] = ReviewIssue.model_validate(e.data["record"])
+            assessments = self._artifact_records(run_id, "assessment", ReadinessAssessment, cutoff)
+            approvals = [
+                Approval.model_validate(e.data)
+                for e in history
+                if e.type == "approval" and e.data["design_hash"] == selected.design_hash
+            ]
+            return PublicationSnapshot(
+                run=run,
+                context=context,
+                version=selected,
+                issues=list(issues.values()),
+                decisions=self._artifact_records(
+                    run_id, "researcher_decision", ResearcherDecision, cutoff
+                ),
+                assessment=assessments[-1] if assessments else None,
+                approval=approvals[-1] if approvals else None,
+                binding=binding,
+            )

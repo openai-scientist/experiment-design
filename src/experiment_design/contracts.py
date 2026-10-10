@@ -10,7 +10,15 @@ ContrastType = Literal["superiority", "non_inferiority", "superiority_by_margin"
 Severity = Literal["BLOCKER", "MAJOR", "MINOR"]
 IssueStatus = Literal["open", "addressed", "rebutted", "resolved", "unresolved", "duplicate"]
 RunStatus = Literal[
-    "RUNNING", "NEEDS_RESEARCHER", "REVIEWABLE", "BLOCKED", "INCONCLUSIVE", "BUDGET_STOP"
+    "RUNNING",
+    "NEEDS_RESEARCHER",
+    "REVIEWABLE",
+    "BLOCKED",
+    "INCONCLUSIVE",
+    "BUDGET_STOP",
+    "APPROVED",
+    "PUBLISHED",
+    "FAILED",
 ]
 
 
@@ -276,6 +284,10 @@ class TaskBudget(Record):
 
 
 class AgentTask(Record):
+    id: str = ""
+    stage_id: Literal["S1", "S2", "S3", "S4", "S5", "S6", "S7"] | None = None
+    binding: "ArtifactBinding | None" = None
+    cohort_id: str | None = None
     objective: str
     package_ref: str
     design_version: int | None
@@ -299,3 +311,157 @@ class AgentResult(Record):
     tokens_cached: int = 0
     cache_usage_missing_calls: int = 0
     stop_reason: Literal["token_limit", "turn_limit"] | None = None
+
+
+StageId = Literal["S1", "S2", "S3", "S4", "S5", "S6", "S7"]
+
+
+class ArtifactBinding(Record):
+    source_snapshot_id: str
+    context_revision: int | None = None
+    design_version: int | None = None
+    design_hash: str | None = None
+    event_id: int
+
+
+class SourceArtifact(Record):
+    ref: str
+    path: str
+    text: str
+    sha256: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class SourceSnapshot(Record):
+    id: str
+    artifacts: list[SourceArtifact]
+    intake_issues: list[str] = Field(default_factory=list)
+
+
+class FieldAnnotation(Record):
+    status: Literal["source-stated", "agent-proposed", "unknown", "researcher-confirmed"]
+    source_ref: str | None = None
+    source_span: str | None = None
+    note: str = ""
+
+
+class ResearchContext(Record):
+    id: str
+    revision: int
+    source_snapshot_id: str
+    package: ScientificPackage
+    field_annotations: dict[str, FieldAnnotation] = Field(default_factory=dict)
+    unknowns: list[str] = Field(default_factory=list)
+    decision_ids: list[str] = Field(default_factory=list)
+
+
+class StageSpec(Record):
+    id: StageId
+    objective: str
+    input_kinds: list[str]
+    completion_condition: str
+    permitted_return_targets: list[StageId] = Field(default_factory=list)
+
+
+class StageResult(Record):
+    stage_id: StageId
+    status: Literal["COMPLETE", "NEEDS_INPUT", "REVISION_REQUIRED", "STOPPED", "FAILED"]
+    binding: ArtifactBinding
+    output_refs: list[str] = Field(default_factory=list)
+    issue_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    reason: str
+
+
+class DecisionOption(Record):
+    id: str
+    label: str
+    proposal: dict = Field(default_factory=dict)
+    consequences: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    uncertainty: str = ""
+
+
+class DecisionResponse(Record):
+    revision: int
+    action: Literal[
+        "SELECT_OPTION",
+        "PROPOSE_ALTERNATIVE",
+        "DEFER",
+        "APPROVE_VERSION",
+        "REQUEST_CHANGES",
+        "REJECT",
+        "HOLD",
+    ]
+    option_id: str | None = None
+    text: str = ""
+    researcher: str
+    response_id: str
+
+
+class ResearcherDecision(Record):
+    id: str
+    run_id: str
+    revision: int = 1
+    purpose: Literal["scientific", "final_review"] = "scientific"
+    status: Literal["IDENTIFIED", "EXPLORING", "AWAITING_RESEARCHER", "ANSWERED", "APPLIED"] = (
+        "IDENTIFIED"
+    )
+    binding: ArtifactBinding
+    problem: str
+    affected_paths: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    options: list[DecisionOption] = Field(default_factory=list)
+    recommendation: str = ""
+    responses: list[DecisionResponse] = Field(default_factory=list)
+    interpretation: dict = Field(default_factory=dict)
+    application: dict = Field(default_factory=dict)
+    verification: dict = Field(default_factory=dict)
+
+
+class ReviewCohort(Record):
+    id: str
+    run_id: str
+    binding: ArtifactBinding
+    member_task_ids: dict[str, str]
+    submission_refs: list[str] = Field(default_factory=list)
+    published_event_id: int | None = None
+
+
+class Observation(Record):
+    id: str
+    task_id: str
+    binding: ArtifactBinding
+    tool_name: str
+    arguments: dict
+    result: dict
+    accepted: bool
+    evidence_ref: str
+
+
+class ReadinessAssessment(Record):
+    id: str
+    run_id: str
+    binding: ArtifactBinding
+    review_status: Literal["REVIEWABLE", "NEEDS_INPUT", "NOT_READY"]
+    handoff_complete: bool
+    blockers: list[str] = Field(default_factory=list)
+    decision_ids: list[str] = Field(default_factory=list)
+    computation_refs: list[str] = Field(default_factory=list)
+    handoff_risks: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class PublicationSnapshot(Record):
+    run: dict
+    context: ResearchContext | None
+    version: DesignVersion
+    issues: list[ReviewIssue]
+    decisions: list[ResearcherDecision]
+    assessment: ReadinessAssessment | None
+    approval: Approval | None
+    calculations: list[dict] = Field(default_factory=list)
+    binding: ArtifactBinding
+
+
+AgentTask.model_rebuild()
