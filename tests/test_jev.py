@@ -60,3 +60,24 @@ def test_model_passed_only_when_set():
         TypeSafeJudge(JevConfig(model=model), c).decide({}, questions())
         assert c.calls[0].get("model") == model
         assert ("model" in c.calls[0]) == (model is not None)
+
+
+def test_jev_call_limit_and_missing_usage(tmp_path):
+    from conftest import package
+    from fakes import ScriptedJudge
+
+    from experiment_design.config import RunConfig
+    from experiment_design.runtime.jev import bounded_decide
+    from experiment_design.runtime.store import Store
+
+    store = Store(tmp_path / "routing.db")
+    run = store.create_run(package(), {})
+    judge = ScriptedJudge([{"next": "REVIEW"}])
+    cfg = RunConfig(jev_max_calls=1)
+    bounded_decide(judge, store, run, cfg, {}, questions())
+    assert store.usage(run).jev_usage_missing_calls == 1
+    with pytest.raises(JudgeError, match="call_limit"):
+        bounded_decide(judge, store, run, cfg, {}, questions())
+    assert len(judge.calls) == 1
+    assert store.events(run)[-1].data == {"scope": "run", "reason": "jev_call_limit"}
+    store.close()

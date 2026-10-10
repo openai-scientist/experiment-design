@@ -156,3 +156,90 @@ def test_tool_events_have_no_full_output(state):
     assert "observation-tail" not in json.dumps([e.data for e in events])
     assert json.loads(llm.calls[1][0][-1]["content"])["result"] == observation
     assert result.completion_status == "completed"
+
+
+def test_committed_submission_resumes_without_provider(tmp_path):
+    from test_stages import staged
+
+    store = Store(tmp_path / "durable.db")
+    rid, binding = staged(store)
+    task = AgentTask(
+        id="durable-review",
+        stage_id="S4",
+        binding=binding,
+        objective="Review",
+        package_ref="math",
+        design_version=None,
+        allowed_tools=["probe"],
+        budget=TaskBudget(max_turns=3, max_tokens=1000),
+        exit_conditions=["Submit"],
+    )
+    llm = ScriptedLLM(
+        [
+            tool_call("probe", {}, call_id="independent-probe"),
+            submit("finish", {"rationale": "Independent finding"}),
+        ]
+    )
+    args = (
+        AgentSpec("test", "Inspect"),
+        task,
+        "Brief",
+        {"probe": Tool("probe", "Probe", {"type": "object"}, lambda _: {"value": 7})},
+        Tool("finish", "Finish", {"type": "object"}, lambda a: a),
+        llm,
+    )
+    result = run_agent(*args, store, rid, set())
+    tokens = store.usage(rid).llm_tokens
+    store.close()
+    reopened = Store(tmp_path / "durable.db")
+    resumed = run_agent(*args, reopened, rid, set())
+    assert resumed.findings_or_changes == result.findings_or_changes
+    assert len(llm.calls) == 2
+    assert reopened.accepted_observations(task.id)[0].evidence_ref == "tool:independent-probe"
+    assert reopened.usage(rid).llm_tokens == tokens > 0
+    reopened.close()
+
+
+def test_unrecorded_provider_response_retries_as_new_attempt(tmp_path):
+    from test_stages import staged
+
+    store = Store(tmp_path / "durable.db")
+    rid, binding = staged(store)
+    task = AgentTask(
+        id="interrupted-review",
+        binding=binding,
+        objective="Review",
+        package_ref="math",
+        design_version=None,
+        allowed_tools=[],
+        budget=TaskBudget(max_turns=3, max_tokens=1000),
+        exit_conditions=["Submit"],
+    )
+
+    def provider_failure(messages, tools):
+        raise RuntimeError("Provider disconnected")
+
+    llm = ScriptedLLM([provider_failure, submit("finish", {"rationale": "New response"})])
+    args = (
+        AgentSpec("test", "Inspect"),
+        task,
+        "Brief",
+        {},
+        Tool("finish", "Finish", {"type": "object"}, lambda a: a),
+        llm,
+        store,
+        rid,
+        set(),
+    )
+    with pytest.raises(RuntimeError, match="disconnected"):
+        run_agent(*args)
+    assert store.task(task.id).submission is None
+    resumed = run_agent(*args)
+    assert resumed.completion_status == "completed"
+    assert len(llm.calls) == 2
+    assert store.task(task.id).attempt == 2
+    assert any(
+        e.type == "budget.stop" and e.data["reason"] == "provider_failure"
+        for e in store.events(rid)
+    )
+    store.close()

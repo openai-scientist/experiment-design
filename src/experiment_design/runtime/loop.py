@@ -3,12 +3,13 @@
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
-from experiment_design.contracts import AgentResult, AgentTask
+from experiment_design.contracts import AgentResult, AgentTask, Observation
 from experiment_design.runtime.llm import LLMClient
-from experiment_design.runtime.store import Store
+from experiment_design.runtime.store import Store, TaskRecord
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,25 @@ def run_agent(
     run_id: str,
     call_ids: set[str],
 ) -> AgentResult:
-    task_id = "t" + uuid4().hex[:8]
+    task_id = task.id or "t" + uuid4().hex[:8]
+    durable = task.binding is not None
+    record = None
+    if durable:
+        if not task.id:
+            raise ValueError("bound tasks require a stable task id")
+        try:
+            record = store.task(task_id)
+        except KeyError:
+            record = TaskRecord(task=task, run_id=run_id)
+        if record.run_id != run_id or record.task != task:
+            raise ValueError("task identity or binding changed")
+        if record.submission is not None:
+            return record.submission
+        if record.status != "running":
+            record.attempt += 1
+        record.status = "running"
+        store.checkpoint_task(record)
+        call_ids.update(o.id for o in store.accepted_observations(task_id))
     meta = {
         "agent_id": spec.agent_id,
         "task_id": task_id,
@@ -77,13 +96,35 @@ def run_agent(
         {"role": "user", "content": brief},
     ]
     result = AgentResult(findings_or_changes=None, completion_status="failed")
+    if durable:
+        schema_hash = sha256(json.dumps(schemas, sort_keys=True).encode()).hexdigest()
+        if record.schema_hash and record.schema_hash != schema_hash:
+            raise ValueError("task tool schemas changed on resume")
+        record.schema_hash = schema_hash
+        messages = record.messages or messages
+        if record.usage:
+            result = AgentResult.model_validate(record.usage)
+        store.checkpoint_task(record)
     try:
-        for _ in range(task.budget.max_turns):
+        for _ in range(result.llm_calls, task.budget.max_turns):
             if result.tokens_in + result.tokens_out >= task.budget.max_tokens:
                 result.stop_reason = "token_limit"
                 break
             result.llm_calls += 1
             response = llm.complete(messages, schemas)
+            if durable:
+                store.append_event(
+                    run_id,
+                    "provider.usage",
+                    {
+                        "tokens_in": response.tokens_in,
+                        "tokens_out": response.tokens_out,
+                        "tokens_cached": response.tokens_cached or 0,
+                        "cache_usage_missing_calls": int(response.tokens_cached is None),
+                        "llm_calls": 1,
+                    },
+                    **meta,
+                )
             result.tokens_in += response.tokens_in
             result.tokens_out += response.tokens_out
             if response.tokens_cached is None:
@@ -127,6 +168,22 @@ def run_agent(
                     ok = True
                     if call.name != submit.name:
                         call_ids.add(call.id)
+                        if durable:
+                            store.save_observation(
+                                run_id,
+                                Observation(
+                                    id=call.id,
+                                    task_id=task_id,
+                                    binding=task.binding,
+                                    tool_name=call.name,
+                                    arguments=args,
+                                    result=observation
+                                    if isinstance(observation, dict)
+                                    else {"value": observation},
+                                    accepted=True,
+                                    evidence_ref=f"tool:{call.id}",
+                                ),
+                            )
                 except SubmitRejected as exc:
                     observation = {"error": exc.errors}
                     content = json.dumps(observation, ensure_ascii=False)
@@ -163,11 +220,38 @@ def run_agent(
                     result.evidence_refs = observation.get("evidence_refs", [])
                     result.uncertainty = observation.get("uncertainty", "")
                     result.completion_status = "completed"
+                    if durable:
+                        record.messages = messages
+                        record.usage = result.model_dump()
+                        store.checkpoint_task(record)
+                        store.record_submission(task_id, result)
                     return result
+                if durable:
+                    record.messages = messages
+                    record.usage = result.model_dump()
+                    store.checkpoint_task(record)
         result.completion_status = "budget_exhausted"
         result.stop_reason = result.stop_reason or "turn_limit"
         return result
+    except BaseException:
+        if durable:
+            record.status = "interrupted"
+            record.messages = messages
+            record.usage = result.model_dump()
+            store.checkpoint_task(record)
+            store.append_event(
+                run_id, "budget.stop", {"scope": "task", "reason": "provider_failure"}, **meta
+            )
+        raise
     finally:
+        if durable and result.completion_status == "budget_exhausted":
+            record.status = "stopped"
+            record.messages = messages
+            record.usage = result.model_dump()
+            store.checkpoint_task(record)
+            store.append_event(
+                run_id, "budget.stop", {"scope": "task", "reason": result.stop_reason}, **meta
+            )
         store.append_event(
             run_id,
             "task.finished",
@@ -180,6 +264,7 @@ def run_agent(
                 "cache_usage_missing_calls": result.cache_usage_missing_calls,
                 "stop_reason": result.stop_reason,
                 "budget": task.budget.model_dump(),
+                "usage_accounted": durable,
             },
             **meta,
         )

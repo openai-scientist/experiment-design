@@ -7,7 +7,8 @@ from typing import Any, Protocol
 
 from typesafe_sdk import Choice, RetryPolicy, TypeSafeClient
 
-from experiment_design.config import ConfigError, JevConfig
+from experiment_design.config import ConfigError, JevConfig, RunConfig
+from experiment_design.runtime.store import Store
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,34 @@ class JudgeError(RuntimeError):
 
 class Judge(Protocol):
     def decide(self, state: dict, questions: dict[str, Question]) -> dict[str, Decision]: ...
+
+
+def bounded_decide(
+    judge: Judge,
+    store: Store,
+    run_id: str,
+    cfg: RunConfig,
+    state: dict,
+    questions: dict[str, Question],
+) -> dict[str, Decision]:
+    calls = [
+        e
+        for e in store.events(run_id)
+        if e.type == "provider.usage" and e.data.get("provider") == "jev"
+    ]
+    if len(calls) >= cfg.jev_max_calls:
+        store.append_event(run_id, "budget.stop", {"scope": "run", "reason": "jev_call_limit"})
+        raise JudgeError("jev_call_limit")
+    try:
+        decisions = judge.decide(state, questions)
+    except Exception:
+        store.append_event(run_id, "provider.usage", {"provider": "jev", "tokens": None})
+        raise
+    reported = [d.tokens for d in decisions.values() if d.tokens is not None]
+    store.append_event(
+        run_id, "provider.usage", {"provider": "jev", "tokens": sum(reported) if reported else None}
+    )
+    return decisions
 
 
 class TypeSafeJudge:

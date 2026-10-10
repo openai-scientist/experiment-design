@@ -121,6 +121,8 @@ def test_usage_sums_tasks_and_jev(state):
         "actions": 2,
         "llm_cached_tokens_reported": 7,
         "llm_cache_usage_missing_calls": 2,
+        "jev_tokens_reported": 0,
+        "jev_usage_missing_calls": 0,
     }
 
 

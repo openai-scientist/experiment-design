@@ -91,6 +91,8 @@ class Usage(Record):
     actions: int
     llm_cached_tokens_reported: int = 0
     llm_cache_usage_missing_calls: int = 0
+    jev_tokens_reported: int = 0
+    jev_usage_missing_calls: int = 0
 
 
 class TaskRecord(Record):
@@ -355,16 +357,29 @@ class Store:
 
     def usage(self, run_id: str) -> Usage:
         events = self.events(run_id)
-        tasks = [e.data for e in events if e.type == "task.finished"]
+        routing = [
+            e.data for e in events if e.type == "provider.usage" and e.data.get("provider") == "jev"
+        ]
+        tasks = [
+            e.data
+            for e in events
+            if (e.type == "provider.usage" and e.data.get("provider") != "jev")
+            or (e.type == "task.finished" and not e.data.get("usage_accounted"))
+        ]
         return Usage(
-            llm_tokens=sum(t.get("tokens_in", 0) + t.get("tokens_out", 0) for t in tasks),
+            llm_tokens=sum(t.get("tokens_in", 0) + t.get("tokens_out", 0) for t in tasks)
+            + sum(t["tokens"] or 0 for t in routing),
             llm_calls=sum(t.get("llm_calls", 0) for t in tasks),
-            jev_calls=sum(e.type == "decision" and e.data.get("by") == "jev" for e in events),
+            jev_calls=len(routing)
+            if routing
+            else sum(e.type == "decision" and e.data.get("by") == "jev" for e in events),
             actions=self.run(run_id).actions_done,
             llm_cached_tokens_reported=sum(t.get("tokens_cached", 0) for t in tasks),
             llm_cache_usage_missing_calls=sum(
                 t.get("cache_usage_missing_calls", t.get("llm_calls", 0)) for t in tasks
             ),
+            jev_tokens_reported=sum(t["tokens"] or 0 for t in routing),
+            jev_usage_missing_calls=sum(t["tokens"] is None for t in routing),
         )
 
     def _put_artifact(self, run_id: str, kind: str, id: str, record: Record) -> Record:
@@ -550,6 +565,28 @@ class Store:
         if row is None:
             raise KeyError(f"unknown task {task_id}")
         return self._artifact(row["run_id"], "task", task_id, TaskRecord)
+
+    def checkpoint_task(self, record: TaskRecord) -> None:
+        self.save_task(record.run_id, record)
+
+    def accepted_observations(self, task_id: str) -> list[Observation]:
+        record = self.task(task_id)
+        return [
+            o
+            for o in self._artifact_records(record.run_id, "observation", Observation)
+            if o.task_id == task_id and o.accepted
+        ]
+
+    def record_submission(self, task_id: str, result: AgentResult) -> None:
+        with self.transaction():
+            record = self.task(task_id)
+            if record.submission is not None and record.submission != result:
+                raise ValueError("task submission is immutable")
+            if result.completion_status != "completed":
+                raise ValueError("only a completed submission may commit")
+            self.checkpoint_task(
+                record.model_copy(update={"submission": result, "status": "completed"})
+            )
 
     def publication_snapshot(
         self, run_id: str, version: int | None = None, event_id: int | None = None

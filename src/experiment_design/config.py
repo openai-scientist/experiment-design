@@ -26,6 +26,7 @@ class JevConfig(Record):
 
 
 class RunConfig(Record):
+    jev_max_calls: int = Field(default=24, gt=0)
     llm_tokens: int = Field(default=300_000, gt=0)
     max_actions: int = Field(default=12, gt=0)
     max_reviews: int = Field(default=2, ge=0)

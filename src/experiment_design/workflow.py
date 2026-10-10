@@ -20,7 +20,7 @@ from experiment_design.contracts import (
     TaskBudget,
 )
 from experiment_design.patch import apply_patch, resolve, set_claim
-from experiment_design.runtime.jev import Decision, Judge, JudgeError, Question
+from experiment_design.runtime.jev import Decision, Judge, JudgeError, Question, bounded_decide
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.runtime.loop import run_agent
 from experiment_design.runtime.store import Store, now
@@ -130,7 +130,13 @@ def jev_state(store: Store, run_id: str, cfg: RunConfig) -> dict:
 
 def _decide(deps: Deps, run_id: str, point: str, questions: dict[str, Question]) -> dict[str, str]:
     multi = {key: q for key, q in questions.items() if len(q.options) > 1}
-    decisions = deps.judge.decide(jev_state(deps.store, run_id, deps.run), multi) if multi else {}
+    decisions = (
+        bounded_decide(
+            deps.judge, deps.store, run_id, deps.run, jev_state(deps.store, run_id, deps.run), multi
+        )
+        if multi
+        else {}
+    )
     choices = {}
     for key, question in questions.items():
         if not question.options:
