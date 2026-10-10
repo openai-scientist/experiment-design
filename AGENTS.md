@@ -37,6 +37,17 @@ a readable EDP and authoritative JSON from the same canonical design version.
 The default lane excludes `live`. The marker set in pyproject.toml is the lane map.
 See [local testing](docs/testing.md) for owner commands and shared-change checks.
 
+## Live verification inputs
+Run the implemented production CLI with exactly the scientific input files the user
+specifies. A fresh verification starts with an empty Store and fresh provider calls.
+Do not inject supplemental Markdown, prior EDPs, eval reports, researcher answers,
+generated context or design records unless the user explicitly requests those inputs.
+Use historical runs and evals to diagnose and compare outside the new run's input.
+Configuration and output logs are execution records, not additional scientific input.
+Report the exact command, input paths, run ID and actual stopping state. Let the
+workflow present missing-input decisions; never fabricate answers or change state
+to force progress. Record real replies through the production decision lifecycle.
+
 ## Architecture rules
 JEV selects workflow WHAT/NEXT among legal options. Code enumerates and validates
 options and computes statistics. Agents choose HOW within their allowed tools.
