@@ -45,7 +45,11 @@ def brief(ctx: ToolContext, **focus) -> str:
         "Source provenance does not establish verified district data or scientific acceptance. "
         "Check the "
         "actual diff, original issue and affected paths independently; inspect the latest version "
-        "for regressions. Rebutted issues have no patch: judge the argument and cited evidence. "
+        "for regressions. A rebuttal may refer to an already-applied researcher patch: inspect "
+        "its recorded response, application, reconciliation audit and actual comparison before "
+        "judging the rebuttal. Only genuinely patch-free rebuttals have no design change; judge "
+        "their argument and cited evidence. Verify dependent sampling, measurement, analysis, "
+        "protocol and handoff without treating an unknown-resolution audit as verification. "
         "You are read-only; verdicts are recommendations to JEV, never approval.\n"
         + context_brief(ctx)
         + "\nVerification focus: "

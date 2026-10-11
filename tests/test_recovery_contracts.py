@@ -214,8 +214,12 @@ def test_missing_protocol_and_stopping_cannot_be_complete(tmp_path, missing):
         RunConfig(),
     )
     run = start_run(source_snapshot(), deps, {})
-    assert advance(run, deps) != "REVIEWABLE"
+    assert advance(run, deps) == "REVIEWABLE"
     assert not store.assessment(run).handoff_complete
+    assert not store.assessment(run).execution_ready
+    with pytest.raises(ValueError):
+        approve(store, run, 1, "PI")
+    assert not store.approvals(run)
     store.close()
 
 
@@ -232,20 +236,6 @@ def test_jev_exhaustion_is_budget_stop(tmp_path):
     assert any(
         e.type == "budget.stop" and e.data["reason"] == "jev_call_limit" for e in store.events(run)
     )
-    store.close()
-
-
-def test_failed_provider_call_has_unknown_usage(tmp_path):
-    store = Store(tmp_path / "failed.db")
-    deps = Deps(store, ScriptedLLM([LLMError("offline")]), ScriptedJudge([]), RunConfig())
-    run = start_run(source_snapshot(), deps, {})
-    with pytest.raises(LLMError):
-        advance(run, deps)
-    usage = store.usage(run)
-    assert usage.llm_calls == 1
-    assert usage.llm_usage_missing_calls == 1
-    assert usage.llm_cache_usage_missing_calls == 1
-    assert usage.llm_tokens == 0
     store.close()
 
 

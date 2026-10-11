@@ -225,8 +225,15 @@ def context_brief(ctx: ToolContext) -> str:
     guidance = (
         "Tool observations contain result and evidence_ref. Copy evidence_ref exactly into "
         "evidence_refs or scenarios_checked, e.g. tool:call_abc. Source references are exact "
-        "source IDs, never prose. Computation findings must cite a successful computation "
-        "from this task; pending reviewer references cannot be reused as your own. "
+        "source IDs, never prose. Computation findings must cite an accepted compute_power "
+        "observation from this task; pending reviewer references cannot be reused as your own. "
+        "Accepted tool calls need not produce numerical results. Interpret each compute_power "
+        "result using status, reasons and applicability: computed is quantitative evidence "
+        "within its inputs, binding and counterfactual scope; not_computed is evidence of the "
+        "stated computation/assessment limits, not a quantitative result. Distinguish missing "
+        "evidence or assumptions from calculator capability limits. Unavailability alone "
+        "neither proves nor disproves a scientific defect. Ground defects in mechanism and "
+        "consequence; disclose unresolved researcher/downstream work. "
         "For sensitivity use the committed design with overrides such as "
         '{"icc":{"value":0.2,"unit":"","provenance":"assumption"}}. '
         "Override keys are effect, sd, p_control, p_treatment, size and icc; "
@@ -263,7 +270,7 @@ def visible_issues(ctx: ToolContext):
     return list(issues.values())
 
 
-def build_tools(ctx: ToolContext) -> dict[str, Tool]:
+def build_tools(ctx: ToolContext, *, compact_preview: bool = True) -> dict[str, Tool]:
     def current(args):
         if args.get("design") is not None:
             if ctx.version is not None:
@@ -380,7 +387,7 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
             "required": required,
             "additionalProperties": False,
         }
-        if "design" in properties:
+        if "design" in properties and not compact_preview:
             schema["$defs"] = definitions
         return Tool(name, description, schema, handler)
 
@@ -388,9 +395,17 @@ def build_tools(ctx: ToolContext) -> dict[str, Tool]:
     ops = {"type": "array", "items": Patch.model_json_schema()["$defs"]["PatchOp"]}
     preview, definitions = {}, {}
     if ctx.version is None:
-        draft = Design.model_json_schema()
-        definitions = draft.pop("$defs")
-        preview = {"design": draft}
+        preview = {
+            "design": {
+                "type": "object",
+                "description": "Proposed Design using the full schema in submit_design. "
+                "The same Design and quantitative provenance validation applies to previews.",
+            }
+        }
+        if not compact_preview:
+            draft = Design.model_json_schema()
+            definitions = draft.pop("$defs")
+            preview = {"design": draft}
     result = {
         "read_sources": tool(
             "read_sources",

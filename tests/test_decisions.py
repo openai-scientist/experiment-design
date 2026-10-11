@@ -7,7 +7,7 @@ from experiment_design.contracts import (
     Patch,
     ResearcherDecision,
 )
-from experiment_design.decisions import apply_decision, clarification_options, interpret, respond
+from experiment_design.decisions import apply_decision, interpret, respond
 from experiment_design.runtime.store import Store
 
 
@@ -67,6 +67,9 @@ def test_alternative_records_raw_intent_and_applies_once(tmp_path):
     assert store.context(run).package.inference.margin == 2
     assert store.context(run).revision == 2
     assert applied.verification["status"] == "pending"
+    issue = next(i for i in store.issues(run) if i.id == applied.application["issue_id"])
+    assert issue.status == "open"
+    assert issue.addressed_in == 2
     count = len(store.events(run))
     apply_decision(store, run, decision.id, context=context, patch=proposed)
     assert len(store.events(run)) == count
@@ -122,20 +125,6 @@ def test_invalid_application_does_not_mutate_design(tmp_path, mode):
                         patch=Patch(ops=[], rationale="Wait"),
                     )
     assert store.version(run).design_hash == before.design_hash
-    store.close()
-
-
-def test_just_in_time_accepts_either_trigger_without_exhaustive_options(tmp_path):
-    store, run, context, decision = decision_state(tmp_path)
-    assert "ASK_RESEARCHER" in clarification_options(
-        decision, informative_options=True, blocks_required_work=False
-    )
-    assert "ASK_RESEARCHER" in clarification_options(
-        decision, informative_options=False, blocks_required_work=True
-    )
-    assert "ASK_RESEARCHER" not in clarification_options(
-        decision, informative_options=False, blocks_required_work=False
-    )
     store.close()
 
 

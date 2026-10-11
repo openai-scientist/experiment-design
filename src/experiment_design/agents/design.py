@@ -1,6 +1,6 @@
 """Designer proposes initial content and coherent, targeted revisions."""
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 from experiment_design.agents.tools import (
     DecisionProposal,
@@ -12,7 +12,7 @@ from experiment_design.agents.tools import (
     validate_refs,
     validate_source_quantities,
 )
-from experiment_design.contracts import Design, Patch, Record
+from experiment_design.contracts import Design, Patch, Record, ResearcherDecision
 from experiment_design.patch import apply_patch, initial_design
 from experiment_design.runtime.loop import AgentSpec, SubmitRejected
 
@@ -30,7 +30,7 @@ TOOLS = (
 
 class InitialSubmission(Record):
     design: Design
-    rationale: str
+    rationale: str = Field(validation_alias=AliasChoices("summary", "rationale"))
     decisions: list[DecisionProposal] = Field(default_factory=list)
 
 
@@ -47,13 +47,30 @@ class RevisionSubmission(Record):
 
 
 def brief(ctx: ToolContext, **focus) -> str:
+    if ctx.version is None and ctx.binding:
+        focus["researcher_decisions"] = [
+            decision.model_dump(mode="json")
+            for decision in ctx.store._artifact_records(
+                ctx.run_id, "researcher_decision", ResearcherDecision, ctx.binding.event_id
+            )
+            if decision.purpose == "scientific"
+        ]
     return (
         "Researcher-owned claim fields cannot change. Request a decision on /claim/<field>. "
         "Every quantitative input must have honest provenance. Unknown values are assumptions with "
         "a note, never invented sources. Inspect evidence and compute_power before submitting. "
         "For an initial draft, pass your proposed design to compute_power and run_validators. "
+        "For initial synthesis, use design.rationale for DesignChoice records (choice, why, "
+        "alternatives_considered, tradeoffs). Explain source-fixed choices; methodological "
+        "alternatives are proposals. The separate submission.summary must be a short string "
+        "summary. Preserve canonical reasons, assumptions and limitations when correcting errors. "
         "Preserve scientific_commitments at their exact design paths and values. "
-        "For revision use check_patch; fix the batch together or rebut with evidence.\n"
+        "For revision inspect the committed design before canonical compute_power; sensitivity "
+        "overrides are separate observations, never canonical results. Use check_patch; fix the "
+        "batch together or rebut with evidence. Inspect the pending researcher decisions, their "
+        "immutable replies, affected paths, dependencies and updated context. Reconcile dependent "
+        "sampling, measurement, analysis, protocol and handoff in a normal patch. Remove obsolete "
+        "requests while preserving confirmed claim values and genuine limitations.\n"
         + context_brief(ctx)
         + "\nFocus: "
         + str(focus)
@@ -80,7 +97,13 @@ def submit_tool(ctx: ToolContext, **mode):
                 "decisions": decision_proposals(payload.decisions, ctx),
             }
 
-        return submit_schema("submit_design", InitialSubmission, initial)
+        tool = submit_schema("submit_design", InitialSubmission, initial)
+        if mode.get("legacy_summary"):
+            properties = tool.parameters["properties"]
+            properties["rationale"] = properties.pop("summary")
+            properties["rationale"]["title"] = "Rationale"
+            tool.parameters["required"] = ["design", "rationale"]
+        return tool
 
     def revision(payload):
         batch = {item.id if hasattr(item, "id") else item for item in mode.get("batch", [])}

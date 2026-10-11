@@ -2,6 +2,8 @@
 
 from typing import Literal
 
+from pydantic import field_validator
+
 from experiment_design.agents.tools import (
     ToolContext,
     context_brief,
@@ -38,6 +40,17 @@ class ChainLink(Record):
     status: Literal["ok", "broken", "unclear"]
     note: str
     evidence_refs: list[str]
+
+    @field_validator("link")
+    @classmethod
+    def canonical_link(cls, value: str) -> str:
+        # The brief names scientific concepts; submissions persist the six canonical keys.
+        names = {
+            "sampling/allocation": "sampling",
+            "SAP": "analysis",
+            "uncertainty/decision rule": "decision_rule",
+        }
+        return "→".join(names.get(node.strip(), node.strip()) for node in value.split("→"))
 
 
 class Submission(Record):

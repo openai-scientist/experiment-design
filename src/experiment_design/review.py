@@ -63,16 +63,26 @@ def verification_options(
 def review_actions(store: Store, run_id: str, cfg) -> list[str]:
     run = store.run(run_id)
     issues = store.issues(run_id)
+    binding = store.binding(run_id)
+    reviewed = any(
+        c.published_event_id is not None
+        and c.binding.source_snapshot_id == binding.source_snapshot_id
+        and c.binding.context_revision == binding.context_revision
+        and c.binding.design_version <= binding.design_version
+        for c in store._artifact_records(run_id, "cohort", ReviewCohort)
+    )
     actions = []
     if (
-        run.reviewed_version < (store.version(run_id).version if store.version(run_id) else 0)
-        and run.reviews_done < cfg.max_reviews
-    ):
+        not reviewed or run.reviewed_version < binding.design_version
+    ) and run.reviews_done < cfg.max_reviews:
         actions.append("REVIEW")
     if any(i.status in {"addressed", "rebutted"} for i in issues):
         actions.append("VERIFY")
     if (
-        any(i.status == "open" and i.severity in {"MAJOR", "BLOCKER"} for i in issues)
+        any(
+            i.status in {"open", "unresolved"} and i.severity in {"MAJOR", "BLOCKER"}
+            for i in issues
+        )
         and run.revisions_done < cfg.max_revisions
     ):
         actions.append("REVISE")
@@ -81,10 +91,7 @@ def review_actions(store: Store, run_id: str, cfg) -> list[str]:
         for d in store.decisions(run_id)
     ):
         actions.append("ASK_RESEARCHER")
-    if run.reviewed_version and not any(
-        i.severity in {"MAJOR", "BLOCKER"} and i.status not in {"resolved", "duplicate"}
-        for i in issues
-    ):
+    if reviewed:
         actions.append("QUALIFY")
     actions.append("STOP")
     return actions

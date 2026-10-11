@@ -81,21 +81,33 @@ def assess_readiness(store: Store, run_id: str, handoff_result: AgentResult) -> 
     supported = bool(snapshot.calculations) and all(
         c.status == "computed" and c.power is not None for c in snapshot.calculations
     )
+    protocol_complete = (
+        bool(snapshot.version.design.protocol.steps)
+        and bool(snapshot.version.design.protocol.stop_conditions)
+        and bool(snapshot.version.design.analysis.stopping)
+    )
     complete = (
         handoff_result.completion_status == "completed"
         and payload.get("handoff_complete") is True
-        and supported
-        and not blockers
-        and not pending
+        and protocol_complete
     )
+    if not protocol_complete:
+        blockers.append("Execution protocol or stopping policy is missing")
     if not supported:
         blockers.append("Bound recruitment/power computation is missing or unsupported")
     assessment = ReadinessAssessment(
         id="assessment:" + uuid4().hex,
         run_id=run_id,
         binding=binding,
-        review_status="NEEDS_INPUT" if pending else "NOT_READY" if blockers else "REVIEWABLE",
+        review_status=(
+            "NOT_READY"
+            if handoff_result.completion_status != "completed"
+            else "NEEDS_INPUT"
+            if pending
+            else "REVIEWABLE"
+        ),
         handoff_complete=complete,
+        execution_ready=complete and supported and not blockers and not pending,
         blockers=blockers,
         decision_ids=pending,
         computation_refs=[c.id for c in snapshot.calculations],
@@ -119,6 +131,8 @@ def can_approve(snapshot: PublicationSnapshot) -> list[str]:
         or assessment.binding.context_revision != snapshot.binding.context_revision
     ):
         reasons.append("approval assessment version or context is stale")
+    if assessment and (assessment.blockers or not assessment.execution_ready):
+        reasons.append("execution readiness blockers remain")
     if any(
         i.severity in {"MAJOR", "BLOCKER"} and i.status not in {"resolved", "duplicate"}
         for i in snapshot.issues
@@ -166,19 +180,21 @@ def approve_version(
         }
         store.save_decision(answered)
         store.add_approval(approval)
-        if store.run(run_id).stage_id != "S6":
+        stage = store.run(run_id).stage_id
+        if stage not in {"S6", "S7"}:
             raise ValueError("approval requires final researcher review stage")
-        store.commit_stage(
-            run_id,
-            StageResult(
-                stage_id="S6",
-                status="COMPLETE",
-                binding=store.binding(run_id),
-                output_refs=[decision.id],
-                reason="Exact version approved by researcher",
-            ),
-            "S7",
-        )
+        if stage == "S6":
+            store.commit_stage(
+                run_id,
+                StageResult(
+                    stage_id="S6",
+                    status="COMPLETE",
+                    binding=store.binding(run_id),
+                    output_refs=[decision.id],
+                    reason="Exact version approved by researcher",
+                ),
+                "S7",
+            )
         store.update_run(run_id, status="APPROVED")
         store.freeze_publication(run_id)
         return approval

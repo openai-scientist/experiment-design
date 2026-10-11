@@ -183,7 +183,10 @@ def test_unresolved_material_issue_cannot_qualify(state):
     run = saved_run(state, reviewed_version=1, reviews_done=2)
     saved_issue(state, run, status="unresolved")
     assert "QUALIFY" not in legal_actions(state, run, RunConfig())
-    assert advance(run, deps(state)) == "INCONCLUSIVE"
+    assert "REVISE" in legal_actions(state, run, RunConfig())
+    assert "REVISE" not in legal_actions(state, run, RunConfig(max_revisions=0))
+    assert advance(run, deps(state, choices=[{"next_action": "STOP"}])) == "INCONCLUSIVE"
+    assert state.issues(run)[0].status == "unresolved"
 
 
 def test_single_stop_option_skips_jev(state):
@@ -222,11 +225,12 @@ def test_verify_uncertain_remains_material_and_cannot_qualify(state):
     d = deps(
         state,
         [tool_call("compute_power", {}, "verify-power"), verification("uncertain")],
-        [{"next_action": "VERIFY"}, {"I1": "unresolved"}],
+        [{"next_action": "VERIFY"}, {"I1": "unresolved"}, {"next_action": "STOP"}],
     )
     assert advance(run, d) == "INCONCLUSIVE"
     assert state.issues(run)[0].status == "unresolved"
     assert "QUALIFY" not in legal_actions(state, run, RunConfig())
+    assert "REVISE" in legal_actions(state, run, RunConfig())
 
 
 def test_resume_revision_commit_failure_reuses_submission(state, monkeypatch):

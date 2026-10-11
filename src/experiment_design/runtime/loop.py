@@ -32,6 +32,20 @@ class AgentSpec:
     system_prompt: str
 
 
+def tool_schemas(offered: dict[str, Tool]) -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            },
+        }
+        for tool in offered.values()
+    ]
+
+
 def run_agent(
     spec: AgentSpec,
     task: AgentTask,
@@ -80,17 +94,7 @@ def run_agent(
     )
     offered = {name: tools[name] for name in task.allowed_tools if name in tools}
     offered[submit.name] = submit
-    schemas = [
-        {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.parameters,
-            },
-        }
-        for tool in offered.values()
-    ]
+    schemas = tool_schemas(offered)
     messages = [
         {"role": "system", "content": spec.system_prompt},
         {"role": "user", "content": brief},

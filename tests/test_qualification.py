@@ -42,6 +42,61 @@ def test_incomplete_handoff_cannot_approve(tmp_path):
     store.close()
 
 
+def test_resolved_intent_does_not_turn_unsupported_sap_or_missing_data_into_readiness(tmp_path):
+    from experiment_design.agents.tools import ToolContext, build_tools
+    from experiment_design.contracts import Assumption
+
+    store, run, context, decision = decision_state(tmp_path)
+    decision.status = "APPLIED"
+    decision.verification = {"status": "verified", "evidence_refs": ["S1"]}
+    decision.reconciliation = {
+        "unknown_resolutions": [
+            {"response_id": "intent", "context_revision": 1, "unknowns": ["Estimand unclear"]}
+        ]
+    }
+    store.save_decision(decision)
+    context.unknowns = ["District outcome SD remains unavailable"]
+    store.save_context(run, context.model_copy(update={"revision": 2}))
+    d = store.version(run).design
+    d.scenarios[0].sd = None
+    d.sampling.cluster.icc.source_span = "ICC 0.10"
+    d.assumptions = [
+        Assumption(
+            id="limitation", statement="Mixed-model power is unsupported; district SD is missing"
+        )
+    ]
+    store.add_version(run, d, author="design", parent=1)
+    ctx = ToolContext(store, run, context.package, store.version(run), set())
+    results = build_tools(ctx)["compute_power"].handler({})
+    assert results[0]["status"] == "not_computed"
+    assert results[0]["power"] is None
+    assert results[0]["reasons"]
+    assessment = assess_readiness(
+        store,
+        run,
+        AgentResult(
+            completion_status="completed",
+            findings_or_changes={
+                "handoff_complete": True,
+                "risks": [],
+                "findings": [],
+                "evidence_refs": [],
+            },
+        ),
+    )
+    assert assessment.handoff_complete
+    assert not assessment.execution_ready
+    assert assessment.review_status == "REVIEWABLE"
+    assert "District outcome SD remains unavailable" in assessment.blockers
+    assert can_approve(store.publication_snapshot(run))
+    assert store.version(run).design.analysis.model == "Mixed model with class random intercept"
+    assert (
+        store.version(run).design.assumptions[0].statement
+        == "Mixed-model power is unsupported; district SD is missing"
+    )
+    store.close()
+
+
 def test_supported_exact_version_approves_and_new_context_invalidates(tmp_path):
     from experiment_design.contracts import CalculationRequest, Observation
     from experiment_design.science.power import calculate
@@ -117,7 +172,7 @@ def test_supported_exact_version_approves_and_new_context_invalidates(tmp_path):
     store.close()
 
 
-def test_supported_but_underpowered_recruitment_is_not_complete(tmp_path):
+def test_supported_but_underpowered_recruitment_is_not_execution_ready(tmp_path):
     from experiment_design.contracts import AgentResult, CalculationRequest, Observation
     from experiment_design.science.power import calculate
 
@@ -158,6 +213,8 @@ def test_supported_but_underpowered_recruitment_is_not_complete(tmp_path):
             },
         ),
     )
-    assert not assessment.handoff_complete
+    assert assessment.handoff_complete
+    assert not assessment.execution_ready
+    assert can_approve(store.publication_snapshot(run))
     assert any("target power" in reason for reason in assessment.blockers)
     store.close()

@@ -13,6 +13,7 @@ from experiment_design.contracts import (
     ResearchContext,
     ResearcherDecision,
 )
+from experiment_design.decisions import pending_reconciliation
 from experiment_design.patch import PatchError, package_claim, resolve, scientific_commitments
 from experiment_design.runtime.loop import AgentSpec, SubmitRejected
 
@@ -28,6 +29,7 @@ class UnderstandingSubmission(Record):
         "These fields belong inside context, never beside it."
     )
     decisions: list[ResearcherDecision] = Field(default_factory=list)
+    resolved_unknowns: dict[str, list[str]] = Field(default_factory=dict)
 
 
 def brief(ctx: ToolContext, **focus) -> str:
@@ -42,8 +44,8 @@ def brief(ctx: ToolContext, **focus) -> str:
         + ". Use margin, not inference.margin or /inference/margin. "
         "If package.inference.margin is supplied, context.field_annotations['margin'] is required. "
         "Keep field_annotations, unknowns and decision_ids inside context; the only top-level "
-        "submission fields are context and decisions. Use JSON pointers for other "
-        "scientific commitments, especially /analysis/model. "
+        "submission fields are context, decisions and resolved_unknowns. Use JSON pointers for "
+        "other scientific commitments, especially /analysis/model. "
         "Design pointers must match the Design schema and carry a typed value for source-stated "
         "commitments. List pointers use numeric indices, never assumption IDs. Context metadata "
         "uses /context/package/... pointers, for example /context/package/constraints. "
@@ -62,13 +64,23 @@ def brief(ctx: ToolContext, **focus) -> str:
         "mark an explicit planning assumption, or leave missing. Context package.sources will "
         "be populated from immutable sources. Bind each decision to this run and binding. "
         "Submit decisions only as IDENTIFIED or EXPLORING; workflow presents them to the "
-        "researcher. Do not submit AWAITING_RESEARCHER or any researcher responses.\n"
+        "researcher. Do not submit AWAITING_RESEARCHER or any researcher responses. "
+        "Inspect the applied decisions and their immutable replies below. For every pending "
+        "decision submit resolved_unknowns[decision_id] containing exact prior unknown strings "
+        "that its reply resolves; use [] if none. Remove these from context.unknowns, account "
+        "for every removed unknown, preserve unrelated uncertainties, and never resurrect "
+        "previously audited resolutions. This audit does not establish scientific verification.\n"
         + json.dumps(
             {
                 "run_id": ctx.run_id,
                 "binding": ctx.binding.model_dump(),
                 "context_revision": ctx.store.run(ctx.run_id).context_revision,
                 "focus": focus,
+                "applied_decisions": [
+                    d.model_dump(mode="json")
+                    for d in ctx.store.decisions(ctx.run_id)
+                    if d.status == "APPLIED" and d.purpose == "scientific"
+                ],
             },
             ensure_ascii=False,
         )
@@ -91,7 +103,7 @@ def submit_tool(ctx: ToolContext, **focus):
         if previous:
             old_claim, new_claim = package_claim(previous.package), package_claim(context.package)
             for path, annotation in previous.field_annotations.items():
-                if annotation.status == "researcher-confirmed" and (
+                if annotation.status in {"source-stated", "researcher-confirmed"} and (
                     context.field_annotations.get(path) != annotation
                     or (path in old_claim and old_claim[path] != new_claim[path])
                     or (
@@ -109,8 +121,8 @@ def submit_tool(ctx: ToolContext, **focus):
                         "annotation": annotation.model_dump(mode="json"),
                     }
                     raise ValueError(
-                        f"researcher-confirmed intent cannot change: {path}; preserve "
-                        "the current value and annotation verbatim: "
+                        f"source-stated or researcher-confirmed intent cannot change: {path}; "
+                        "preserve the current value and annotation verbatim: "
                         + json.dumps(expected, ensure_ascii=False)
                     )
         for path, annotation in context.field_annotations.items():
@@ -174,6 +186,35 @@ def submit_tool(ctx: ToolContext, **focus):
                 ):
                     raise ValueError("quantity source span does not support value/unit")
         errors = []
+        pending = {d.id: d for d in pending_reconciliation(ctx.store, ctx.run_id)}
+        missing = pending.keys() - payload.resolved_unknowns.keys()
+        if missing:
+            errors.append(
+                "Explicit resolved_unknowns entry required for: " + ", ".join(sorted(missing))
+            )
+        prior_unknowns = set(previous.unknowns) if previous else set()
+        resolved = set()
+        for decision_id, unknowns in payload.resolved_unknowns.items():
+            decision = pending.get(decision_id)
+            if decision is None:
+                errors.append(f"Unknown or nonpending applied decision: {decision_id}")
+                continue
+            if (
+                not decision.responses
+                or decision.application.get("response_id") != decision.responses[-1].response_id
+            ):
+                errors.append(f"Decision {decision_id} needs its recorded applied reply")
+            for unknown in unknowns:
+                if unknown not in prior_unknowns:
+                    errors.append(f"Resolution must cite an exact prior unknown: {unknown}")
+                if unknown in context.unknowns:
+                    errors.append(f"Resolved unknown remains in context: {unknown}")
+                resolved.add(unknown)
+        if pending and (prior_unknowns - set(context.unknowns)) - resolved:
+            errors.append("Removed prior unknowns need explicit decision resolution coverage")
+        previously_resolved = _resolved_unknowns(ctx)
+        if previously_resolved.intersection(context.unknowns):
+            errors.append("Previously resolved unknown cannot be reintroduced")
         schema = Design.model_json_schema()
         for path in context.field_annotations:
             if path in CLAIM_FIELDS:
@@ -203,18 +244,25 @@ def submit_tool(ctx: ToolContext, **focus):
                 scientific_commitments(context)
             except PatchError as exc:
                 errors.extend(exc.errors)
+        recorded = {d.id: d for d in ctx.store.decisions(ctx.run_id)}
         for decision in payload.decisions:
+            existing = recorded.get(decision.id)
+            if existing and (existing.responses or existing.application):
+                errors.append(f"Recorded researcher decision cannot be replaced: {decision.id}")
             if decision.run_id != ctx.run_id or decision.binding != binding:
                 errors.append(f"decision {decision.id} binding differs")
             if (
                 decision.responses
                 or decision.application
+                or decision.reconciliation
+                or decision.verification
                 or decision.status not in {"IDENTIFIED", "EXPLORING"}
             ):
                 errors.append(
                     f"decision {decision.id}: agent cannot supply researcher responses or "
                     "authorization; submit status IDENTIFIED or EXPLORING with no responses "
-                    "or application. Workflow controls AWAITING_RESEARCHER."
+                    "or application, reconciliation or verification metadata. Workflow controls "
+                    "AWAITING_RESEARCHER and reconciliation/verification."
                 )
         if errors:
             raise SubmitRejected(errors)
@@ -222,9 +270,59 @@ def submit_tool(ctx: ToolContext, **focus):
         return {
             "context": context.model_dump(mode="json"),
             "decisions": [d.model_dump(mode="json") for d in payload.decisions],
+            "resolved_unknowns": payload.resolved_unknowns,
         }
 
     return submit_schema("submit_understanding", UnderstandingSubmission, accept)
+
+
+def _resolved_unknowns(ctx: ToolContext) -> set[str]:
+    resolved = set()
+    for decision in ctx.store.decisions(ctx.run_id):
+        if (
+            decision.purpose != "scientific"
+            or decision.status != "APPLIED"
+            or not decision.responses
+            or decision.binding.source_snapshot_id != ctx.binding.source_snapshot_id
+        ):
+            continue
+        response_id = decision.responses[-1].response_id
+        applied_revision = decision.application.get("context_revision")
+        if (
+            decision.application.get("response_id") != response_id
+            or not isinstance(applied_revision, int)
+            or isinstance(applied_revision, bool)
+        ):
+            continue
+        if ctx.store.context(ctx.run_id, applied_revision) is None:
+            continue
+        audits = decision.reconciliation.get("unknown_resolutions", [])
+        if not isinstance(audits, list):
+            continue
+        for audit in audits:
+            if not isinstance(audit, dict):
+                continue
+            revision = audit.get("context_revision")
+            unknowns = audit.get("unknowns")
+            if (
+                audit.get("decision_id") != decision.id
+                or audit.get("response_id") != response_id
+                or not isinstance(revision, int)
+                or revision <= applied_revision
+                or not isinstance(unknowns, list)
+                or any(not isinstance(unknown, str) for unknown in unknowns)
+            ):
+                continue
+            before = ctx.store.context(ctx.run_id, revision - 1)
+            after = ctx.store.context(ctx.run_id, revision)
+            if before is None or after is None:
+                continue
+            resolved.update(
+                unknown
+                for unknown in unknowns
+                if unknown in before.unknowns and unknown not in after.unknowns
+            )
+    return resolved
 
 
 def _schema_path(schema: dict, parts: list[str], definitions: dict) -> bool:

@@ -1,4 +1,4 @@
-"""Human-first EDP rendering and three-file, version-bound exports."""
+"""Human-first EDP rendering and version-bound scientific stage exports."""
 
 import hashlib
 import json
@@ -11,6 +11,8 @@ from experiment_design.contracts import (
     DesignVersion,
     PublicationSnapshot,
     Quantity,
+    ResearchContext,
+    ResearcherDecision,
     ResearcherRequest,
     ReviewIssue,
     RunStatus,
@@ -18,7 +20,7 @@ from experiment_design.contracts import (
     Source,
 )
 from experiment_design.package import all_sources, package_hash
-from experiment_design.patch import quantities
+from experiment_design.patch import package_claim, quantities, scientific_commitments
 from experiment_design.runtime.store import Store, now
 from experiment_design.science.power import compute_scenarios, contrast_from
 from experiment_design.workflow import WorkflowError
@@ -250,6 +252,51 @@ def render_legacy_markdown(
     return "\n".join(lines).replace("\r\n", "\n").replace("\r", "\n").rstrip() + "\n"
 
 
+def render_decision(decision: ResearcherDecision) -> str:
+    """Present the recorded choice and response provenance without granting authority."""
+    binding = decision.binding
+    lines = [
+        f"### Decision {decision.id} — revision {decision.revision}",
+        "",
+        f"- Status: {decision.status}; purpose: {decision.purpose}",
+        f"- Question: {decision.problem}",
+        f"- Bound to: design version {binding.design_version}; "
+        f"context revision {binding.context_revision}; checkpoint {binding.event_id}",
+    ]
+    if decision.affected_paths:
+        lines.append("- Affected scope: " + ", ".join(decision.affected_paths))
+    for dependency in decision.dependencies:
+        lines.append(f"- Dependency: {dependency}")
+    if decision.recommendation:
+        lines.append(f"- Recommendation (provisional): {decision.recommendation}")
+    for option in decision.options:
+        lines.extend(["", f"#### Option {option.id}: {option.label}", ""])
+        for path, value in option.proposal.items():
+            lines.append(f"- Proposed {path}: {json.dumps(value, ensure_ascii=False)}")
+        lines.extend(f"- Consequence: {value}" for value in option.consequences)
+        if option.uncertainty:
+            lines.append(f"- Uncertainty: {option.uncertainty}")
+        if option.evidence_refs:
+            lines.append("- Evidence: " + ", ".join(option.evidence_refs))
+    lines.append("")
+    if not decision.responses:
+        lines.append("- Response: No researcher response recorded.")
+    for response in decision.responses:
+        lines.append(
+            f"- Response {response.response_id}, revision {response.revision}: "
+            f"{response.action} by {response.researcher} at {response.at.isoformat()}"
+        )
+        if response.option_id:
+            lines.append(f"- Selected option: {response.option_id}")
+        if response.text:
+            lines.append(f"- Exact reply: {response.text}")
+        if response.affected_paths:
+            lines.append("- Response scope: " + ", ".join(response.affected_paths))
+    if decision.verification:
+        lines.append("- Verification: " + json.dumps(decision.verification, ensure_ascii=False))
+    return "\n".join(lines) + "\n"
+
+
 def render_markdown(snapshot: PublicationSnapshot | ScientificPackage, *args, **kwargs) -> str:
     if isinstance(snapshot, ScientificPackage):
         return render_legacy_markdown(snapshot, *args, **kwargs)
@@ -285,6 +332,8 @@ def render_markdown(snapshot: PublicationSnapshot | ScientificPackage, *args, **
     section("## 2. Design rationale and conditions")
     for choice in d.rationale:
         item(choice.choice, choice.why)
+        if choice.alternatives_considered:
+            item("Alternatives considered", "; ".join(choice.alternatives_considered))
         item("Trade-offs", choice.tradeoffs)
     for condition in d.conditions:
         item(f"{condition.name} ({condition.role})", condition.description)
@@ -369,24 +418,28 @@ def render_markdown(snapshot: PublicationSnapshot | ScientificPackage, *args, **
             item(issue.status, f"{issue.mechanism}; {issue.consequence}")
     for assumption in d.assumptions:
         item("Assumption", assumption.statement)
+        if assumption.quantity:
+            item("Assumption input", _quantity(assumption.quantity, p.sources))
     for limitation in p.hypothesis.limitations:
         item("Limitation", limitation)
     section("## 9. Researcher decisions and readiness")
     for decision in snapshot.decisions:
-        item(decision.status, decision.problem)
-        for response in decision.responses:
-            item(
-                f"{response.action} by {response.researcher}",
-                response.text or response.option_id or "Exact version",
-            )
+        lines.extend([render_decision(decision), ""])
     if snapshot.assessment:
         item("Review status", snapshot.assessment.review_status)
+        item("Execution authorization", "Approved" if snapshot.approval else "Not authorized")
+        item("Execution readiness", "Ready" if snapshot.assessment.execution_ready else "Blocked")
         item(
             "Scientific handoff",
             "Complete" if snapshot.assessment.handoff_complete else "Incomplete",
         )
         for blocker in snapshot.assessment.blockers:
-            item("Blocker", blocker)
+            if blocker not in snapshot.assessment.handoff_risks:
+                item("Blocker", blocker)
+        for risk in snapshot.assessment.handoff_risks:
+            item("Downstream risk", risk)
+        if snapshot.assessment.evidence_refs:
+            item("Handoff inspection evidence", ", ".join(snapshot.assessment.evidence_refs))
     else:
         item("Qualification", "Missing or stale")
     for action in d.handoff:
@@ -394,11 +447,138 @@ def render_markdown(snapshot: PublicationSnapshot | ScientificPackage, *args, **
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_stage_artifacts(artifacts: dict) -> str:
+    """Readable companion to the complete structured stage outputs."""
+    stages = artifacts["stages"]
+    binding = artifacts["binding"]
+    lines = [
+        "# Scientific stage artifacts",
+        "",
+        f"Design version {binding['design_version']}; "
+        f"context revision {binding['context_revision']}",
+        "Full records and input bindings: [stage_artifacts.json](stage_artifacts.json).",
+        "",
+        "## S1 — Supplied research sources",
+        "",
+    ]
+    for source in stages["S1"]["source"]["artifacts"]:
+        lines.extend([f"### {source['path']}", "", source["text"], ""])
+    context = stages["S2"]["context"]
+    lines.extend(
+        ["## S2 — Research understanding", "", context["package"]["research_question"], ""]
+    )
+    understanding = ResearchContext.model_validate(context)
+    for name, value in package_claim(understanding.package).items():
+        annotation = understanding.field_annotations.get(name)
+        status = annotation.status if annotation else "unknown"
+        lines.append(f"- {name.replace('_', ' ').capitalize()}: {value}; {status}")
+        if annotation and annotation.source_ref:
+            lines.append(
+                f"- Evidence for {name}: {annotation.source_ref}; {annotation.source_span}"
+            )
+    for path, value in scientific_commitments(understanding).items():
+        lines.append(f"- Scientific commitment {path}: {value}")
+    lines.extend(f"- Constraint: {c}" for c in understanding.package.constraints)
+    if understanding.package.budget:
+        lines.append(f"- Resource budget: {understanding.package.budget}")
+    for unknown in context["unknowns"]:
+        lines.append(f"- Unknown: {unknown}")
+    lines.extend(
+        [
+            "",
+            "## S3 — Canonical design",
+            "",
+            "[Read the experiment design](experiment_design.md).",
+            f"Canonical version {stages['S3']['version']['version']}; "
+            f"design hash {stages['S3']['version']['design_hash']}",
+            "",
+            "## S4 — Independent review and refinement",
+            "",
+        ]
+    )
+    for submission in stages["S4"]["submissions"]:
+        payload = submission["result"]["findings_or_changes"]
+        lines.extend(
+            [
+                f"### {submission['agent_id']}",
+                "",
+                f"Task {submission['task_id']}; design version "
+                f"{submission['binding']['design_version']}; context revision "
+                f"{submission['binding']['context_revision']}; "
+                f"checkpoint {submission['binding']['event_id']}",
+                "",
+                payload.get("summary", "Revision or verification"),
+                "",
+            ]
+        )
+        for link in payload.get("chain", []):
+            lines.append(f"- {link['link']}: {link['status']}; {link['note']}")
+            if link.get("evidence_refs"):
+                lines.append("- Evidence: " + ", ".join(link["evidence_refs"]))
+        for finding in payload.get("findings", []) + payload.get("regressions", []):
+            lines.append(
+                f"- {finding['severity']}: {finding['mechanism']}; {finding['consequence']}"
+            )
+            lines.append(f"- Scope: {', '.join(finding['paths'])}; basis: {finding['basis']}")
+            if finding.get("suggested_fix"):
+                lines.append(f"- Suggested action: {finding['suggested_fix']}")
+            if finding.get("evidence_refs"):
+                lines.append("- Evidence: " + ", ".join(finding["evidence_refs"]))
+        if payload.get("scenarios_checked"):
+            lines.append("- Scenarios checked: " + ", ".join(payload["scenarios_checked"]))
+        for verdict in payload.get("verdicts", []):
+            lines.append(f"- {verdict['verdict']}: {verdict['grounds']}")
+        if payload.get("patch"):
+            lines.append(f"- Revision: {payload['patch']['rationale']}")
+    for issue in stages["S4"]["issues"]:
+        lines.append(
+            f"- Current issue {issue['id']} ({issue['raised_by']}): {issue['status']}; "
+            f"{issue['severity']}; {issue['mechanism']}"
+        )
+    lines.extend(["", "## S5 — Readiness assessment", ""])
+    assessment = stages["S5"]["assessment"]
+    if assessment:
+        lines.extend(
+            [
+                f"Review status: {assessment['review_status']}",
+                f"Handoff complete: {assessment['handoff_complete']}",
+                f"Execution ready: {assessment['execution_ready']}",
+            ]
+        )
+        lines.extend(
+            f"- Blocker: {b}"
+            for b in assessment["blockers"]
+            if b not in assessment["handoff_risks"]
+        )
+        lines.extend(f"- Downstream risk: {r}" for r in assessment["handoff_risks"])
+        if assessment["evidence_refs"]:
+            lines.append("- Handoff inspection evidence: " + ", ".join(assessment["evidence_refs"]))
+    else:
+        lines.append("Not yet assessed.")
+    lines.extend(["", "## S6 — Researcher feedback and decisions", ""])
+    for decision in stages["S6"]["decisions"]:
+        lines.extend([render_decision(ResearcherDecision.model_validate(decision)), ""])
+    lines.extend(
+        [
+            "",
+            "## S7 — EDP bundle",
+            "",
+            "[Experiment design](experiment_design.md) · "
+            "[Authoritative JSON](experiment_design.json) · [Checksums](manifest.json)",
+            "Publication does not authorize execution. Researcher approval is recorded separately.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _export_snapshot(
     store: Store, run_id: str, out_dir: Path, version: int | None
 ) -> dict[str, Path]:
     snapshot = store.publication_snapshot(run_id, version)
+    artifacts = store.stage_artifacts(run_id, snapshot)
     support = snapshot.model_dump(mode="json", exclude={"run", "binding"})
+    support["stage_artifacts"] = artifacts["stages"]
     support_hash = hashlib.sha256(json.dumps(support, sort_keys=True).encode()).hexdigest()
     data = {
         "schema_version": 2,
@@ -425,6 +605,8 @@ def _export_snapshot(
     payloads = {
         "experiment_design.md": render_markdown(snapshot).encode("utf-8"),
         "experiment_design.json": encoded(data),
+        "stage_artifacts.json": encoded(artifacts),
+        "stage_artifacts.md": render_stage_artifacts(artifacts).encode("utf-8"),
     }
     manifest = {
         "schema_version": 2,

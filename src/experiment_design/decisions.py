@@ -21,6 +21,16 @@ from experiment_design.patch import (
 from experiment_design.runtime.store import Store
 
 
+def pending_reconciliation(store: Store, run_id: str) -> list[ResearcherDecision]:
+    return [
+        decision
+        for decision in store.decisions(run_id)
+        if decision.purpose == "scientific"
+        and decision.status == "APPLIED"
+        and decision.verification.get("status") != "verified"
+    ]
+
+
 def context_change_paths(before: ResearchContext, after: ResearchContext) -> list[str]:
     return [
         scientific_path("/context" + d["path"])
@@ -79,15 +89,6 @@ def reconcile_answer(store: Store, run_id: str, decision: ResearcherDecision) ->
             "Review the recorded answer against the changed scientific context."
         )
     return store.save_decision(decision)
-
-
-def clarification_options(
-    decision: ResearcherDecision, *, informative_options: bool, blocks_required_work: bool
-) -> list[str]:
-    options = ["EXPLORE", "STOP"]
-    if informative_options or blocks_required_work:
-        options.insert(0, "ASK_RESEARCHER")
-    return options
 
 
 def affected_work(
@@ -311,6 +312,7 @@ def apply_decision(
                     run_id=run_id,
                     raised_by="researcher",
                     version_raised=version.version,
+                    addressed_in=version.version,
                     severity="MAJOR",
                     paths=paths or decision.affected_paths or ["/"],
                     mechanism=f"Researcher decision {decision.id} requires reconciliation",

@@ -21,7 +21,7 @@ def test_assessed_bundle_uses_bound_numbers_and_refuses_overwrite(tmp_path):
     run = start_run(source_snapshot(), deps, {})
     advance(run, deps)
     draft = export(store, run, tmp_path / "draft")
-    assert store.run(run).stage_id == "S6"
+    assert store.run(run).stage_id == "S7"
     assert "Draft" in draft["experiment_design.md"].read_text(encoding="utf-8")
     approve(store, run, 1, "researcher")
     approved = export(store, run, tmp_path / "approved")
@@ -36,6 +36,26 @@ def test_assessed_bundle_uses_bound_numbers_and_refuses_overwrite(tmp_path):
     with pytest.raises(ValueError, match="destination"):
         export(store, run, tmp_path / "approved")
     assert approved["experiment_design.json"].read_bytes() == before
+    store.close()
+
+
+def test_existing_complete_schema_two_assessment_preserves_exact_approval(tmp_path):
+    from experiment_design.contracts import ReadinessAssessment
+
+    store = Store(tmp_path / "existing.db")
+    deps = Deps(
+        store,
+        ScriptedLLM(normal_responses()),
+        ScriptedJudge([{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}]),
+        RunConfig(),
+    )
+    run = start_run(source_snapshot(), deps, {})
+    assert advance(run, deps) == "REVIEWABLE"
+    legacy = store.assessment(run).model_dump(mode="json", exclude={"execution_ready"})
+    store.save_assessment(ReadinessAssessment.model_validate(legacy))
+    approval = approve(store, run, 1, "PI")
+    assert approval.design_hash == store.version(run).design_hash
+    assert store.run(run).status == "APPROVED"
     store.close()
 
 

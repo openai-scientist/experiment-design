@@ -9,7 +9,6 @@ from experiment_design.contracts import Quantity, ResearcherRequest, ReviewIssue
 from experiment_design.output import export, render_markdown
 from experiment_design.patch import design_hash
 from experiment_design.runtime.store import Store
-from experiment_design.science.power import compute_scenarios
 
 
 @pytest.fixture
@@ -62,15 +61,12 @@ def test_render_has_no_internal_ids(state):
     md = render(state, issues=[concern], requests=[request])
     assert not re.search(r'\bI\d+\b|\bR\d+\b|[0-9a-f]{64}|\{"', md)
     assert "Confirm the class correlation" in md
+    assert md.count(package().hypothesis.statement) == 1
 
 
-def test_render_claim_once(state):
-    assert render(state).count(package().hypothesis.statement) == 1
-
-
-def test_render_power_matches_compute(state):
+def test_render_legacy_power_matches_reference(state):
     section = render(state).split("## 5. Statistical analysis plan")[1].split("## 6.")[0]
-    assert f"{compute_scenarios(design())[0].power:.2f}" in section
+    assert "| 0.73 |" in section
     assert "Alpha: 0.025" in section
 
 

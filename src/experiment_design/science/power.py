@@ -303,8 +303,27 @@ def calculate(request: CalculationRequest) -> CalculationResult:
         "independent_pooled_t": "Pooled two-sample t test",
         "cluster_equal_size_t": "Pooled t test of cluster means",
     }.get(method)
-    if expected_model is None or design.analysis.model != expected_model:
-        reasons.append("analysis method/model missing, mismatched or unsupported")
+    if expected_model is None:
+        result.implementation = "unavailable"
+        reasons.append(
+            f"Power calculation is not implemented for analysis method {method!r}."
+            if design.analysis.method_id
+            else "Analysis method_id is missing; a power implementation cannot be selected."
+        )
+        result.applicability = [
+            "The scientific validity of the SAP was not assessed by this calculator.",
+            "Method-specific assumptions and quantitative inputs were not assessed.",
+        ]
+        return result
+    if not design.analysis.model:
+        reasons.append(
+            f"Analysis model is missing for method {method!r}; expected {expected_model!r}."
+        )
+    elif design.analysis.model != expected_model:
+        reasons.append(
+            f"Analysis method/model mismatch: {method!r} requires {expected_model!r}, "
+            f"got {design.analysis.model!r}."
+        )
     if design.claim.outcome_kind.value != "continuous":
         reasons.append("method supports continuous outcomes only")
     if design.sampling.allocation != "1:1" or design.analysis.common_variance is not True:

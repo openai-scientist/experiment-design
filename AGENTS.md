@@ -1,98 +1,125 @@
 # Experiment Design
 
-## Purpose
-Turn researcher Markdown into a source snapshot and provenance-aware research
-context, then an experiment design through seven owned stages, independent
-review and qualification, and explicit researcher decisions. Export
-a readable EDP and authoritative JSON from the same canonical design version.
+## Purpose and scope
 
-## Layout
-- `contracts.py`: scientific and workflow records.
-- `config.py`: YAML configuration and environment variable names.
-- `package.py`: exact Markdown intake and referenced source snapshots.
-- `patch.py`: validated design changes, ownership, diff and hash.
-- `stages.py`: seven responsibilities and permitted returns.
-- `workflow.py`: stage progression and legal JEV coordination.
-- `decisions.py`: researcher response, authorized application and reconciliation.
-- `review.py`: independent cohort barrier, patches and verification.
-- `qualification.py`: version-bound readiness and exact approval.
-- `output.py`: human-first rendering and versioned export.
-- `cli.py`: run, resume, status, review, decide, approve and export.
-- `runtime/store.py`: SQLite records and append-only journal.
-- `runtime/llm.py`: OpenAI-compatible tool-calling client.
-- `runtime/jev.py`: TypeSafe workflow judge.
-- `runtime/loop.py`: shared agent tool loop.
-- `science/power.py`: statistical calculations and unit normalization.
-- `science/validators.py`: deterministic scientific checks.
-- `science/evidence.py`: source-backed keyword lookup.
-- `agents/tools.py`: domain tools; role modules define distinct submit contracts.
-- `tests/`: service fakes and behavioral contracts.
-- `pilot/`: researcher-reviewed case and scorecard.
+Produce a grounded, reviewable EDP from researcher Markdown; disclose assumptions
+and limitations. Draft completion is separate from execution readiness.
 
-## Verify
-- Fast: `uv run pytest -q`.
-- Before commit: `uv run pytest -q && uv run ruff check . && uv run ruff format --check .`.
-- Edit loop: `uv run pytest tests/test_<module>.py -q`.
-- Live: `uv run pytest -m live -q` (requires real provider keys).
-The default lane excludes `live`. The marker set in pyproject.toml is the lane map.
-See [local testing](docs/testing.md) for owner commands and shared-change checks.
+## Setup and commands
 
-## Live verification inputs
-Run the implemented production CLI with exactly the scientific input files the user
-specifies. A fresh verification starts with an empty Store and fresh provider calls.
-Do not inject supplemental Markdown, prior EDPs, eval reports, researcher answers,
-generated context or design records unless the user explicitly requests those inputs.
-Use historical runs and evals to diagnose and compare outside the new run's input.
-Configuration and output logs are execution records, not additional scientific input.
-Report the exact command, input paths, run ID and actual stopping state. Let the
-workflow present missing-input decisions; never fabricate answers or change state
-to force progress. Record real replies through the production decision lifecycle.
+Python 3.12+, `uv`, PowerShell; commands run from the repository root.
 
-## Architecture rules
-JEV selects workflow WHAT/NEXT among legal options. Code enumerates and validates
-options and computes statistics. Agents choose HOW within their allowed tools.
-Keep one canonical design per version; after the initial design, use apply_patch.
-Researcher-owned claim fields change only through researcher answers.
-New researcher evidence and changed claims require reconciliation before readiness.
-Agent-supplied quantities cannot claim computed provenance without an attested
-production calculation; such inputs are currently unsupported.
-All statistical numbers come from science/power.py. Missing or unsupported inputs
-produce not_computed with reasons. Keep fakes out of production. The journal is
-the only event source. Input, state and output file access belongs to package,
-Store and export respectively; config and CLI may load configuration.
-Never use or delegate to Astra models unless the user explicitly requests Astra.
+| Task | Command |
+|---|---|
+| Install locked dependencies | `uv sync --locked` |
+| CLI usage | `uv run exd --help` |
+| Focused check | `uv run pytest tests/test_<module>.py -q` |
+| Complete deterministic suite | `uv run pytest -q` |
+| Lint / formatting | `uv run ruff check .` / `uv run ruff format --check .` |
+| Measure test time | `uv run pytest -q --durations=15` |
 
-After the initial design, scientific tools use the committed version and accept
-sensitivity overrides or patch previews. Tool observations expose an exact
-evidence_ref; computation findings cite an accepted call from the current task.
-Keep tool schemas and earlier messages stable within an agent task for provider
-prefix caching. Record reported cache hits separately from missing cache telemetry;
-cached input still counts toward token budgets. Do not replay cached LLM answers
-for independent review or verification. Budget stops record their scope and reason
-in the journal and appear in CLI status. Reserve verifier and handoff allowance
-before optional coordination. Explicit resume budget increases preserve used tokens.
-Schema-1 runs support historical reads/exports only; never silently migrate their
-scientific meaning. Qualification and publication use bound observations, never
-recompute numbers while rendering. Researcher responses record exact revision,
-identity and timestamp; final review uses the same ResearcherDecision lifecycle.
-Preserve confirmed context values and source/confirmed scientific commitments,
-including their measurement mirrors. Typed path annotations carry commitment values.
-Complete handoff requires inspecting the bound design, an execution protocol and
-stopping policies. Requalify after supporting evidence or issues change; present
-final review against the current assessment. Historical exports use frozen supporting
-snapshots. Journal provider attempts so unknown usage remains visible after failure.
+Configure ignored `exd.yaml` from `exd.example.yaml`; supply its named environment
+variables without exposing secrets. Start with
+`uv run exd --config exd.yaml run <input.md>`; use `--help` for other commands.
+`uv run pytest -m live -q` selects live-marked tests; zero collected tests prove
+nothing. Default tests exclude live. No type checker or CI workflow is configured.
 
-## Testing rules
-Each test protects a user-visible or downstream contract: statistical references,
-guards, journal/storage, commands or transitions. No assertion-free, duplicate,
-self-comparing, constant-restating, framework-only or private-helper tests.
-Fakes replace external services only. Mutation-check every guard: flip the source
-condition, see the test fail, restore exactly and inspect git diff.
-Measure with `uv run pytest --durations=15`. Add blast-radius lanes only if the
-fast suite exceeds 60 seconds, following the test-audit skill.
+## Code ownership
 
-## Code rules
-Use domain terms in code, comments, docstrings, tests and commits; do not reference
-plans, task numbers or spec section numbers. No dead code, TODO markers, empty
-abstractions or speculative options. Prefer small modules and typed public
-functions. Update this guide when commands or rules change.
+Under `src/experiment_design/`:
+
+- `contracts.py`, `stages.py`: records and stage contracts.
+- `package.py`, `patch.py`: source intake and protected design changes.
+- `workflow.py`, `review.py`, `qualification.py`, `decisions.py`: coordination,
+  independent review, readiness and researcher decisions.
+- `runtime/`, `agents/`, `science/`: Store/provider loop, role tools and statistics.
+- `output.py`, `cli.py`: exports and researcher commands.
+
+`tests/fixtures/` holds reusable references. `docs/`, `pilot/`, `.exd/`, `exd.yaml`
+and `.env` are ignored/local; deterministic checks must not require them.
+Preserve researcher inputs and run evidence.
+
+## Working agreements
+
+- Inspect code, callers, tests and Git changes; preserve others' work. Plan complex
+  changes; implement clear, authorized changes directly.
+- Reuse code and keep fixes scoped. Avoid speculative abstractions, dead code,
+  placeholders and unrequested frameworks/architecture changes. Use domain names,
+  typed public functions and Ruff; keep task/plan numbers out of code.
+- Delegate only when requested or required by applicable instructions, with bounded
+  context, disjoint ownership and verified results. Never invoke/delegate to Astra
+  unless the user explicitly requests it.
+- Keep Git operations authorized; commit subjects use `type: concise description`.
+  Maintain durable rules here, not task history.
+
+## Scientific and workflow invariants
+
+- JEV chooses WHAT/NEXT among legal code-enumerated options; agents choose HOW.
+  Code validates transitions and computes statistics.
+- SQLite is authoritative; the append-only journal is the event source. Package
+  owns intake reads, Store owns state, export owns outputs; CLI/config load config.
+  Persist meaningful stage outputs with version/input references.
+- One canonical design per version; after synthesis, use validated `apply_patch`.
+  Protect source/confirmed intent, measurement mirrors, context values and typed
+  commitments. Researcher-owned fields change through recorded answers only;
+  reconcile new evidence and changed claims before execution readiness.
+- Statistics come from `science/power.py`; missing/unsupported inputs yield
+  `not_computed` with reasons. Agent-supplied computed inputs are unsupported
+  without attestation. Never invent evidence, power, verification, answers or approval.
+- Tools use committed designs, sensitivity overrides or explicit previews. Findings
+  cite accepted computations from their own task via exact `evidence_ref`.
+  Previews cannot authorize canonical claims. Keep fakes out of production.
+- Independent review/verification uses fresh provider work, not replayed answers.
+  Preserve frozen cohort barriers and version/context bindings.
+- Keep schemas/message prefixes stable within tasks. Journal provider attempts,
+  unknown usage, cache telemetry and budget-stop scope/reason. Cached tokens count.
+  Reserve verifier/handoff allowance; authorized increases preserve cumulative usage.
+
+| Stage | Required responsibility |
+|---|---|
+| S1 | Capture exact immutable source text and provenance. |
+| S2 | Ground context; expose unknowns and researcher decisions. |
+| S3 | Synthesize canonical design, SAP, protocol and assumptions. |
+| S4 | Complete independent review; refine and disclose limitations. |
+| S5 | Separate reviewability, handoff completeness and execution readiness. |
+| S6 | Record real decisions; final review may remain pending. |
+| S7 | Publish a consistent draft/approved EDP and stage artifacts. |
+
+Qualification records blockers; keep STOP for technical, integrity or interpretability
+failures. Complete handoff requires inspecting the bound design, protocol and
+stopping policies.
+Draft export never authorizes execution; approval requires current qualification,
+supported bound calculations and reconciled scientific decisions. Record exact
+response revision, identity and timestamp through ResearcherDecision, including
+final review. Requalify after evidence/issues change. Publish from frozen supporting
+snapshots and bound observations, without recomputation. Schema-1 supports historical
+reads/exports only; preserve its scientific meaning. Materialize stage Markdown/JSON
+from SQLite alongside the EDP.
+
+## Verification and completion
+
+Tests protect statistical correctness, authority, provenance, storage, commands or
+transitions. Fake external services only; avoid self-derived expectations, vacuous
+assertions and duplicates. Mutation-check changed scientific/authority guards,
+confirm failure, restore exactly and inspect the diff.
+
+Use focused checks while editing; run full tests for shared contracts, Store,
+science or workflow changes. Before code commit/handoff, run full tests, lint and
+format checks. Documentation-only edits need path/command/diff verification.
+Add lanes only above 60 seconds measured suite time; retain full coverage.
+Report changes, actual results and limitations using PASS/FAIL/INCONCLUSIVE.
+Never claim unperformed checks or researcher acceptance.
+
+## Code Review Rules
+
+Flag fabricated authority, lost independent review, stale bindings, non-atomic
+journal updates, unsupported results and execution approval inferred from drafts.
+Check public-boundary regressions and scope; Ruff handles style.
+
+## Fresh live verification
+
+Use production CLI, an empty Store, fresh calls and exactly the specified inputs.
+Historical runs are comparison evidence. Surface missing-input decisions; record
+real replies through production lifecycle. Never inject answers or force state.
+Report command, inputs, run ID, stopping state and artifacts. Live requires
+authorization and passing deterministic prerequisites.

@@ -41,8 +41,12 @@ uv run exd --config <config> export <run> --version 1 --out pilot/runs/<date>/in
 
 Each export has Markdown, authoritative JSON and a checksum manifest from one
 historical snapshot. Export a draft for inspection without implying approval.
-Publication completes S7 only with current approval; a different or incomplete
-existing destination is refused. Preserve all source files, actual decisions and
+Draft publication completes S7 with final researcher review pending and preserves
+REVIEWABLE status; it does not record approval or authorize execution. Approved
+publication still requires current exact approval. The bundle includes readable
+stage_artifacts.md and structured stage_artifacts.json from the same SQLite
+checkpoint. A different or incomplete existing destination is refused.
+Preserve all source files, actual decisions and
 exports. Use `Store.backup(target)` for a consistent SQLite evidence copy.
 
 `status` displays stage, outstanding decisions, usage and journaled stop scope and
@@ -69,6 +73,15 @@ and independent R references are documented in
 cannot certify those methods or a mixed-model SAP. Unsupported inputs remain
 `not_computed`. Never relabel a source-specified method to obtain a passing number.
 
-Copy the [scorecard](scorecard.md) into each local run directory. Both acceptance
-axes require evidence; missing researcher inputs or independent human review leave
-Pilot 2 NOT_PROVEN. Generated provider logs and source evidence stay ignored locally.
+Pilot 2 closes when the seven stages cooperate, confirmed researcher decisions
+persist consistently, substantive scientific review occurs, and the EDP is useful
+for researcher evaluation with its assumptions and remaining limits disclosed.
+This does not require solving every scientific uncertainty. Scientific qualification,
+exact researcher approval and confirmation of the hypothesis remain separate outcomes;
+missing required inputs or an unsupported SAP still prevent execution approval.
+
+Copy the [scorecard](scorecard.md) into each local run directory. Implementation
+tests demonstrate lifecycle mechanisms, including explicit unknown-resolution audits
+and independent verification; fake-backed tests do not establish live Pilot 2 completion
+or replace independent human assessment. Generated provider logs and source evidence
+stay ignored locally.

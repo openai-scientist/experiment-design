@@ -12,7 +12,7 @@ def stage_specs() -> dict[StageId, StageSpec]:
             "S4",
             "Scientific review and refinement",
             ["DesignVersion"],
-            "Verified material issues",
+            "Independent critique, revisions and disclosed limitations",
             ["S2", "S3"],
         ),
         (
@@ -26,10 +26,16 @@ def stage_specs() -> dict[StageId, StageSpec]:
             "S6",
             "Researcher review",
             ["ReadinessAssessment"],
-            "Version-bound researcher response",
+            "Version-bound pending review or researcher response",
             ["S2", "S3", "S4"],
         ),
-        ("S7", "EDP publication", ["PublicationSnapshot"], "Consistent published bundle", []),
+        (
+            "S7",
+            "EDP publication",
+            ["PublicationSnapshot"],
+            "Consistent draft or approved bundle",
+            ["S2", "S3", "S4"],
+        ),
     ]
     return {
         id: StageSpec(

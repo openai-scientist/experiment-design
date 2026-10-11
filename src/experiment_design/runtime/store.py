@@ -160,6 +160,53 @@ class Store:
                 run_id, "publication", {"binding": binding.model_dump(), "manifest": manifest}
             )
             run = self.run(run_id)
+            exported_snapshot = self.publication_snapshot(run_id, event_id=binding.event_id)
+            current_snapshot = self.publication_snapshot(run_id)
+            current_binding = current_snapshot.binding.model_dump(exclude={"event_id"})
+            if (
+                run.stage_id in {"S6", "S7"}
+                and run.status == "REVIEWABLE"
+                and binding.model_dump(exclude={"event_id"}) == current_binding
+                and current_snapshot.assessment is not None
+                and exported_snapshot.assessment == current_snapshot.assessment
+            ):
+                finals = [
+                    d
+                    for d in exported_snapshot.decisions
+                    if d.purpose == "final_review"
+                    and d.status == "AWAITING_RESEARCHER"
+                    and d.binding.model_dump(exclude={"event_id"}) == current_binding
+                    and d.dependencies == [current_snapshot.assessment.id]
+                    and d in current_snapshot.decisions
+                ]
+                if finals:
+                    if run.stage_id == "S6":
+                        self.commit_stage(
+                            run_id,
+                            StageResult(
+                                stage_id="S6",
+                                status="COMPLETE",
+                                binding=self.binding(run_id),
+                                output_refs=[finals[-1].id],
+                                reason="Researcher review presented; response remains pending",
+                            ),
+                            "S7",
+                        )
+                    self.commit_stage(
+                        run_id,
+                        StageResult(
+                            stage_id="S7",
+                            status="COMPLETE",
+                            binding=self.binding(run_id),
+                            output_refs=[manifest["support_hash"]],
+                            reason=(
+                                "Draft EDP published; researcher review pending; "
+                                "execution not authorized"
+                            ),
+                        ),
+                        "S7",
+                    )
+                    self.freeze_publication(run_id)
             if (
                 run.stage_id == "S7"
                 and run.status == "APPROVED"
@@ -167,10 +214,10 @@ class Store:
             ):
                 from experiment_design.qualification import can_approve
 
-                current_snapshot = self.publication_snapshot(run_id)
                 if (
                     binding.context_revision != current_snapshot.binding.context_revision
                     or current_snapshot.approval is None
+                    or exported_snapshot.approval != current_snapshot.approval
                     or can_approve(current_snapshot)
                 ):
                     raise ValueError("publication approval or supporting records changed")
@@ -637,6 +684,51 @@ class Store:
             self._put_artifact(assessment.run_id, "assessment", assessment.id, assessment)
             self.freeze_publication(assessment.run_id)
         return assessment
+
+    def stage_artifacts(self, run_id: str, snapshot: PublicationSnapshot) -> dict:
+        """Materialize scientific stage outputs at the publication's journal checkpoint."""
+        cutoff = snapshot.binding.event_id
+        tasks = self._artifact_records(run_id, "task", TaskRecord, cutoff)
+        agents = {
+            e.task_id: e.agent_id
+            for e in self.events(run_id)
+            if e.event_id <= cutoff and e.type == "task.started"
+        }
+        submissions = [
+            {
+                "task_id": t.task.id,
+                "agent_id": agents.get(t.task.id),
+                "binding": t.task.binding.model_dump(),
+                "result": t.submission.model_dump(mode="json"),
+            }
+            for t in tasks
+            if t.task.stage_id == "S4" and t.submission is not None
+        ]
+        return {
+            "binding": snapshot.binding.model_dump(),
+            "stages": {
+                "S1": {"source": self.source_snapshot(run_id).model_dump(mode="json")},
+                "S2": {"context": snapshot.context.model_dump(mode="json")},
+                "S3": {"version": snapshot.version.model_dump(mode="json")},
+                "S4": {
+                    "cohorts": [
+                        c.model_dump(mode="json")
+                        for c in self._artifact_records(run_id, "cohort", ReviewCohort, cutoff)
+                    ],
+                    "submissions": submissions,
+                    "issues": [i.model_dump(mode="json") for i in snapshot.issues],
+                },
+                "S5": {
+                    "assessment": snapshot.assessment.model_dump(mode="json")
+                    if snapshot.assessment
+                    else None
+                },
+                "S6": {"decisions": [d.model_dump(mode="json") for d in snapshot.decisions]},
+                "S7": {
+                    "files": ["experiment_design.md", "experiment_design.json", "manifest.json"]
+                },
+            },
+        }
 
     def freeze_publication(self, run_id: str) -> PublicationSnapshot:
         snapshot = self.publication_snapshot(run_id)

@@ -26,17 +26,15 @@ def issue(run):
     )
 
 
-def test_run_round_trip(state):
-    store, run = state
-    record = store.run(run)
-    assert record.package == package()
-    assert record.status == "RUNNING"
-    assert record.config == {"provider": "configured"}
-
-
 def test_version_numbers_increase_and_latest(state):
     store, run = state
     first = store.add_version(run, design(), author="design", parent=None)
+    event = store.events(run)[-1]
+    assert (event.type, event.design_version, event.data["design_hash"]) == (
+        "design.version",
+        first.version,
+        first.design_hash,
+    )
     d = design()
     d.analysis.alpha = 0.05
     second = store.add_version(run, d, author="design", parent=1)
@@ -53,17 +51,6 @@ def test_issue_id_assigned_once(state):
     second = store.save_issue(issue(run))
     assert (first.id, updated.id, second.id) == ("I1", "I1", "I2")
     assert len(store.issues(run)) == 2
-
-
-def test_mutation_emits_event_same_tx(state):
-    store, run = state
-    version = store.add_version(run, design(), author="design", parent=None)
-    event = store.events(run)[-1]
-    assert (event.type, event.design_version, event.data["design_hash"]) == (
-        "design.version",
-        version.version,
-        version.design_hash,
-    )
 
 
 def test_unknown_event_type_rejected(state):
@@ -84,13 +71,15 @@ def test_events_after_id(state):
 def test_reopen_store_persists(tmp_path):
     path = tmp_path / "exd.db"
     first = Store(path)
-    run = first.create_run(package(), {})
+    run = first.create_run(package(), {"provider": "configured"})
     first.add_version(run, design(), author="design", parent=None)
     first.save_issue(issue(run))
     first.close()
     second = Store(path)
     try:
         assert second.run(run).package == package()
+        assert second.run(run).status == "RUNNING"
+        assert second.run(run).config == {"provider": "configured"}
         assert second.version(run).version == 1
         assert [i.id for i in second.issues(run)] == ["I1"]
     finally:

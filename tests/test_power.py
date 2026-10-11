@@ -324,7 +324,7 @@ def test_cluster_diagnostics_distinguish_unsupported_and_independent_methods(met
     assert result.status == "not_computed" and result.power is None
     independent_error = "independent method does not support cluster dependence"
     if method == "linear_mixed_model":
-        assert "analysis method/model missing, mismatched or unsupported" in result.reasons
+        assert any("not implemented" in reason and method in reason for reason in result.reasons)
         assert independent_error not in result.reasons
     else:
         assert independent_error in result.reasons

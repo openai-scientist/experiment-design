@@ -68,6 +68,56 @@ def test_methodologist_chain_required(ctx):
         submit.handler({"chain": broken, "findings": [], "summary": "Review"})
 
 
+def test_methodologist_accepts_prompt_link_names_without_changing_review(ctx):
+    links = (
+        "hypothesis → estimand",
+        "estimand → unit",
+        "unit → sampling/allocation",
+        "sampling/allocation → metric",
+        "metric → SAP",
+        "SAP → uncertainty/decision rule",
+    )
+    canonical = chain()
+    canonical[0].update(status="unclear", note="Estimand awaits researcher confirmation")
+    canonical[5].update(status="broken", note="Uncertainty ignores classes")
+    for link in canonical:
+        link["evidence_refs"] = ["S1"]
+    presented = [dict(link, link=name) for link, name in zip(canonical, links, strict=True)]
+    concern = finding().model_dump(mode="json")
+    accepted = methodologist.submit_tool(ctx).handler(
+        {"chain": presented, "findings": [concern], "summary": "Review with a material concern"}
+    )
+    assert accepted["chain"] == canonical
+    assert accepted["findings"] == [concern]
+    assert accepted["summary"] == "Review with a material concern"
+
+
+@pytest.mark.parametrize(
+    ("invalid", "reason"),
+    [
+        ("duplicate", "Chain requires exactly"),
+        ("unknown", "Chain requires exactly"),
+        ("uncovered", "needs a covering finding"),
+        ("unknown_evidence", "Unknown evidence ref"),
+    ],
+)
+def test_methodologist_prompt_link_names_preserve_scientific_guards(ctx, invalid, reason):
+    presented = chain()
+    presented[-1]["link"] = "SAP → uncertainty/decision rule"
+    if invalid == "duplicate":
+        presented.append(dict(presented[-1], link="analysis → decision_rule"))
+    elif invalid == "unknown":
+        presented[-1]["link"] = "SAP → publication"
+    elif invalid == "uncovered":
+        presented[-1]["status"] = "broken"
+    else:
+        presented[-1]["evidence_refs"] = ["tool:another-task"]
+    with pytest.raises(SubmitRejected, match=reason):
+        methodologist.submit_tool(ctx).handler(
+            {"chain": presented, "findings": [], "summary": "Review"}
+        )
+
+
 def test_evidence_ref_must_exist(ctx):
     assert validate_findings([finding(evidence_refs=["S9"])], ctx)
     assert validate_findings([finding()], ctx) == []

@@ -1,5 +1,9 @@
 import json
+import os
 import shlex
+import shutil
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -13,20 +17,10 @@ from experiment_design.runtime.store import Store
 from experiment_design.workflow import Deps, advance, start_run
 
 
-@pytest.fixture
-def state(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    cfg = tmp_path / "exd.yaml"
-    cfg.write_text(
-        yaml.safe_dump(
-            {
-                "llm": {"base_url": "https://provider.example/v1", "model": "test"},
-                "store": str(tmp_path / "exd.db"),
-            }
-        ),
-        encoding="utf-8",
-    )
-    store = Store(tmp_path / "exd.db")
+@pytest.fixture(scope="module")
+def reviewed_run(tmp_path_factory):
+    path = tmp_path_factory.mktemp("cli-reviewed") / "exd.db"
+    store = Store(path)
     deps = Deps(
         store,
         ScriptedLLM(normal_responses()),
@@ -35,6 +29,27 @@ def state(tmp_path, monkeypatch):
     )
     rid = start_run(source_snapshot(), deps, {})
     assert advance(rid, deps) == "REVIEWABLE"
+    store.close()
+    return path, rid
+
+
+@pytest.fixture
+def state(tmp_path, monkeypatch, reviewed_run):
+    monkeypatch.chdir(tmp_path)
+    source, rid = reviewed_run
+    path = tmp_path / "exd.db"
+    shutil.copyfile(source, path)
+    cfg = tmp_path / "exd.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "llm": {"base_url": "https://provider.example/v1", "model": "test"},
+                "store": str(path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = Store(path)
     yield store, rid, cfg
     store.close()
 
@@ -59,6 +74,29 @@ def scientific_decision(state):
             options=[DecisionOption(id="two", label="Two points", proposal={"margin": 2})],
         )
     )
+
+
+def test_status_preserves_unicode_researcher_question_on_windows_output(state):
+    decision = scientific_decision(state)
+    decision.revision += 1
+    decision.problem = "Confirm AI − teacher contrast for điểm toán"
+    state[0].save_decision(decision)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "experiment_design.cli",
+            "--config",
+            str(state[2]),
+            "status",
+            state[1],
+        ],
+        env=os.environ | {"PYTHONIOENCODING": "cp1252"},
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Confirm AI − teacher contrast for điểm toán" in result.stdout.decode("utf-8")
 
 
 @pytest.mark.parametrize("custom_config", [False, True])

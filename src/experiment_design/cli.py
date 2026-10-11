@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from experiment_design.config import ConfigError, ExdConfig, RunConfig, load_config
 from experiment_design.contracts import DecisionResponse
 from experiment_design.decisions import respond
-from experiment_design.output import export, render_markdown
+from experiment_design.output import export, render_decision, render_markdown
 from experiment_design.package import PackageFormatError, all_sources, snapshot_sources
 from experiment_design.runtime.jev import JudgeError, TypeSafeJudge
 from experiment_design.runtime.llm import LLMClient, LLMError
@@ -132,13 +132,23 @@ def _status(store: Store, rid: str, config: Path) -> None:
     if record.schema_version == 2:
         for decision in store.decisions(rid):
             if decision.status == "AWAITING_RESEARCHER":
-                print(f"decision {decision.id} revision {decision.revision}: {decision.problem}")
+                print(render_decision(decision), end="")
                 if decision.purpose == "scientific":
                     print(
                         f"  {_prefix(config)} decide {rid} {decision.id} "
                         f"--revision {decision.revision} "
                         '--action PROPOSE_ALTERNATIVE --text "<your answer>" --by "<your name>"'
                     )
+                    for option in decision.options:
+                        option_arg = shlex.quote(option.id)
+                        if os.name == "nt":
+                            option_arg = "'" + option.id.replace("'", "''") + "'"
+                        print(
+                            f"  {_prefix(config)} decide {rid} {decision.id} "
+                            f"--revision {decision.revision} "
+                            f"--action SELECT_OPTION --option={option_arg} "
+                            '--by "<your name>"'
+                        )
                 else:
                     print(
                         f"  {_prefix(config)} approve {rid} --version {version.version} "
@@ -211,6 +221,9 @@ def _read_command(store: Store, args) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     args = _parser().parse_args(argv)
     deps, store = None, None
     try:

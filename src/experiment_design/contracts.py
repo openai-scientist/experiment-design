@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Provenance = Literal["source", "assumption", "computed", "llm"]
 Origin = Literal["package", "researcher", "designer_default", "missing"]
@@ -456,11 +456,26 @@ class ReadinessAssessment(Record):
     binding: ArtifactBinding
     review_status: Literal["REVIEWABLE", "NEEDS_INPUT", "NOT_READY"]
     handoff_complete: bool
+    execution_ready: bool = False
     blockers: list[str] = Field(default_factory=list)
     decision_ids: list[str] = Field(default_factory=list)
     computation_refs: list[str] = Field(default_factory=list)
     handoff_risks: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_existing_readiness(cls, data):
+        # Earlier schema-2 complete handoffs already required execution readiness.
+        if isinstance(data, dict) and "execution_ready" not in data:
+            data = dict(data)
+            data["execution_ready"] = (
+                data.get("handoff_complete") is True
+                and data.get("review_status") == "REVIEWABLE"
+                and not data.get("blockers")
+                and not data.get("decision_ids")
+            )
+        return data
 
 
 class PublicationSnapshot(Record):

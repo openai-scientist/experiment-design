@@ -55,37 +55,36 @@ def test_stage_context_survives_reopen(tmp_path):
         reopened.close()
 
 
-def test_return_requires_originating_issue_or_decision(tmp_path):
+@pytest.mark.parametrize(
+    ("output_refs", "target", "error"),
+    [
+        pytest.param([], "S4", "originating", id="missing-origin"),
+        pytest.param(["invented decision"], "S4", "originating", id="fabricated-origin"),
+        pytest.param(["D1"], "S1", "target", id="invalid-target"),
+    ],
+)
+def test_return_requires_originating_issue_or_decision(tmp_path, output_refs, target, error):
     store = Store(tmp_path / "research.db")
     run, binding = staged(store)
     store.update_run(run, stage_id="S5")
+    store.save_decision(
+        ResearcherDecision(id="D1", run_id=run, binding=binding, problem="Choose sampling")
+    )
     before = store.events(run)
-    with pytest.raises(ValueError, match="originating"):
+    with pytest.raises(ValueError, match=error):
         store.commit_stage(
             run,
             StageResult(
                 stage_id="S5",
                 status="REVISION_REQUIRED",
                 binding=binding,
+                output_refs=output_refs,
                 reason="Missing uncertainty",
             ),
-            "S4",
+            target,
         )
     assert store.events(run) == before
     assert store.run(run).stage_id == "S5"
-    with pytest.raises(ValueError, match="target"):
-        store.commit_stage(
-            run,
-            StageResult(
-                stage_id="S5",
-                status="REVISION_REQUIRED",
-                binding=binding,
-                issue_refs=["I1"],
-                reason="Repair",
-            ),
-            "S1",
-        )
-    assert store.events(run) == before
     store.close()
 
 
@@ -135,25 +134,4 @@ def test_historical_snapshot_uses_supporting_record_revisions(tmp_path):
         raise RuntimeError("Interrupted transaction")
     assert store.events(run) == before
     assert store.decision(run, "D1").revision == 2
-    store.close()
-
-
-def test_fabricated_return_reference_cannot_change_stage(tmp_path):
-    store = Store(tmp_path / "research.db")
-    run, binding = staged(store)
-    store.update_run(run, stage_id="S5")
-    before = store.events(run)
-    with pytest.raises(ValueError, match="originating"):
-        store.commit_stage(
-            run,
-            StageResult(
-                stage_id="S5",
-                status="REVISION_REQUIRED",
-                binding=binding,
-                output_refs=["invented decision"],
-                reason="Repair",
-            ),
-            "S4",
-        )
-    assert store.events(run) == before
     store.close()

@@ -158,6 +158,90 @@ def test_revision_parent_and_verification_guard(tmp_path):
     store.close()
 
 
+def test_uncertain_verification_can_be_revised_within_existing_limits(tmp_path):
+    from experiment_design.config import RunConfig
+    from experiment_design.contracts import ReviewIssue
+    from experiment_design.review import review_actions
+
+    store, run, _ = review_state(tmp_path)
+    store.update_run(run, reviewed_version=1)
+    store.save_issue(
+        ReviewIssue(
+            run_id=run,
+            raised_by="verifier",
+            version_raised=1,
+            severity="MAJOR",
+            status="unresolved",
+            paths=["/analysis/uncertainty"],
+            mechanism="Evidence remains inconclusive",
+            consequence="Coverage uncertain",
+            basis="reasoning",
+        )
+    )
+    actions = review_actions(store, run, RunConfig(max_revisions=1))
+    assert "REVISE" in actions
+    assert "QUALIFY" not in actions
+    store.update_run(run, revisions_done=1)
+    assert "REVISE" not in review_actions(store, run, RunConfig(max_revisions=1))
+    store.close()
+
+
+def test_unresolved_material_issue_is_included_in_the_revision_batch(tmp_path):
+    from fakes import ScriptedJudge, ScriptedLLM, submit
+    from test_stage_pipeline import source_context, source_snapshot, supported_design
+
+    from experiment_design.config import RunConfig
+    from experiment_design.contracts import ReviewIssue
+    from experiment_design.workflow import Deps, run_stage, start_run
+
+    store = Store(tmp_path / "repair.db")
+    deps = Deps(store, ScriptedLLM([]), ScriptedJudge([]), RunConfig())
+    run = start_run(source_snapshot(), deps, {})
+    store.save_context(run, source_context())
+    store.add_version(run, supported_design(), author="design", parent=None)
+    issue = store.save_issue(
+        ReviewIssue(
+            run_id=run,
+            raised_by="verifier",
+            version_raised=1,
+            severity="MAJOR",
+            status="unresolved",
+            paths=["/protocol/steps"],
+            mechanism="Missing protocol detail",
+            consequence="Cannot implement",
+            basis="reasoning",
+        )
+    )
+    store.update_run(run, stage_id="S3")
+    deps.llm = ScriptedLLM(
+        [
+            submit(
+                "submit_revision",
+                {
+                    "patch": {
+                        "ops": [
+                            {
+                                "path": "/protocol/steps",
+                                "value": ["Prespecified independent class-mean analysis"],
+                            }
+                        ],
+                        "rationale": "Repair independently uncertain protocol",
+                        "addresses": [issue.id],
+                    }
+                },
+            )
+        ]
+    )
+    assert run_stage(run, "S3", deps).status == "COMPLETE"
+    assert store.version(run).version == 2
+    assert store.version(run).design.protocol.steps == [
+        "Prespecified independent class-mean analysis"
+    ]
+    assert store.issues(run)[0].status == "addressed"
+    assert store.issues(run)[0].addressed_in == 2
+    store.close()
+
+
 def test_cohort_keeps_bound_context_and_rejects_membership_rewrite(tmp_path):
     from test_decisions import decision_state
 

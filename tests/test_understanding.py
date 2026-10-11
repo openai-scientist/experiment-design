@@ -305,3 +305,344 @@ def test_recorded_answer_can_recover_authority_without_losing_the_estimand(tmp_p
     assert accepted["decisions"] == []
     assert store.context(rid) is None
     store.close()
+
+
+def applied_understanding(tmp_path):
+    from experiment_design.contracts import DecisionResponse, ResearchContext, ResearcherDecision
+
+    store, rid, _, ctx, data = setup_context(tmp_path)
+    previous = ResearchContext.model_validate(data["context"])
+    store.save_context(rid, previous)
+    decision = store.save_decision(
+        ResearcherDecision(
+            id="confirmed-margin",
+            run_id=rid,
+            binding=store.binding(rid),
+            status="APPLIED",
+            problem="Confirm margin",
+            affected_paths=["/claim/margin"],
+            responses=[
+                DecisionResponse(
+                    revision=1,
+                    action="PROPOSE_ALTERNATIVE",
+                    text="Use 3 points",
+                    researcher="PI",
+                    response_id="margin-reply",
+                )
+            ],
+            application={"response_id": "margin-reply", "context_revision": 1},
+            verification={"status": "pending"},
+        )
+    )
+    ctx.binding = store.binding(rid)
+    revised = previous.model_copy(deep=True)
+    revised.revision = 2
+    revised.unknowns = ["Estimand unspecified"]
+    submission = {
+        "context": revised.model_dump(mode="json"),
+        "decisions": [],
+        "resolved_unknowns": {decision.id: ["Contradictory margins; confirm 3 or 2"]},
+    }
+    return store, rid, ctx, submission
+
+
+def test_understanding_requires_auditable_resolution_and_preserves_other_unknowns(tmp_path):
+    store, _, ctx, data = applied_understanding(tmp_path)
+    accepted = understanding.submit_tool(ctx).handler(data)
+    assert accepted["resolved_unknowns"] == {
+        "confirmed-margin": ["Contradictory margins; confirm 3 or 2"]
+    }
+    assert accepted["context"]["unknowns"] == ["Estimand unspecified"]
+    store.close()
+
+
+def test_applied_reply_can_explicitly_resolve_no_unknowns(tmp_path):
+    store, rid, ctx, data = applied_understanding(tmp_path)
+    data["context"]["unknowns"] = store.context(rid).unknowns
+    data["resolved_unknowns"] = {"confirmed-margin": []}
+    accepted = understanding.submit_tool(ctx).handler(data)
+    assert accepted["context"]["unknowns"] == [
+        "Contradictory margins; confirm 3 or 2",
+        "Estimand unspecified",
+    ]
+    assert accepted["resolved_unknowns"] == {"confirmed-margin": []}
+    store.close()
+
+
+def test_understanding_stage_merges_resolution_audit_without_conferring_verification(tmp_path):
+    from fakes import ScriptedJudge
+
+    from experiment_design.config import RunConfig
+    from experiment_design.workflow import Deps, run_stage
+
+    store, rid, _, data = applied_understanding(tmp_path)
+    decision = store.decision(rid, "confirmed-margin")
+    decision.reconciliation = {"independent": True, "changed_paths": ["/sampling/inclusion"]}
+    store.save_decision(decision)
+    store.update_run(rid, stage_id="S2")
+    result = run_stage(
+        rid,
+        "S2",
+        Deps(
+            store,
+            ScriptedLLM([submit("submit_understanding", data)]),
+            ScriptedJudge([]),
+            RunConfig(),
+        ),
+    )
+    assert result.status == "COMPLETE"
+    recorded = store.decision(rid, decision.id)
+    assert recorded.reconciliation == {
+        "independent": True,
+        "changed_paths": ["/sampling/inclusion"],
+        "unknown_resolutions": [
+            {
+                "decision_id": "confirmed-margin",
+                "response_id": "margin-reply",
+                "context_revision": 2,
+                "unknowns": ["Contradictory margins; confirm 3 or 2"],
+            }
+        ],
+    }
+    assert recorded.verification["status"] == "pending"
+    assert store.context(rid).unknowns == ["Estimand unspecified"]
+    store.close()
+
+
+def test_understanding_cannot_replace_a_source_stated_commitment_with_another_span(tmp_path):
+    from experiment_design.contracts import ResearchContext
+
+    store, rid, _, ctx, data = setup_context(tmp_path)
+    previous = ResearchContext.model_validate(data["context"])
+    store.save_context(rid, previous)
+    ctx.binding = store.binding(rid)
+    revised = previous.model_copy(deep=True)
+    revised.revision = 2
+    revised.package.inference.margin = 2
+    revised.field_annotations["margin"].source_span = "Elsewhere margin 2 points"
+    with pytest.raises(SubmitRejected, match="intent cannot change"):
+        understanding.submit_tool(ctx).handler({"context": revised.model_dump(mode="json")})
+    assert store.context(rid).package.inference.margin == 3
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing",
+        "foreign",
+        "unapplied",
+        "reply",
+        "invented",
+        "retained",
+        "uncovered",
+        "overwrite",
+        "no_reply",
+        "verified",
+        "final",
+    ],
+)
+def test_understanding_rejects_invalid_unknown_resolution(tmp_path, corruption):
+    store, rid, ctx, data = applied_understanding(tmp_path)
+    decision = store.decision(rid, "confirmed-margin")
+    if corruption == "missing":
+        data.pop("resolved_unknowns")
+        data["context"]["unknowns"] = store.context(rid).unknowns
+    elif corruption == "foreign":
+        data["resolved_unknowns"]["another-run"] = []
+    elif corruption == "unapplied":
+        decision.status = "ANSWERED"
+        store.save_decision(decision)
+    elif corruption == "reply":
+        decision.application["response_id"] = "wrong-reply"
+        store.save_decision(decision)
+    elif corruption == "invented":
+        data["resolved_unknowns"][decision.id].append("Approximate margin")
+    elif corruption == "retained":
+        data["context"]["unknowns"].append("Contradictory margins; confirm 3 or 2")
+    elif corruption == "uncovered":
+        data["context"]["unknowns"] = []
+    elif corruption == "overwrite":
+        replacement = decision.model_dump(mode="json")
+        replacement.update(
+            status="IDENTIFIED", responses=[], application={}, binding=ctx.binding.model_dump()
+        )
+        data["decisions"] = [replacement]
+    elif corruption == "no_reply":
+        decision = decision.model_copy(update={"id": "missing-reply", "responses": []})
+        store.save_decision(decision)
+        data["resolved_unknowns"][decision.id] = []
+    elif corruption == "verified":
+        decision.verification = {"status": "verified"}
+        store.save_decision(decision)
+    elif corruption == "final":
+        decision.revision += 1
+        decision.purpose = "final_review"
+        store.save_decision(decision)
+    with pytest.raises(SubmitRejected):
+        understanding.submit_tool(ctx).handler(data)
+    assert store.context(rid).revision == 1
+    store.close()
+
+
+@pytest.mark.parametrize("metadata", ["reconciliation", "verification"])
+def test_understanding_cannot_forge_workflow_metadata_on_a_proposal(tmp_path, metadata):
+    store, _, _, ctx, data = setup_context(tmp_path)
+    data["decisions"][0][metadata] = (
+        {"unknown_resolutions": [{"unknowns": ["Estimand unspecified"]}]}
+        if metadata == "reconciliation"
+        else {"status": "verified"}
+    )
+    with pytest.raises(SubmitRejected):
+        understanding.submit_tool(ctx).handler(data)
+    assert store.decisions(ctx.run_id) == []
+    store.close()
+
+
+def test_workflow_recorded_unknown_resolution_cannot_be_resurrected(tmp_path):
+    from fakes import ScriptedJudge
+
+    from experiment_design.config import RunConfig
+    from experiment_design.workflow import Deps, run_stage
+
+    store, rid, ctx, data = applied_understanding(tmp_path)
+    store.update_run(rid, stage_id="S2")
+    run_stage(
+        rid,
+        "S2",
+        Deps(
+            store,
+            ScriptedLLM([submit("submit_understanding", data)]),
+            ScriptedJudge([]),
+            RunConfig(),
+        ),
+    )
+    ctx.binding = store.binding(rid)
+    revised = store.context(rid).model_copy(deep=True)
+    revised.revision += 1
+    revised.unknowns.append("Contradictory margins; confirm 3 or 2")
+    with pytest.raises(SubmitRejected, match="reintroduced"):
+        understanding.submit_tool(ctx).handler(
+            {
+                "context": revised.model_dump(mode="json"),
+                "resolved_unknowns": {"confirmed-margin": []},
+            }
+        )
+    assert store.context(rid).unknowns == ["Estimand unspecified"]
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "unapplied",
+        "final",
+        "no_reply",
+        "application_reply",
+        "application_revision",
+        "application_missing_context",
+        "source_binding",
+        "application_revision_bool",
+        "container",
+        "entry",
+        "missing_unknowns",
+        "unknown_type",
+        "decision",
+        "response",
+        "revision_type",
+        "revision_bool",
+        "missing_context",
+        "not_after_application",
+        "no_removal",
+        "not_previously_unknown",
+    ],
+)
+def test_untrusted_or_malformed_recorded_audit_cannot_suppress_an_unknown(tmp_path, corruption):
+    from experiment_design.contracts import DecisionResponse, ResearchContext, ResearcherDecision
+
+    store, rid, _, ctx, data = setup_context(tmp_path)
+    previous = ResearchContext.model_validate(data["context"])
+    store.save_context(rid, previous)
+    resolved_context = previous.model_copy(deep=True)
+    resolved_context.revision = 2
+    resolved_context.unknowns = ["Estimand unspecified"]
+    audit = {
+        "decision_id": "historical",
+        "response_id": "reply",
+        "context_revision": 2,
+        "unknowns": ["Contradictory margins; confirm 3 or 2"],
+    }
+    decision = ResearcherDecision(
+        id="historical",
+        run_id=rid,
+        binding=store.binding(rid),
+        status="APPLIED",
+        problem="Recorded clarification",
+        responses=[
+            DecisionResponse(
+                revision=1,
+                action="PROPOSE_ALTERNATIVE",
+                text="Use 3 points",
+                researcher="PI",
+                response_id="reply",
+            )
+        ],
+        application={"response_id": "reply", "context_revision": 1},
+        verification={"status": "verified"},
+        reconciliation={"unknown_resolutions": [audit]},
+    )
+    if corruption == "unapplied":
+        decision.status = "IDENTIFIED"
+    elif corruption == "final":
+        decision.purpose = "final_review"
+    elif corruption == "no_reply":
+        decision.responses = []
+    elif corruption == "application_reply":
+        decision.application["response_id"] = "another-reply"
+    elif corruption == "application_revision":
+        decision.application["context_revision"] = 1.0
+    elif corruption == "application_missing_context":
+        decision.application["context_revision"] = 0
+    elif corruption == "application_revision_bool":
+        decision.application["context_revision"] = True
+    elif corruption == "source_binding":
+        decision.binding.source_snapshot_id = "unrelated-snapshot"
+    elif corruption == "container":
+        decision.reconciliation["unknown_resolutions"] = {"forged": audit}
+    elif corruption == "entry":
+        decision.reconciliation["unknown_resolutions"] = [None]
+    elif corruption == "missing_unknowns":
+        audit.pop("unknowns")
+    elif corruption == "unknown_type":
+        audit["unknowns"] = ["Contradictory margins; confirm 3 or 2", ["malformed"]]
+    elif corruption == "decision":
+        audit["decision_id"] = "unrelated-decision"
+    elif corruption == "response":
+        audit["response_id"] = "unrelated-reply"
+    elif corruption == "revision_type":
+        audit["context_revision"] = "2"
+    elif corruption == "revision_bool":
+        audit["context_revision"] = True
+    elif corruption == "missing_context":
+        audit["context_revision"] = 999
+    elif corruption == "not_after_application":
+        decision.application["context_revision"] = 2
+    elif corruption == "no_removal":
+        resolved_context.unknowns = previous.unknowns
+    else:
+        previous.unknowns = ["Estimand unspecified"]
+        previous.revision = 2
+        resolved_context = previous
+        audit["unknowns"] = ["District SD missing"]
+    store.save_context(rid, resolved_context)
+    store.save_decision(decision)
+    ctx.binding = store.binding(rid)
+    revised = resolved_context.model_copy(deep=True)
+    revised.revision = 3
+    revised.unknowns = ["Contradictory margins; confirm 3 or 2", "Estimand unspecified"]
+    if corruption == "not_previously_unknown":
+        revised.unknowns.append("District SD missing")
+    accepted = understanding.submit_tool(ctx).handler({"context": revised.model_dump(mode="json")})
+    assert accepted["context"]["unknowns"] == revised.unknowns
+    assert store.context(rid).revision == 2
+    store.close()
