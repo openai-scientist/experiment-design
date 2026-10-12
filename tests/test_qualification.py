@@ -218,3 +218,76 @@ def test_supported_but_underpowered_recruitment_is_not_execution_ready(tmp_path)
     assert can_approve(store.publication_snapshot(run))
     assert any("target power" in reason for reason in assessment.blockers)
     store.close()
+
+
+def test_new_material_issue_invalidates_assessment_without_design_change(tmp_path):
+    from test_stage_pipeline import source_context, source_snapshot, supported_design
+
+    from experiment_design.contracts import CalculationRequest, Observation, ReviewIssue
+    from experiment_design.runtime.store import Store
+    from experiment_design.science.power import calculate
+
+    store = Store(tmp_path / "material-issue.db")
+    try:
+        run = store.create_staged_run(source_snapshot(), {})
+        store.save_context(run, source_context())
+        version = store.add_version(run, supported_design(), author="design", parent=None)
+        calculation = calculate(
+            CalculationRequest(
+                binding=store.binding(run), scenario_id="base", design=version.design
+            )
+        )
+        store.save_observation(
+            run,
+            Observation(
+                id="ready-power",
+                task_id="handoff",
+                binding=store.binding(run),
+                tool_name="compute_power",
+                arguments={},
+                result={"value": [calculation.model_dump(mode="json")]},
+                accepted=True,
+                evidence_ref="tool:ready-power",
+            ),
+        )
+        assessment = assess_readiness(
+            store,
+            run,
+            AgentResult(
+                completion_status="completed",
+                findings_or_changes={
+                    "handoff_complete": True,
+                    "risks": [],
+                    "findings": [],
+                    "evidence_refs": ["tool:ready-power"],
+                },
+            ),
+        )
+        assert assessment.execution_ready is True
+        assert can_approve(store.publication_snapshot(run)) == []
+        events = store.events(run)
+        unchanged = store.publication_snapshot(run)
+        assert unchanged.assessment == assessment
+        assert can_approve(unchanged) == []
+        assert store.events(run) == events
+
+        store.save_issue(
+            ReviewIssue(
+                run_id=run,
+                raised_by="handoff",
+                version_raised=version.version,
+                severity="MAJOR",
+                paths=["/measurement/data_collection"],
+                mechanism="Data collection authorization needs confirmation",
+                consequence="Collection cannot proceed until the new concern is reconciled",
+                basis="unknown_assumption",
+            )
+        )
+        changed = store.publication_snapshot(run)
+        assert changed.version.version == version.version
+        assert changed.version.design_hash == version.design_hash
+        assert changed.assessment is None
+        assert "approval requires current REVIEWABLE and complete handoff" in can_approve(changed)
+        assert "material issues remain unresolved" in can_approve(changed)
+    finally:
+        store.close()
