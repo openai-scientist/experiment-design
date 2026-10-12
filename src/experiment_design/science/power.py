@@ -44,14 +44,14 @@ class ScenarioResult(Record):
     input_provenance: dict[str, str] = Field(default_factory=dict)
 
 
-def contrast_from(claim: Claim, sidedness: str, alpha: float) -> Contrast | list[str]:
+def contrast_from(claim: Claim, sidedness: str | None, alpha: float | None) -> Contrast | list[str]:
     reasons = []
     kind, direction = claim.contrast_type.value, claim.direction.value
     if kind not in {"superiority", "non_inferiority", "superiority_by_margin"}:
         reasons.append("contrast_type missing or unsupported")
     if direction not in {"increase", "decrease"}:
         reasons.append("direction missing or unsupported")
-    if not 0 < alpha < 1:
+    if alpha is None or not 0 < alpha < 1:
         reasons.append("alpha must be between 0 and 1")
     if sidedness not in {"one_sided", "two_sided"}:
         reasons.append("sidedness unsupported")
@@ -120,6 +120,12 @@ def compute_scenario(
     scenario: PowerScenario,
     overrides: dict[str, Quantity] | None = None,
 ) -> ScenarioResult:
+    if design.execution is not None:
+        return ScenarioResult(
+            name=scenario.name,
+            status="not_computed",
+            reasons=["An explicit calculator request is required"],
+        )
     if design.analysis.method_id:
         result = calculate(
             CalculationRequest(
@@ -127,6 +133,7 @@ def compute_scenario(
                 scenario_id=scenario.name,
                 design=design,
                 overrides=overrides or {},
+                calculator_id=design.analysis.method_id,
             )
         )
         return ScenarioResult(
@@ -176,7 +183,7 @@ def compute_scenario(
     c = contrast_from(design.claim, design.analysis.sidedness, design.analysis.alpha)
     if isinstance(c, list):
         reasons.extend(c)
-    if not 0 < scenario.target_power < 1:
+    if scenario.target_power is None or not 0 < scenario.target_power < 1:
         reasons.append("target_power must be between 0 and 1")
     outcome_kind = design.claim.outcome_kind.value
     if outcome_kind == "continuous":
@@ -282,7 +289,7 @@ def calculate(request: CalculationRequest) -> CalculationResult:
         if design.sampling.cluster and design.sampling.cluster.icc:
             ids.add(design.sampling.cluster.icc.source_ref)
         design = _apply_patch(design, request.preview_patch, source_ids=ids, author="preview")
-    method = design.analysis.method_id or "unsupported"
+    method = request.calculator_id or "unsupported"
     result = CalculationResult(
         id="calc:" + digest,
         scenario_id=request.scenario_id,
@@ -307,8 +314,8 @@ def calculate(request: CalculationRequest) -> CalculationResult:
         result.implementation = "unavailable"
         reasons.append(
             f"Power calculation is not implemented for analysis method {method!r}."
-            if design.analysis.method_id
-            else "Analysis method_id is missing; a power implementation cannot be selected."
+            if method != "unsupported"
+            else "Explicit calculator_id is missing; a power implementation cannot be selected."
         )
         result.applicability = [
             "The scientific validity of the SAP was not assessed by this calculator.",
@@ -413,7 +420,7 @@ def calculate(request: CalculationRequest) -> CalculationResult:
         and design.analysis.sidedness != "one_sided"
     ):
         reasons.append("margin method requires one-sided inference")
-    if not 0 < scenario.target_power < 1:
+    if scenario.target_power is None or not 0 < scenario.target_power < 1:
         reasons.append("target power must be between zero and one")
     count = cluster.clusters_per_arm if cluster else design.sampling.n_per_arm
     if count is not None and count < 2:

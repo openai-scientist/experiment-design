@@ -6,7 +6,7 @@ from experiment_design.contracts import StageId, StageSpec
 def stage_specs() -> dict[StageId, StageSpec]:
     rows = [
         ("S1", "Artifact intake", ["Markdown"], "Immutable readable source snapshot", []),
-        ("S2", "Research understanding", ["SourceSnapshot"], "Grounded research context", []),
+        ("S2", "Exploration and framing", ["SourceSnapshot"], "Grounded selected direction", []),
         ("S3", "Experiment design synthesis", ["ResearchContext"], "Reviewable draft", ["S2"]),
         (
             "S4",

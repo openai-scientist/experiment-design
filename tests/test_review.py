@@ -1,11 +1,11 @@
 import pytest
-from conftest import design, package
-from test_stages import staged
 
 from experiment_design.agents.tools import build_tools, context_brief, validate_refs
 from experiment_design.contracts import AgentResult, AgentTask, ResearchContext, TaskBudget
 from experiment_design.review import publish_cohort, review_context, start_cohort
 from experiment_design.runtime.store import Store, TaskRecord
+from tests.support.builders import design, package
+from tests.support.scenarios import staged
 
 
 def review_state(tmp_path):
@@ -187,12 +187,11 @@ def test_uncertain_verification_can_be_revised_within_existing_limits(tmp_path):
 
 
 def test_unresolved_material_issue_is_included_in_the_revision_batch(tmp_path):
-    from fakes import ScriptedJudge, ScriptedLLM, submit
-    from test_stage_pipeline import source_context, source_snapshot, supported_design
-
     from experiment_design.config import RunConfig
     from experiment_design.contracts import ReviewIssue
     from experiment_design.workflow import Deps, run_stage, start_run
+    from tests.support.providers import ScriptedJudge, ScriptedLLM, submit
+    from tests.support.scenarios import source_context, source_snapshot, supported_design
 
     store = Store(tmp_path / "repair.db")
     deps = Deps(store, ScriptedLLM([]), ScriptedJudge([]), RunConfig())
@@ -243,11 +242,10 @@ def test_unresolved_material_issue_is_included_in_the_revision_batch(tmp_path):
 
 
 def test_cohort_keeps_bound_context_and_rejects_membership_rewrite(tmp_path):
-    from test_decisions import decision_state
-
     from experiment_design.agents.tools import build_tools
     from experiment_design.contracts import AgentTask, TaskBudget
     from experiment_design.review import review_context, start_cohort
+    from tests.support.scenarios import decision_state
 
     store, run, context, _ = decision_state(tmp_path)
     cohort = start_cohort(store, run, store.binding(run))

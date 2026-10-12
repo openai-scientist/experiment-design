@@ -2,8 +2,8 @@
 
 ## Purpose and scope
 
-Produce a grounded, reviewable EDP from researcher Markdown; disclose assumptions
-and limitations. Draft completion is separate from execution readiness.
+Produce a grounded, independently reviewed Experiment Plan from researcher Markdown.
+Disclose assumptions and limitations; downstream implementation/execution is separate.
 
 ## Setup and commands
 
@@ -24,14 +24,23 @@ variables without exposing secrets. Start with
 `uv run pytest -m live -q` selects live-marked tests; zero collected tests prove
 nothing. Default tests exclude live. No type checker or CI workflow is configured.
 
+Exploration is a capability of S2 inside the canonical `run <input.md>` workflow
+(additional Markdown inputs are allowed). It proposes, compares and selects
+scientific directions before synthesis; source-fixed methodology preserves its
+authority. Internal selection is a proposal, never researcher confirmation.
+`status` and `review` inspect context/candidates offline before a design exists;
+`resume` reuses accepted tasks and selections with cumulative usage. Historical
+standalone exploration is read/export only. New runs do not have a separate
+exploration lifecycle or final candidate-only export. Empirical execution is out of scope.
+
 ## Code ownership
 
 Under `src/experiment_design/`:
 
-- `contracts.py`, `stages.py`: records and stage contracts.
+- `contracts.py`, `stages/`: records, stage contracts and explicit stage owners.
 - `package.py`, `patch.py`: source intake and protected design changes.
 - `workflow.py`, `review.py`, `qualification.py`, `decisions.py`: coordination,
-  independent review, readiness and researcher decisions.
+  independent review, plan qualification and researcher decisions.
 - `runtime/`, `agents/`, `science/`: Store/provider loop, role tools and statistics.
 - `output.py`, `cli.py`: exports and researcher commands.
 
@@ -62,7 +71,7 @@ Preserve researcher inputs and run evidence.
 - One canonical design per version; after synthesis, use validated `apply_patch`.
   Protect source/confirmed intent, measurement mirrors, context values and typed
   commitments. Researcher-owned fields change through recorded answers only;
-  reconcile new evidence and changed claims before execution readiness.
+  reconcile new evidence and changed claims before plan acceptance.
 - Statistics come from `science/power.py`; missing/unsupported inputs yield
   `not_computed` with reasons. Agent-supplied computed inputs are unsupported
   without attestation. Never invent evidence, power, verification, answers or approval.
@@ -73,28 +82,36 @@ Preserve researcher inputs and run evidence.
   Preserve frozen cohort barriers and version/context bindings.
 - Keep schemas/message prefixes stable within tasks. Journal provider attempts,
   unknown usage, cache telemetry and budget-stop scope/reason. Cached tokens count.
-  Reserve verifier/handoff allowance; authorized increases preserve cumulative usage.
+  Reserve independent review/verifier allowance; authorized increases preserve cumulative usage.
 
 | Stage | Required responsibility |
 |---|---|
 | S1 | Capture exact immutable source text and provenance. |
-| S2 | Ground context; expose unknowns and researcher decisions. |
-| S3 | Synthesize canonical design, SAP, protocol and assumptions. |
-| S4 | Complete independent review; refine and disclose limitations. |
-| S5 | Separate reviewability, handoff completeness and execution readiness. |
+| S2 | Ground context, explore/compare/select directions; expose uncertainty and real decisions. |
+| S3 | Synthesize or redesign the selected direction as a protected canonical Design. |
+| S4 | Independent Methodologist/Skeptic critique; grounded refinement or reject → S2; fresh checks. |
+| S5 | Assess reviewed plan completeness; route actionable feedback to S2/S3/S4 or researcher. |
 | S6 | Record real decisions; final review may remain pending. |
-| S7 | Publish a consistent draft/approved EDP and stage artifacts. |
+| S7 | Publish exp_plan.md, exp_plan.json and manifest.json from one frozen snapshot. |
 
-Qualification records blockers; keep STOP for technical, integrity or interpretability
-failures. Complete handoff requires inspecting the bound design, protocol and
-stopping policies.
-Draft export never authorizes execution; approval requires current qualification,
-supported bound calculations and reconciled scientific decisions. Record exact
-response revision, identity and timestamp through ResearcherDecision, including
-final review. Requalify after evidence/issues change. Publish from frozen supporting
-snapshots and bound observations, without recomputation. Schema-1 supports historical
-reads/exports only; preserve its scientific meaning. Materialize stage Markdown/JSON
-from SQLite alongside the EDP.
+Methodology is open-ended scientific reasoning, never an allowlist. Optional tools
+use explicit calculator_id; unknown/unsupported coverage does not select or reject
+methodology. Do not create new scientific computation implementations in this cutover.
+Missing core intent requires an actual ResearcherDecision; proposals are not answers.
+
+Qualification aggregates current Design, independent review/dispositions, decisions
+and relevant bound evidence. plan_complete describes scientific quality/completeness,
+not successful execution. No Handoff Agent or internal handoff evaluation. Minor
+uncertainty is disclosed; material gaps can return to their stage owner using existing
+limits. Keep STOP for technical, integrity or interpretability failures.
+Researcher acceptance requires current qualification and reconciled scientific
+choices. Numerical claims must have supported accepted evidence when supplied;
+power calculation is not a universal gate. Record exact response revision, identity
+and timestamp, including final review. Requalify after relevant evidence/issues change.
+Publish frozen supporting snapshots without recomputation. Schema-1, pre-cutover
+schema-2 and standalone exploration support historical reads/exports only through
+isolated compatibility code. Internal stage artifacts remain in SQLite, not extra
+active final files.
 
 ## Verification and completion
 
@@ -106,7 +123,8 @@ confirm failure, restore exactly and inspect the diff.
 Use focused checks while editing; run full tests for shared contracts, Store,
 science or workflow changes. Before code commit/handoff, run full tests, lint and
 format checks. Documentation-only edits need path/command/diff verification.
-Add lanes only above 60 seconds measured suite time; retain full coverage.
+Use the focused lane commands in TESTING.md; shared contracts/runtime/Store and
+unmatched changes require the full suite. Retain full coverage before handoff.
 Report changes, actual results and limitations using PASS/FAIL/INCONCLUSIVE.
 Never claim unperformed checks or researcher acceptance.
 

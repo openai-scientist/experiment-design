@@ -1,14 +1,13 @@
-"""Version-bound scientific qualification and explicit final researcher approval."""
+"""Assess reviewed plan quality; execution belongs to the downstream stage."""
 
 from uuid import uuid4
 
 from experiment_design.contracts import (
-    AgentResult,
     Approval,
     DecisionResponse,
     PublicationSnapshot,
     ReadinessAssessment,
-    ReviewIssue,
+    ReviewCohort,
     StageResult,
 )
 from experiment_design.decisions import respond
@@ -17,102 +16,68 @@ from experiment_design.runtime.store import Store, now
 from experiment_design.science.validators import validate_design
 
 
-def assess_readiness(store: Store, run_id: str, handoff_result: AgentResult) -> ReadinessAssessment:
+def assess_readiness(store: Store, run_id: str) -> ReadinessAssessment:
+    if store.run(run_id).plan_contract != "exp-plan/v1":
+        raise ValueError("Historical runs are read/export only")
     snapshot = store.publication_snapshot(run_id)
-    binding = store.binding(run_id)
-    payload = handoff_result.findings_or_changes or {}
+    current = snapshot.version.design
     checks = validate_design(
-        snapshot.version.design,
+        current,
         snapshot.context.package,
         source_ids={s.id for s in all_sources(snapshot.context, snapshot.decisions)},
         calculations=snapshot.calculations,
     )
-    blockers = [f.message for f in checks if f.severity in {"MAJOR", "BLOCKER"}]
-    essential = [
-        "hypothesis",
-        "primary_outcome",
-        "outcome_unit",
-        "outcome_kind",
-        "direction",
-        "contrast_type",
-        "estimand",
+    blockers = [f.message + ": " + f.path for f in checks if f.severity in {"MAJOR", "BLOCKER"}]
+    if current.execution is None:
+        blockers.append("Plan implementation boundaries and expected outputs are missing")
+    for name, field in current.claim:
+        if field.value is not None:
+            annotation = snapshot.context.field_annotations.get(name)
+            if not annotation or annotation.status not in {"source-stated", "researcher-confirmed"}:
+                blockers.append(
+                    f"Scientific intent {name} requires source support or researcher confirmation"
+                )
+    cohorts = [
+        c
+        for c in store._artifact_records(run_id, "cohort", ReviewCohort)
+        if c.published_event_id is not None
+        and c.binding.model_dump(exclude={"event_id"})
+        == snapshot.binding.model_dump(exclude={"event_id"})
     ]
-    if snapshot.version.design.claim.contrast_type.value in {
-        "non_inferiority",
-        "superiority_by_margin",
-    }:
-        essential.append("margin")
-    for name in essential:
-        annotation = snapshot.context.field_annotations.get(name)
-        if not annotation or annotation.status not in {"source-stated", "researcher-confirmed"}:
-            blockers.append(
-                f"Scientific intent {name} requires source support or researcher confirmation"
-            )
-    blockers.extend(snapshot.context.unknowns)
-    scenarios = {s.name: s for s in snapshot.version.design.scenarios}
-    covered = {c.scenario_id for c in snapshot.calculations}
-    if set(scenarios) - covered:
-        blockers.append("Current scenarios lack bound calculations")
-    for calculation in snapshot.calculations:
-        scenario = scenarios.get(calculation.scenario_id)
-        if scenario and calculation.power is not None and calculation.power < scenario.target_power:
-            blockers.append(f"Recruitment for {scenario.name} falls below target power")
-    blockers.extend(payload.get("risks", []))
-    for finding in payload.get("findings", []):
-        store.save_issue(
-            ReviewIssue(
-                **finding,
-                run_id=run_id,
-                raised_by="handoff",
-                version_raised=snapshot.version.version,
-            )
-        )
-    blockers += [
+    if not cohorts:
+        blockers.append("Current plan requires independent Methodologist and Skeptic review")
+    blockers.extend(
         i.mechanism
-        for i in store.issues(run_id)
+        for i in snapshot.issues
         if i.severity in {"MAJOR", "BLOCKER"} and i.status not in {"resolved", "duplicate"}
-    ]
+    )
     pending = [
         d.id
         for d in snapshot.decisions
         if d.purpose != "final_review"
         and (d.status != "APPLIED" or d.verification.get("status") != "verified")
     ]
-    supported = bool(snapshot.calculations) and all(
-        c.status == "computed" and c.power is not None for c in snapshot.calculations
-    )
-    protocol_complete = (
-        bool(snapshot.version.design.protocol.steps)
-        and bool(snapshot.version.design.protocol.stop_conditions)
-        and bool(snapshot.version.design.analysis.stopping)
-    )
-    complete = (
-        handoff_result.completion_status == "completed"
-        and payload.get("handoff_complete") is True
-        and protocol_complete
-    )
-    if not protocol_complete:
-        blockers.append("Execution protocol or stopping policy is missing")
-    if not supported:
-        blockers.append("Bound recruitment/power computation is missing or unsupported")
+    # Numerical targets matter only when a supported bound calculation makes the comparison.
+    scenarios = {s.name: s for s in current.scenarios}
+    for calculation in snapshot.calculations:
+        scenario = scenarios.get(calculation.scenario_id)
+        if (
+            scenario
+            and scenario.target_power is not None
+            and calculation.power is not None
+            and calculation.power < scenario.target_power
+        ):
+            blockers.append(f"Recruitment for {scenario.name} falls below target power")
     assessment = ReadinessAssessment(
         id="assessment:" + uuid4().hex,
         run_id=run_id,
-        binding=binding,
-        review_status=(
-            "NOT_READY"
-            if handoff_result.completion_status != "completed"
-            else "NEEDS_INPUT"
-            if pending
-            else "REVIEWABLE"
-        ),
-        handoff_complete=complete,
-        execution_ready=complete and supported and not blockers and not pending,
-        blockers=blockers,
+        binding=store.binding(run_id),
+        review_status="NEEDS_INPUT" if pending else "REVIEWABLE" if cohorts else "NOT_READY",
+        plan_complete=not blockers and not pending,
+        blockers=list(dict.fromkeys(blockers)),
         decision_ids=pending,
         computation_refs=[c.id for c in snapshot.calculations],
-        handoff_risks=payload.get("risks", []),
-        evidence_refs=handoff_result.evidence_refs,
+        evidence_refs=[c.id for c in cohorts],
     )
     return store.save_assessment(assessment)
 
@@ -123,16 +88,15 @@ def can_approve(snapshot: PublicationSnapshot) -> list[str]:
     if (
         assessment is None
         or assessment.review_status != "REVIEWABLE"
-        or not assessment.handoff_complete
+        or assessment.plan_complete is not True
     ):
-        reasons.append("approval requires current REVIEWABLE and complete handoff")
-    if assessment and (
-        assessment.binding.design_hash != snapshot.binding.design_hash
-        or assessment.binding.context_revision != snapshot.binding.context_revision
-    ):
+        reasons.append("approval requires current REVIEWABLE and complete reviewed plan")
+    if assessment and assessment.binding.model_dump(
+        exclude={"event_id"}
+    ) != snapshot.binding.model_dump(exclude={"event_id"}):
         reasons.append("approval assessment version or context is stale")
-    if assessment and (assessment.blockers or not assessment.execution_ready):
-        reasons.append("execution readiness blockers remain")
+    if assessment and assessment.blockers:
+        reasons.append("scientific plan blockers remain")
     if any(
         i.severity in {"MAJOR", "BLOCKER"} and i.status not in {"resolved", "duplicate"}
         for i in snapshot.issues
@@ -144,8 +108,6 @@ def can_approve(snapshot: PublicationSnapshot) -> list[str]:
         for d in snapshot.decisions
     ):
         reasons.append("researcher decisions require application and reconciliation")
-    if not snapshot.calculations or any(c.status != "computed" for c in snapshot.calculations):
-        reasons.append("unsupported or missing calculation")
     return reasons
 
 

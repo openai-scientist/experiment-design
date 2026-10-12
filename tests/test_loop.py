@@ -1,18 +1,19 @@
 import json
 
 import pytest
-from conftest import package
-from fakes import ScriptedLLM, submit, tool_call
 
 from experiment_design.contracts import AgentTask, TaskBudget
 from experiment_design.runtime.loop import AgentSpec, SubmitRejected, Tool, run_agent
 from experiment_design.runtime.store import Store
+from tests.support.builders import package
+from tests.support.providers import ScriptedLLM, submit, tool_call
+from tests.support.scenarios import seeded_run
 
 
 @pytest.fixture
 def state(tmp_path):
     store = Store(tmp_path / "exd.db")
-    run = store.create_run(package(), {})
+    run = seeded_run(store, package(), {})
     yield store, run
     store.close()
 
@@ -159,7 +160,7 @@ def test_tool_events_have_no_full_output(state):
 
 
 def test_committed_submission_resumes_without_provider(tmp_path):
-    from test_stages import staged
+    from tests.support.scenarios import staged
 
     store = Store(tmp_path / "durable.db")
     rid, binding = staged(store)
@@ -202,7 +203,7 @@ def test_committed_submission_resumes_without_provider(tmp_path):
 
 
 def test_unrecorded_provider_response_retries_as_new_attempt(tmp_path):
-    from test_stages import staged
+    from tests.support.scenarios import staged
 
     store = Store(tmp_path / "durable.db")
     rid, binding = staged(store)
@@ -247,7 +248,7 @@ def test_unrecorded_provider_response_retries_as_new_attempt(tmp_path):
 
 
 def test_provider_call_ids_are_isolated_by_task(tmp_path):
-    from test_stages import staged
+    from tests.support.scenarios import staged
 
     store = Store(tmp_path / "collision.db")
     run_id, binding = staged(store)
@@ -287,7 +288,7 @@ def test_provider_call_ids_are_isolated_by_task(tmp_path):
 
 
 def test_failed_observation_commit_returns_error_without_evidence(tmp_path):
-    from test_stages import staged
+    from tests.support.scenarios import staged
 
     store = Store(tmp_path / "observation.db")
     run_id, binding = staged(store)

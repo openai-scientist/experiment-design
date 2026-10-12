@@ -7,14 +7,14 @@ import sys
 
 import pytest
 import yaml
-from fakes import ScriptedJudge, ScriptedLLM
-from test_stage_pipeline import normal_responses, source_snapshot
 
 from experiment_design import cli
 from experiment_design.config import RunConfig
 from experiment_design.contracts import DecisionOption, ResearcherDecision
 from experiment_design.runtime.store import Store
 from experiment_design.workflow import Deps, advance, start_run
+from tests.support.providers import ScriptedJudge, ScriptedLLM
+from tests.support.scenarios import normal_responses, source_snapshot
 
 
 @pytest.fixture(scope="module")
@@ -173,10 +173,12 @@ def test_select_option_preserves_choice_without_provider(state):
     assert state[0].decision(state[1], decision.id).responses[-1].option_id == "two"
 
 
-def test_legacy_answer_has_migration_message_without_mutation(state, capsys):
+def test_legacy_answer_command_is_removed_without_mutation(state, capsys):
     before = state[0].events(state[1])
-    assert call(state, ["answer", state[1], "R9", "yes"]) == 2
-    assert "Use decide" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as error:
+        call(state, ["answer", state[1], "R9", "yes"])
+    assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
     assert state[0].events(state[1]) == before
 
 
@@ -211,9 +213,9 @@ def test_approve_then_export_has_exact_approval_without_provider(state, tmp_path
     store, rid, _ = state
     assert call(state, ["approve", rid, "--version", "1", "--by", "PI"]) == 0
     assert call(state, ["export", rid, "--out", str(tmp_path / "final")]) == 0
-    data = json.loads((tmp_path / "final/experiment_design.json").read_bytes())
-    assert data["provenance"]["approval"]["version"] == 1
-    assert data["provenance"]["approval"]["design_hash"] == store.version(rid).design_hash
+    data = json.loads((tmp_path / "final/exp_plan.json").read_bytes())
+    assert data["approval"]["version"] == 1
+    assert data["approval"]["design_hash"] == store.version(rid).design_hash
     assert store.run(rid).status == "PUBLISHED"
 
 

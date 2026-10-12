@@ -1,6 +1,7 @@
 """SQLite canonical records with atomic, append-only journal events."""
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -28,10 +29,20 @@ from experiment_design.contracts import (
     ReviewIssue,
     RunStatus,
     ScientificPackage,
+    Source,
     SourceSnapshot,
     StageId,
     StageResult,
 )
+from experiment_design.exploration import (
+    ExplorationPolicy,
+    ExplorationSelection,
+    ExplorationSnapshot,
+    ExplorationSubmission,
+    recommendation_options,
+    validate_exploration,
+)
+from experiment_design.package import all_sources
 from experiment_design.patch import design_diff, design_hash
 
 EVENT_TYPES = (
@@ -75,6 +86,7 @@ class RunRecord(Record):
     run_id: str
     package: ScientificPackage | None = None
     schema_version: int = 1
+    plan_contract: Literal["exp-plan/v1"] | None = None
     stage_id: StageId | None = None
     source_snapshot_id: str | None = None
     context_revision: int | None = None
@@ -119,6 +131,7 @@ class Store:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self._depth = 0
+        self._advancing_runs: set[str] = set()
         self.connection.executescript("""
             CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS versions (
@@ -253,22 +266,6 @@ class Store:
         finally:
             self._depth -= 1
 
-    def create_run(self, package: ScientificPackage, config: dict) -> str:
-        run_id = "r" + uuid4().hex[:8]
-        record = RunRecord(
-            run_id=run_id,
-            package=package,
-            config=config,
-            status="RUNNING",
-            created_at=now(),
-        )
-        with self.transaction():
-            self.connection.execute(
-                "INSERT INTO runs VALUES (?, ?)", (run_id, record.model_dump_json())
-            )
-            self.append_event(run_id, "run.status", {"status": "RUNNING"})
-        return run_id
-
     def run(self, run_id: str) -> RunRecord:
         row = self.connection.execute("SELECT data FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if row is None:
@@ -278,6 +275,8 @@ class Store:
     def update_run(self, run_id: str, **fields) -> None:
         with self.transaction():
             old = self.run(run_id)
+            if "plan_contract" in fields and fields["plan_contract"] != old.plan_contract:
+                raise ValueError("run plan contract is immutable")
             record = RunRecord.model_validate(old.model_dump() | fields)
             self.connection.execute(
                 "UPDATE runs SET data=? WHERE run_id=?", (record.model_dump_json(), run_id)
@@ -434,12 +433,6 @@ class Store:
     def issues(self, run_id: str) -> list[ReviewIssue]:
         return self._list("issues", ReviewIssue, run_id)
 
-    def save_request(self, req: ResearcherRequest) -> ResearcherRequest:
-        with self.transaction():
-            req = self._save("requests", req, "R")
-            self.append_event(req.run_id, "researcher.request", req.model_dump(mode="json"))
-        return req
-
     def requests(self, run_id: str) -> list[ResearcherRequest]:
         return self._list("requests", ResearcherRequest, run_id)
 
@@ -535,6 +528,7 @@ class Store:
             status="RUNNING",
             created_at=now(),
             schema_version=2,
+            plan_contract="exp-plan/v1",
             stage_id="S1",
             source_snapshot_id=snapshot.id,
         )
@@ -548,6 +542,264 @@ class Store:
 
     def source_snapshot(self, run_id: str) -> SourceSnapshot:
         return self._artifact(run_id, "source", self.run(run_id).source_snapshot_id, SourceSnapshot)
+
+    def is_exploration_run(self, run_id: str) -> bool:
+        return bool(self._artifact_records(run_id, "exploration_policy", ExplorationPolicy))
+
+    @contextmanager
+    def run_execution(self, run_id: str):
+        """Reject overlapping runners; OS ownership is released even after hard exit."""
+        run = self.run(run_id)
+        if run.plan_contract != "exp-plan/v1" or run.stage_id is None:
+            raise ValueError("historical runs are read/export only")
+        filename = self.connection.execute("PRAGMA database_list").fetchone()["file"]
+        if not filename:
+            if run_id in self._advancing_runs:
+                raise ValueError("run is already being advanced")
+            self._advancing_runs.add(run_id)
+            try:
+                yield
+            finally:
+                self._advancing_runs.remove(run_id)
+            return
+        # Do not unlink the lock file: a waiting process may still hold its inode.
+        lock_path = Path(filename).with_name(f"{Path(filename).name}.{run_id}.run.lock")
+        with lock_path.open("a+b") as lock:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise ValueError("run is already being advanced") from exc
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def recover_task(self, run_id: str, task_id: str) -> TaskRecord:
+        """Reconcile a checkpoint with journaled calls before consuming more allowance."""
+        with self.transaction():
+            record = self.task(task_id)
+            if record.run_id != run_id:
+                raise ValueError("task belongs to another run")
+            self.check_binding(run_id, record.task.binding)
+            if record.submission is not None:
+                return record
+            events = [e for e in self.events(run_id) if e.task_id == task_id]
+            usage = [
+                e.data
+                for e in events
+                if e.type == "provider.usage" and e.data.get("provider") != "jev"
+            ]
+            attempts = sum(
+                e.type == "provider.attempt" and e.data.get("provider") == "llm" for e in events
+            )
+            result = (
+                AgentResult.model_validate(record.usage)
+                if record.usage
+                else AgentResult(findings_or_changes=None, completion_status="failed")
+            )
+            result.llm_calls = max(
+                result.llm_calls, attempts, sum(item.get("llm_calls", 0) for item in usage)
+            )
+            for name, key in (
+                ("tokens_in", "tokens_in"),
+                ("tokens_out", "tokens_out"),
+                ("tokens_cached", "tokens_cached"),
+                ("cache_usage_missing_calls", "cache_usage_missing_calls"),
+            ):
+                setattr(
+                    result,
+                    name,
+                    max(getattr(result, name), sum(item.get(key, 0) for item in usage)),
+                )
+            if (usage or attempts) and record.usage != result.model_dump():
+                record.usage = result.model_dump()
+                self.checkpoint_task(record)
+            return record
+
+    def save_exploration_task(self, run_id: str, task: AgentTask) -> AgentTask:
+        with self.transaction():
+            if (
+                self.run(run_id).stage_id != "S2"
+                or self.is_exploration_run(run_id)
+                or self.run(run_id).plan_contract != "exp-plan/v1"
+            ):
+                raise ValueError("exploration belongs to the framing stage")
+            if (
+                task.binding is None
+                or task.stage_id != "S2"
+                or task.cohort_id is not None
+                or task.package_ref
+                not in {
+                    self.run(run_id).source_snapshot_id,
+                    self.context(run_id).package.id if self.context(run_id) else None,
+                }
+                or set(task.allowed_tools) != {"read_sources", "lookup_evidence"}
+            ):
+                raise ValueError("invalid exploration task identity, tools or binding")
+            self.check_binding(run_id, task.binding)
+            try:
+                existing = self.task(task.id)
+            except KeyError:
+                existing = None
+            if existing:
+                if existing.run_id != run_id or existing.task != task:
+                    raise ValueError("exploration task is immutable")
+                return existing.task
+            self.save_task(run_id, TaskRecord(task=task, run_id=run_id))
+            self.update_run(run_id, actions_done=self.run(run_id).actions_done + 1)
+            return task
+
+    def bound_sources(self, run_id: str, binding: ArtifactBinding) -> list[Source]:
+        """Use the same frozen source universe for agent tools and persistence."""
+        raw = [
+            Source(id=a.ref, title=a.path, kind="note", text=a.text)
+            for a in self.source_snapshot(run_id).artifacts
+        ]
+        context = self.context(run_id, binding.context_revision)
+        decisions = self._artifact_records(
+            run_id, "researcher_decision", ResearcherDecision, binding.event_id
+        )
+        supplied = all_sources(context, decisions) if context else []
+        return list({s.id: s for s in supplied + raw}.values())
+
+    def _exploration_submission(
+        self, run_id: str, task_id: str
+    ) -> tuple[AgentTask, ExplorationSubmission]:
+        record = self.task(task_id)
+        run = self.run(run_id)
+        if run.plan_contract == "exp-plan/v1" and not self.is_exploration_run(run_id):
+            if run.stage_id != "S2" or record.task.stage_id != "S2":
+                raise ValueError("exploration belongs to the framing stage")
+        else:
+            raise ValueError("historical exploration is read/export only")
+        if record.run_id != run_id:
+            raise ValueError("exploration task belongs to another run")
+        task = record.task
+        if task.binding is None:
+            raise ValueError("exploration task requires a binding")
+        self.check_binding(run_id, task.binding)
+        if record.submission is None or record.submission.completion_status != "completed":
+            raise ValueError("exploration requires an accepted task submission")
+        submission = ExplorationSubmission.model_validate(record.submission.findings_or_changes)
+        refs = {s.id for s in self.bound_sources(run_id, task.binding)}
+        allowed = refs | {
+            observation.evidence_ref
+            for observation in self.accepted_observations(task_id)
+            if observation.binding == task.binding
+        }
+        validate_exploration(submission, allowed_evidence_refs=allowed, source_refs=refs)
+        return task, submission
+
+    def save_exploration_selection(self, run_id: str, selection: ExplorationSelection) -> None:
+        with self.transaction():
+            task, submission = self._exploration_submission(run_id, selection.task_id)
+            if selection.binding != task.binding:
+                raise ValueError("selection task binding differs")
+            if selection.choice not in recommendation_options(submission):
+                raise ValueError("illegal exploration recommendation")
+            existing = self.exploration_selection(run_id, task_id=task.id)
+            if existing:
+                if existing != selection:
+                    raise ValueError("exploration selection is immutable")
+                return
+            self._put_artifact(run_id, "exploration_selection", task.id, selection)
+            self.append_event(
+                run_id,
+                "decision",
+                {
+                    "by": "jev" if len(recommendation_options(submission)) > 1 else "code",
+                    "choice": selection.choice,
+                    "scope": "exploration",
+                },
+                task_id=task.id,
+            )
+            self.update_run(run_id, actions_done=self.run(run_id).actions_done + 1)
+
+    def exploration_selection(
+        self, run_id: str, *, task_id: str | None = None
+    ) -> ExplorationSelection | None:
+        records = self._artifact_records(run_id, "exploration_selection", ExplorationSelection)
+        if task_id is not None:
+            records = [r for r in records if r.task_id == task_id]
+        return records[-1] if records else None
+
+    def freeze_exploration(self, run_id: str, task_id: str) -> ExplorationSnapshot:
+        with self.transaction():
+            existing = self.exploration_snapshot(run_id, task_id=task_id)
+            if existing:
+                if existing.task_id != task_id:
+                    raise ValueError("frozen exploration task differs")
+                return existing
+            task, submission = self._exploration_submission(run_id, task_id)
+            selection = self.exploration_selection(run_id, task_id=task_id)
+            if (
+                selection is None
+                or selection.task_id != task_id
+                or selection.binding != task.binding
+                or selection.choice not in recommendation_options(submission)
+            ):
+                raise ValueError("exploration requires a bound legal selection")
+            snapshot = ExplorationSnapshot(
+                id=f"exploration:{task_id}",
+                schema_version=2,
+                run_id=run_id,
+                task_id=task_id,
+                binding=task.binding,
+                source=self.source_snapshot(run_id),
+                observations=[
+                    observation
+                    for observation in self.accepted_observations(task_id)
+                    if observation.binding == task.binding
+                ],
+                policy=None,
+                origin_issue_refs=task.issue_refs,
+                submission=submission,
+                selection=selection,
+                outcome="needs_input" if selection.choice == "DEFER" else "recommendation",
+                created_at=now(),
+            )
+            self._put_artifact(run_id, "exploration_snapshot", snapshot.id, snapshot)
+            return snapshot
+
+    def exploration_snapshot(
+        self, run_id: str, *, task_id: str | None = None
+    ) -> ExplorationSnapshot | None:
+        records = self._artifact_records(run_id, "exploration_snapshot", ExplorationSnapshot)
+        if task_id is not None:
+            records = [r for r in records if r.task_id == task_id]
+        elif not self.is_exploration_run(run_id):
+            binding = self.binding(run_id)
+            records = [
+                r
+                for r in records
+                if (
+                    r.binding.source_snapshot_id == binding.source_snapshot_id
+                    and r.binding.context_revision == binding.context_revision
+                )
+            ]
+        return records[-1] if records else None
+
+    def selected_candidate(self, run_id: str):
+        from experiment_design.exploration import SelectedCandidateInput
+
+        snapshot = self.exploration_snapshot(run_id)
+        if snapshot and snapshot.selection.choice.startswith("recommend:"):
+            return SelectedCandidateInput(
+                snapshot=snapshot, candidate_id=snapshot.selection.choice.removeprefix("recommend:")
+            )
+        return None
 
     def save_context(self, run_id: str, context: ResearchContext) -> ResearchContext:
         with self.transaction():
@@ -725,7 +977,11 @@ class Store:
                 },
                 "S6": {"decisions": [d.model_dump(mode="json") for d in snapshot.decisions]},
                 "S7": {
-                    "files": ["experiment_design.md", "experiment_design.json", "manifest.json"]
+                    "files": (
+                        ["exp_plan.md", "exp_plan.json", "manifest.json"]
+                        if self.run(run_id).plan_contract
+                        else ["experiment_design.md", "experiment_design.json", "manifest.json"]
+                    )
                 },
             },
         }
@@ -761,7 +1017,16 @@ class Store:
 
     def save_task(self, run_id: str, record: TaskRecord) -> TaskRecord:
         record = record.model_copy(update={"run_id": run_id})
-        return self._put_artifact(run_id, "task", record.task.id, record)
+        with self.transaction():
+            try:
+                previous = self._artifact(run_id, "task", record.task.id, TaskRecord)
+            except KeyError:
+                previous = None
+            if previous is not None and previous.submission is not None:
+                if previous != record:
+                    raise ValueError("accepted task checkpoint is immutable")
+                return previous
+            return self._put_artifact(run_id, "task", record.task.id, record)
 
     def task(self, task_id: str) -> TaskRecord:
         row = self.connection.execute(
@@ -850,6 +1115,20 @@ class Store:
                     and (
                         e.data["kind"] == "context"
                         or (
+                            self.run(run_id).plan_contract == "exp-plan/v1"
+                            and e.data["kind"] == "observation"
+                            and e.data["record"]["accepted"]
+                            and e.data["record"]["tool_name"]
+                            in {"compute_power", "lookup_evidence"}
+                            and e.data["record"]["binding"]["design_hash"] == selected.design_hash
+                            and e.data["record"]["binding"]["context_revision"]
+                            == binding.context_revision
+                            and not any(
+                                e.data["record"]["arguments"].get(k)
+                                for k in ("overrides", "ops", "design")
+                            )
+                        )
+                        or (
                             e.data["kind"] == "researcher_decision"
                             and e.data["record"]["purpose"] != "final_review"
                         )
@@ -886,7 +1165,7 @@ class Store:
                 for item in o.result.get("value", [])
                 if "request_hash" in item
             ]
-            return PublicationSnapshot(
+            snapshot = PublicationSnapshot(
                 run=run,
                 context=context,
                 version=selected,
@@ -899,3 +1178,44 @@ class Store:
                 binding=binding,
                 calculations=calculations,
             )
+            if run.get("plan_contract") == "exp-plan/v1":
+                cohorts = [
+                    c
+                    for c in self._artifact_records(run_id, "cohort", ReviewCohort, cutoff)
+                    if c.published_event_id is not None
+                    and c.binding.source_snapshot_id == binding.source_snapshot_id
+                    and c.binding.design_version <= selected.version
+                ]
+                published = {c.id for c in cohorts}
+                agents = {e.task_id: e.agent_id for e in history if e.type == "task.started"}
+                snapshot.review = {
+                    "cohorts": [c.model_dump(mode="json") for c in cohorts],
+                    "submissions": [
+                        {
+                            "task_id": t.task.id,
+                            "agent_id": agents.get(t.task.id),
+                            "cohort_id": t.task.cohort_id,
+                            "binding": t.task.binding.model_dump(mode="json"),
+                            "result": t.submission.model_dump(mode="json"),
+                        }
+                        for t in self._artifact_records(run_id, "task", TaskRecord, cutoff)
+                        if t.task.stage_id == "S4"
+                        and t.submission is not None
+                        and (t.task.cohort_id is None or t.task.cohort_id in published)
+                    ],
+                }
+                # Resolve exact cited references from the same frozen scientific records.
+                refs = set()
+                pending = [snapshot.model_dump(mode="json")]
+                while pending:
+                    item = pending.pop()
+                    if isinstance(item, dict):
+                        pending.extend(item.values())
+                    elif isinstance(item, list):
+                        pending.extend(item)
+                    elif isinstance(item, str) and item.startswith("tool:"):
+                        refs.add(item)
+                snapshot.observations = [
+                    o for o in observations if o.accepted and o.evidence_ref in refs
+                ]
+            return snapshot

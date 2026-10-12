@@ -3,15 +3,6 @@
 import json
 
 import pytest
-from conftest import package
-from fakes import ScriptedJudge, ScriptedLLM, submit
-from test_stage_pipeline import (
-    inspection_response,
-    source_context,
-    source_snapshot,
-    supported_design,
-)
-from test_workflow import chain
 
 from experiment_design.agents.tools import ToolContext, build_tools
 from experiment_design.config import RunConfig
@@ -22,12 +13,21 @@ from experiment_design.qualification import can_approve
 from experiment_design.runtime.store import Store
 from experiment_design.science.power import calculate
 from experiment_design.science.validators import validate_design
-from experiment_design.workflow import Deps, advance, approve, start_run
+from experiment_design.workflow import Deps, advance, start_run
+from tests.support.builders import package
+from tests.support.providers import ScriptedJudge, ScriptedLLM, submit
+from tests.support.scenarios import (
+    plan_body,
+    source_context,
+    source_snapshot,
+    supported_design,
+)
 
 
 @pytest.fixture
 def calculation_request():
     return CalculationRequest(
+        calculator_id=(supported_design()).analysis.method_id,
         binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
         scenario_id="base",
         design=supported_design(),
@@ -37,6 +37,7 @@ def calculation_request():
 @pytest.mark.parametrize("method", ["clustered_noninferiority_mixed_model", "unimplemented_method"])
 def test_unsupported_power_does_not_impose_pooled_t_assumptions(calculation_request, method):
     d = calculation_request.design
+    calculation_request.calculator_id = method
     d.analysis.method_id = method
     d.analysis.model = "Mixed model with class random intercept"
     d.analysis.common_variance = None
@@ -68,11 +69,12 @@ def test_unsupported_power_does_not_impose_pooled_t_assumptions(calculation_requ
 
 
 def test_missing_method_is_a_specification_gap_not_an_unsupported_sap(calculation_request):
+    calculation_request.calculator_id = None
     calculation_request.design.analysis.method_id = None
     result = calculate(calculation_request)
     assert result.status == "not_computed" and result.power is None
     assert len(result.reasons) == 1
-    assert "method_id is missing" in result.reasons[0]
+    assert "calculator_id is missing" in result.reasons[0]
     assert "not implemented" not in result.reasons[0]
 
 
@@ -181,38 +183,22 @@ def test_unsupported_computation_remains_a_disclosed_draft_limitation(tmp_path):
     draft.analysis.model = "Mixed model with class random intercept"
     draft.analysis.common_variance = None
     draft.sampling.unit_of_analysis = "student"
-    context = source_context()
+    context = source_context(method="Mixed model with class random intercept")
     context.unknowns = ["District SD and ICC remain unverified"]
-    links = chain()
-    links[-1].update(status="unclear", note="Operating characteristics remain unquantified")
     store = Store(tmp_path / "interpretation.db")
     deps = Deps(
         store,
         ScriptedLLM(
             [
                 submit("submit_understanding", {"context": context.model_dump(mode="json")}),
-                submit(
-                    "submit_design", {"design": draft.model_dump(mode="json"), "rationale": "Draft"}
-                ),
+                submit("submit_design", {"design": plan_body(draft), "summary": "Draft"}),
                 submit(
                     "submit_findings",
-                    {"chain": links, "findings": [], "summary": "Uncertainty retained"},
+                    {"findings": [], "summary": "Uncertainty retained"},
                 ),
                 submit(
                     "submit_findings",
                     {"findings": [], "scenarios_checked": [], "summary": "No new defect"},
-                ),
-                inspection_response(),
-                submit(
-                    "submit_handoff",
-                    {
-                        "handoff_complete": False,
-                        "risks": [
-                            "Power remains unquantified; district SD and ICC require verification"
-                        ],
-                        "findings": [],
-                        "evidence_refs": [],
-                    },
                 ),
             ]
         ),
@@ -220,30 +206,27 @@ def test_unsupported_computation_remains_a_disclosed_draft_limitation(tmp_path):
         RunConfig(),
     )
     try:
-        run = start_run(source_snapshot(), deps, {})
+        run = start_run(source_snapshot(method="Mixed model with class random intercept"), deps, {})
         assert advance(run, deps) == "REVIEWABLE"
         snapshot = store.publication_snapshot(run)
-        assert not snapshot.assessment.execution_ready
-        assert "District SD and ICC remain unverified" in snapshot.assessment.blockers
-        assert "unsupported or missing calculation" in can_approve(snapshot)
-        with pytest.raises(ValueError, match="unsupported or missing calculation"):
-            approve(store, run, 1, "PI")
+        assert snapshot.assessment.plan_complete
+        assert not can_approve(snapshot)
+        assert store.approvals(run) == []
         paths = export(store, run, tmp_path / "draft")
-        data = json.loads(paths["experiment_design.json"].read_bytes())
-        markdown = paths["experiment_design.md"].read_text(encoding="utf-8")
-        assert "Draft — not approved" in markdown and "not implemented" in markdown
+        data = json.loads(paths["exp_plan.json"].read_bytes())
+        markdown = paths["exp_plan.md"].read_text(encoding="utf-8")
+        assert "Draft" in markdown
         assert "common variance" not in markdown
         assert "District SD and ICC remain unverified" in markdown
-        assert data["computed"][0]["status"] == "not_computed"
-        assert data["computed"][0]["power"] is None
+        assert data["calculations"] == []
         assert data["design"]["analysis"]["model"] == "Mixed model with class random intercept"
         assert data["design"]["analysis"]["decision_rule"] == draft.analysis.decision_rule
-        assert data["provenance"]["approval"] is None and not store.approvals(run)
-        artifacts = json.loads(paths["stage_artifacts.json"].read_bytes())
+        assert data["approval"] is None and not store.approvals(run)
+        artifacts = store.stage_artifacts(run, snapshot)
         method = next(
             s for s in artifacts["stages"]["S4"]["submissions"] if s["agent_id"] == "methodologist"
         )
-        assert method["result"]["findings_or_changes"]["chain"][-1]["status"] == "unclear"
+        assert method["result"]["findings_or_changes"]["summary"] == "Uncertainty retained"
         assert store.run(run).stage_id == "S7" and store.run(run).status == "REVIEWABLE"
     finally:
         store.close()

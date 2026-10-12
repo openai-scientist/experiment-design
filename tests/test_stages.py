@@ -1,29 +1,13 @@
 import pytest
-from conftest import design, package
 
 from experiment_design.contracts import (
-    ArtifactBinding,
     ResearchContext,
     ResearcherDecision,
-    SourceArtifact,
-    SourceSnapshot,
     StageResult,
 )
 from experiment_design.runtime.store import Store
-
-
-def staged(store):
-    snapshot = SourceSnapshot(
-        id="source-1",
-        artifacts=[
-            SourceArtifact(ref="main", path="hypothesis.md", text="AI feedback", sha256="abc")
-        ],
-    )
-    run = store.create_staged_run(snapshot, {})
-    binding = ArtifactBinding(
-        source_snapshot_id=snapshot.id, event_id=store.events(run)[-1].event_id
-    )
-    return run, binding
+from tests.support.builders import design, package
+from tests.support.scenarios import staged
 
 
 def test_stage_context_survives_reopen(tmp_path):

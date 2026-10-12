@@ -1,10 +1,9 @@
 """Coordination needs scientific content to distinguish a draft from no useful work."""
 
-from test_stage_pipeline import source_context, source_snapshot, supported_design
-
 from experiment_design.config import RunConfig
 from experiment_design.runtime.store import Store
 from experiment_design.workflow import jev_state
+from tests.support.scenarios import source_context, source_snapshot, supported_design
 
 
 def test_jev_receives_committed_intent_and_provisional_draft_without_inventing_readiness(tmp_path):

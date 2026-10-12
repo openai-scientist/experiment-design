@@ -1,5 +1,4 @@
 import pytest
-from conftest import design, package
 
 from experiment_design.contracts import Patch, PatchOp
 from experiment_design.patch import (
@@ -9,6 +8,7 @@ from experiment_design.patch import (
     design_hash,
     initial_design,
 )
+from tests.support.builders import design, package
 
 
 def research_context():
@@ -184,7 +184,7 @@ def test_source_specified_sap_cannot_be_replaced_in_initial_draft():
             )
         },
     )
-    from test_stage_pipeline import supported_design
+    from tests.support.scenarios import supported_design
 
     with pytest.raises(PatchError, match="researcher-owned"):
         initial_design(p, supported_design(), context=context)

@@ -1,7 +1,6 @@
 import hashlib
 
 import pytest
-from fakes import ScriptedLLM, submit, tool_call
 
 from experiment_design.agents import understanding
 from experiment_design.agents.tools import ToolContext, build_tools
@@ -9,6 +8,8 @@ from experiment_design.contracts import AgentTask, TaskBudget
 from experiment_design.package import PackageFormatError, snapshot_sources
 from experiment_design.runtime.loop import SubmitRejected, run_agent
 from experiment_design.runtime.store import Store
+from tests.support.exploration import exploration_payload
+from tests.support.providers import ScriptedLLM, submit, tool_call
 
 
 def test_snapshot_preserves_freeform_bom_duplicates_and_missing_attachment(tmp_path):
@@ -370,10 +371,9 @@ def test_applied_reply_can_explicitly_resolve_no_unknowns(tmp_path):
 
 
 def test_understanding_stage_merges_resolution_audit_without_conferring_verification(tmp_path):
-    from fakes import ScriptedJudge
-
     from experiment_design.config import RunConfig
     from experiment_design.workflow import Deps, run_stage
+    from tests.support.providers import ScriptedJudge
 
     store, rid, _, data = applied_understanding(tmp_path)
     decision = store.decision(rid, "confirmed-margin")
@@ -385,7 +385,15 @@ def test_understanding_stage_merges_resolution_audit_without_conferring_verifica
         "S2",
         Deps(
             store,
-            ScriptedLLM([submit("submit_understanding", data)]),
+            ScriptedLLM(
+                [
+                    submit("submit_understanding", data),
+                    submit(
+                        "submit_exploration",
+                        exploration_payload(source_ref=store.source_snapshot(rid).artifacts[0].ref),
+                    ),
+                ]
+            ),
             ScriptedJudge([]),
             RunConfig(),
         ),
@@ -500,10 +508,9 @@ def test_understanding_cannot_forge_workflow_metadata_on_a_proposal(tmp_path, me
 
 
 def test_workflow_recorded_unknown_resolution_cannot_be_resurrected(tmp_path):
-    from fakes import ScriptedJudge
-
     from experiment_design.config import RunConfig
     from experiment_design.workflow import Deps, run_stage
+    from tests.support.providers import ScriptedJudge
 
     store, rid, ctx, data = applied_understanding(tmp_path)
     store.update_run(rid, stage_id="S2")
@@ -512,7 +519,15 @@ def test_workflow_recorded_unknown_resolution_cannot_be_resurrected(tmp_path):
         "S2",
         Deps(
             store,
-            ScriptedLLM([submit("submit_understanding", data)]),
+            ScriptedLLM(
+                [
+                    submit("submit_understanding", data),
+                    submit(
+                        "submit_exploration",
+                        exploration_payload(source_ref=store.source_snapshot(rid).artifacts[0].ref),
+                    ),
+                ]
+            ),
             ScriptedJudge([]),
             RunConfig(),
         ),

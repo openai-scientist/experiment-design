@@ -85,7 +85,7 @@ def review_actions(store: Store, run_id: str, cfg) -> list[str]:
         )
         and run.revisions_done < cfg.max_revisions
     ):
-        actions.append("REVISE")
+        actions.extend(["REVISE", "REEXPLORE"])
     if any(
         d.status in {"IDENTIFIED", "EXPLORING"} and (d.options or d.dependencies)
         for d in store.decisions(run_id)

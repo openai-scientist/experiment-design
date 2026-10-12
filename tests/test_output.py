@@ -3,18 +3,19 @@ import json
 import re
 
 import pytest
-from conftest import design, package
 
 from experiment_design.contracts import Quantity, ResearcherRequest, ReviewIssue
 from experiment_design.output import export, render_markdown
 from experiment_design.patch import design_hash
 from experiment_design.runtime.store import Store
+from tests.support.builders import design, package
+from tests.support.history import create_historical_run, save_historical_request
 
 
 @pytest.fixture
 def state(tmp_path):
     store = Store(tmp_path / "exd.db")
-    run = store.create_run(package(), {})
+    run = create_historical_run(store, package(), {})
     store.add_version(run, design(), author="design", parent=None)
     store.update_run(run, status="REVIEWABLE")
     yield store, run
@@ -50,13 +51,14 @@ def render(state, status="REVIEWABLE", issues=(), requests=()):
 def test_render_has_no_internal_ids(state):
     store, run = state
     concern = store.save_issue(issue(run))
-    request = store.save_request(
+    request = save_historical_request(
+        store,
         ResearcherRequest(
             run_id=run,
             kind="input",
             question="Confirm the class correlation",
             raised_by="design",
-        )
+        ),
     )
     md = render(state, issues=[concern], requests=[request])
     assert not re.search(r'\bI\d+\b|\bR\d+\b|[0-9a-f]{64}|\{"', md)
@@ -120,14 +122,15 @@ def test_export_old_version_shows_concerns_as_of_that_version(state, tmp_path):
     store.add_version(run, d, author="design", parent=1)
     concern.status, concern.addressed_in = "resolved", 2
     store.save_issue(concern)
-    store.save_request(
+    save_historical_request(
+        store,
         ResearcherRequest(
             run_id=run,
             kind="input",
             question="Confirm the revised analysis",
             status="open",
             raised_by="design",
-        )
+        ),
     )
     old = export(store, run, tmp_path / "old", version=1)
     latest = export(store, run, tmp_path / "latest")

@@ -1,26 +1,13 @@
 import json
 
 import pytest
-from fakes import ScriptedJudge, ScriptedLLM, submit, tool_call
 
 from experiment_design.config import RunConfig
-from experiment_design.contracts import ReviewIssue
+from experiment_design.contracts import Design, ReviewIssue
 from experiment_design.runtime.store import Store
 from experiment_design.workflow import Deps, advance, jev_state, legal_actions
-
-
-def chain():
-    return [
-        {"link": link, "status": "ok", "note": "Consistent", "evidence_refs": []}
-        for link in (
-            "hypothesis→estimand",
-            "estimand→unit",
-            "unit→sampling",
-            "sampling→metric",
-            "metric→analysis",
-            "analysis→decision_rule",
-        )
-    ]
+from tests.support.providers import ScriptedJudge, ScriptedLLM, submit, tool_call
+from tests.support.scenarios import plan_body
 
 
 def finding():
@@ -35,19 +22,17 @@ def finding():
 
 
 def initial():
-    from test_stage_pipeline import supported_design
+    from tests.support.scenarios import supported_design
 
     return submit(
         "submit_design",
-        {"design": supported_design().model_dump(mode="json"), "rationale": "Draft"},
+        {"design": plan_body(supported_design()), "summary": "Draft"},
     )
 
 
 def review(findings=()):
     return [
-        submit(
-            "submit_findings", {"chain": chain(), "findings": list(findings), "summary": "Method"}
-        ),
+        submit("submit_findings", {"findings": list(findings), "summary": "Method"}),
         submit("submit_findings", {"findings": [], "scenarios_checked": [], "summary": "Skeptic"}),
     ]
 
@@ -102,14 +87,16 @@ def deps(store, responses=(), choices=(), **config):
 
 
 def saved_run(store, **fields):
-    from test_stage_pipeline import source_context, source_snapshot, supported_design
+    from tests.support.scenarios import source_context, source_snapshot, supported_design
 
     run = store.create_staged_run(source_snapshot(), {})
     store.save_context(
         run,
         source_context(),
     )
-    store.add_version(run, supported_design(), author="design", parent=None)
+    store.add_version(
+        run, Design.model_validate(plan_body(supported_design())), author="design", parent=None
+    )
     store.update_run(run, stage_id="S4", **fields)
     return run
 
@@ -123,7 +110,6 @@ def saved_issue(store, run, **fields):
 
 
 def test_happy_path_review_revise_verify_reviewable(state):
-    from test_stage_pipeline import inspection_response
 
     run = saved_run(state)
     d = deps(
@@ -131,19 +117,22 @@ def test_happy_path_review_revise_verify_reviewable(state):
         [
             *review([finding()]),
             revision(),
-            tool_call("compute_power", {}, "verify-power"),
-            verification(),
-            inspection_response(),
-            submit(
-                "submit_handoff",
-                {"handoff_complete": True, "risks": [], "findings": [], "evidence_refs": []},
+            tool_call(
+                "compute_power",
+                {
+                    "calculator_id": "cluster_equal_size_t",
+                },
+                "verify-power",
             ),
+            verification(),
+            *review(),
         ],
         [
             {"next_action": "REVIEW"},
             {"next_action": "REVISE"},
             {"next_action": "VERIFY"},
             {"I1": "resolved"},
+            {"next_action": "REVIEW"},
             {"next_action": "QUALIFY"},
         ],
     )
@@ -224,7 +213,16 @@ def test_verify_uncertain_remains_material_and_cannot_qualify(state):
     saved_issue(state, run, status="addressed", addressed_in=1)
     d = deps(
         state,
-        [tool_call("compute_power", {}, "verify-power"), verification("uncertain")],
+        [
+            tool_call(
+                "compute_power",
+                {
+                    "calculator_id": "cluster_equal_size_t",
+                },
+                "verify-power",
+            ),
+            verification("uncertain"),
+        ],
         [{"next_action": "VERIFY"}, {"I1": "unresolved"}, {"next_action": "STOP"}],
     )
     assert advance(run, d) == "INCONCLUSIVE"
@@ -254,11 +252,11 @@ def test_resume_revision_commit_failure_reuses_submission(state, monkeypatch):
     assert state.version(run).version == 2 and state.issues(run)[0].status == "addressed"
 
 
-def test_optional_review_preserves_verification_and_handoff_allowance(state):
+def test_optional_review_preserves_independent_review_allowance(state):
     run = saved_run(state)
     d = deps(state, [], [{"next_action": "REVIEW"}], llm_tokens=100, task_max_tokens=60)
     assert advance(run, d) == "BUDGET_STOP"
     assert d.llm.calls == []
     stop = [e for e in state.events(run) if e.type == "budget.stop"][-1].data
-    assert stop["reason"] == "reserved_verification_and_handoff"
+    assert stop["reason"] == "reserved_independent_review"
     assert stop["tokens_reserved"] == 120

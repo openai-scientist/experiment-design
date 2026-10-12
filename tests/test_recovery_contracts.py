@@ -1,14 +1,6 @@
 import json
 
 import pytest
-from fakes import ScriptedJudge, ScriptedLLM, submit, tool_call
-from test_stage_pipeline import (
-    normal_responses,
-    review_responses,
-    source_context,
-    source_snapshot,
-    supported_design,
-)
 
 from experiment_design.config import RunConfig
 from experiment_design.contracts import DecisionResponse, FieldAnnotation, Patch, ResearcherDecision
@@ -17,6 +9,15 @@ from experiment_design.patch import PatchError, apply_patch, initial_design
 from experiment_design.runtime.llm import LLMError
 from experiment_design.runtime.store import Store
 from experiment_design.workflow import Deps, advance, approve, run_stage, start_run
+from tests.support.providers import ScriptedJudge, ScriptedLLM, submit
+from tests.support.scenarios import (
+    normal_responses,
+    plan_body,
+    review_responses,
+    source_context,
+    source_snapshot,
+    supported_design,
+)
 
 
 def test_measurement_cannot_replace_source_owned_primary_outcome():
@@ -61,7 +62,7 @@ def test_initial_alpha_preserves_source_commitment():
 
 
 def test_margin_interpretation_cannot_change_nested_method(tmp_path):
-    from test_decisions import decision_state
+    from tests.support.scenarios import decision_state
 
     store, run, context, decision = decision_state(tmp_path)
     answered = respond(
@@ -206,17 +207,19 @@ def test_missing_protocol_and_stopping_cannot_be_complete(tmp_path, missing):
         design.analysis.stopping = None
     else:
         setattr(design.protocol, missing, [])
-    responses[1] = submit("submit_design", {"design": design.model_dump(), "rationale": "Draft"})
+    responses[1] = submit("submit_design", {"design": plan_body(design), "summary": "Draft"})
     deps = Deps(
         store,
         ScriptedLLM(responses),
-        ScriptedJudge([{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}]),
+        ScriptedJudge(
+            [{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}, {"next_action": "REVIEW_PLAN"}]
+        ),
         RunConfig(),
     )
     run = start_run(source_snapshot(), deps, {})
     assert advance(run, deps) == "REVIEWABLE"
-    assert not store.assessment(run).handoff_complete
-    assert not store.assessment(run).execution_ready
+    assert not store.assessment(run).plan_complete
+    assert not store.assessment(run).plan_complete
     with pytest.raises(ValueError):
         approve(store, run, 1, "PI")
     assert not store.approvals(run)
@@ -239,54 +242,27 @@ def test_jev_exhaustion_is_budget_stop(tmp_path):
     store.close()
 
 
-def test_handoff_complete_requires_reading_bound_design(tmp_path):
+def test_unreviewed_qualification_returns_to_critique_without_provider_work(tmp_path):
+    from experiment_design.contracts import Design
+
     store = Store(tmp_path / "inspection.db")
     run = store.create_staged_run(source_snapshot(), {})
     store.save_context(run, source_context())
-    store.add_version(run, supported_design(), author="design", parent=None)
+    store.add_version(
+        run, Design.model_validate(plan_body(supported_design())), author="design", parent=None
+    )
     store.update_run(run, stage_id="S5")
-    deps = Deps(
-        store,
-        ScriptedLLM(
-            [
-                tool_call("compute_power", {}),
-                normal_responses()[-1],
-                tool_call("read_design", {}),
-                normal_responses()[-1],
-            ]
-        ),
-        ScriptedJudge([]),
-        RunConfig(),
-    )
+    deps = Deps(store, ScriptedLLM([]), ScriptedJudge([{"next_action": "CRITIQUE"}]), RunConfig())
+    result = run_stage(run, "S5", deps)
+    assert result.status == "REVISION_REQUIRED" and store.run(run).stage_id == "S4"
+    assert result.issue_refs and deps.llm.calls == []
+    assert store.assessment(run).plan_complete is False
+    assert store.assessment(run).review_status == "NOT_READY"
+    deps.llm = ScriptedLLM(review_responses())
+    deps.judge = ScriptedJudge([{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}])
+    result = run_stage(run, "S4", deps)
+    store.commit_stage(run, result, "S5")
     assert run_stage(run, "S5", deps).status == "COMPLETE"
-    assert len(deps.llm.calls) == 4
-    assert "inspect" in deps.llm.calls[2][0][-1]["content"].lower()
-    store.close()
-
-
-@pytest.mark.parametrize("change", ["assessment", "applied"])
-def test_final_review_uses_current_assessment_and_unanswered_decision(tmp_path, change):
-    store = Store(tmp_path / "final.db")
-    deps = Deps(
-        store,
-        ScriptedLLM(normal_responses()),
-        ScriptedJudge([{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}]),
-        RunConfig(),
-    )
-    run = start_run(source_snapshot(), deps, {})
-    advance(run, deps)
-    old = store.decisions(run)[-1]
-    assessment = store.assessment(run)
-    if change == "applied":
-        old.status = "APPLIED"
-        store.save_decision(old)
-    else:
-        assessment = assessment.model_copy(
-            update={"id": "fresh-assessment", "binding": store.binding(run)}
-        )
-        store.save_assessment(assessment)
-    result = run_stage(run, "S6", deps)
-    presented = store.decision(run, result.output_refs[0])
-    assert presented.id != old.id and presented.status == "AWAITING_RESEARCHER"
-    assert presented.dependencies == [assessment.id]
+    assert store.assessment(run).plan_complete is True
+    assert len(deps.llm.calls) == 2
     store.close()

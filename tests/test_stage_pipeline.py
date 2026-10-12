@@ -1,109 +1,22 @@
-import hashlib
-
 import pytest
-from conftest import design, package
-from fakes import ScriptedJudge, ScriptedLLM, submit, tool_call
 
 from experiment_design.config import RunConfig
-from experiment_design.contracts import SourceArtifact, SourceSnapshot
 from experiment_design.runtime.llm import LLMError
 from experiment_design.runtime.store import Store
 from experiment_design.workflow import Deps, WorkflowError, advance, approve, start_run
-
-
-def source_snapshot():
-    from experiment_design.patch import package_claim
-
-    text = "\n".join(str(v) for v in package_claim(package()).values())
-    text += (
-        "\nMargin 3 points. Standard deviation 10 points. "
-        "Class size 25. ICC 0.10. At most 60 classes."
-    )
-    return SourceSnapshot(
-        id="source-1",
-        artifacts=[
-            SourceArtifact(
-                ref="S1",
-                path="hypothesis.md",
-                text=text,
-                sha256=hashlib.sha256(text.encode()).hexdigest(),
-            )
-        ],
-    )
-
-
-def supported_design():
-    d = design()
-    d.scenarios[0].sd.source_span = "Standard deviation 10 points"
-    d.sampling.cluster.icc.source_span = "ICC 0.10"
-    d.analysis.method_id = "cluster_equal_size_t"
-    d.analysis.model = "Pooled t test of cluster means"
-    d.analysis.common_variance = True
-    d.sampling.unit_of_analysis = "class"
-    d.sampling.cluster.clusters_per_arm = 25
-    d.sampling.cluster.equal_size = d.sampling.cluster.independent_clusters = True
-    return d
-
-
-def source_context():
-    from experiment_design.contracts import FieldAnnotation, ResearchContext
-    from experiment_design.patch import package_claim
-
-    p = package()
-    p.constraints = ["At most 60 classes"]
-    return ResearchContext(
-        id="context",
-        revision=1,
-        source_snapshot_id="source-1",
-        package=p,
-        field_annotations={
-            key: FieldAnnotation(
-                status="source-stated",
-                source_ref="S1",
-                source_span="Margin 3 points" if key == "margin" else str(value),
-            )
-            for key, value in package_claim(p).items()
-            if value is not None
-        },
-    )
-
-
-def understanding_response():
-    return submit(
-        "submit_understanding",
-        {"context": source_context().model_dump(mode="json"), "decisions": []},
-    )
-
-
-def review_responses():
-    from test_workflow import chain
-
-    return [
-        submit("submit_findings", {"chain": chain(), "findings": [], "summary": "Method"}),
-        submit("submit_findings", {"findings": [], "scenarios_checked": [], "summary": "Skeptic"}),
-    ]
-
-
-def normal_responses():
-    return [
-        understanding_response(),
-        submit(
-            "submit_design",
-            {"design": supported_design().model_dump(mode="json"), "rationale": "Draft"},
-        ),
-        *review_responses(),
-        inspection_response(),
-        submit(
-            "submit_handoff",
-            {"handoff_complete": True, "risks": [], "findings": [], "evidence_refs": []},
-        ),
-    ]
-
-
-def inspection_response():
-    response = tool_call("read_design", {})
-    response.tool_calls.extend(tool_call("compute_power", {}).tool_calls)
-    return response
+from tests.support.builders import package
+from tests.support.history import create_historical_run
+from tests.support.providers import ScriptedJudge, ScriptedLLM, submit, tool_call
+from tests.support.scenarios import (
+    inspection_response,
+    normal_responses,
+    plan_body,
+    review_responses,
+    source_context,
+    source_snapshot,
+    supported_design,
+    understanding_response,
+)
 
 
 def test_stages_reach_exact_researcher_review_and_publication_wait(tmp_path):
@@ -129,7 +42,7 @@ def test_stages_reach_exact_researcher_review_and_publication_wait(tmp_path):
         for e in store.events(run)
         if e.type == "stage.result" and e.data["status"] == "COMPLETE"
     ] == ["S1", "S2", "S3", "S4", "S5", "S6"]
-    assert store.assessment(run).handoff_complete
+    assert store.assessment(run).plan_complete
     store.backup(tmp_path / "backup.db")
     reopened = Store(tmp_path / "backup.db")
     assert (
@@ -156,8 +69,8 @@ def test_proposed_margin_cannot_reach_final_approval(tmp_path):
         RunConfig(),
     )
     run = start_run(source_snapshot(), deps, {})
-    assert advance(run, deps) == "REVIEWABLE"
-    assert not store.assessment(run).execution_ready
+    assert advance(run, deps) == "NEEDS_RESEARCHER"
+    assert not store.assessment(run).plan_complete
     assert any("margin" in reason for reason in store.assessment(run).blockers)
     with pytest.raises((ValueError, WorkflowError)):
         approve(store, run, 1, "PI")
@@ -184,7 +97,7 @@ def test_resume_between_reviews_keeps_committed_first_submission(tmp_path):
         RunConfig(),
     )
     assert advance(run, resumed) == "REVIEWABLE"
-    assert len(resumed.llm.calls) == 3
+    assert len(resumed.llm.calls) == 1
     started = [
         e for e in store.events(run) if e.type == "task.started" and e.agent_id == "methodologist"
     ]
@@ -192,12 +105,47 @@ def test_resume_between_reviews_keeps_committed_first_submission(tmp_path):
     store.close()
 
 
-def test_legacy_resume_refused_without_mutation(tmp_path):
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_legacy_resume_refused_without_mutation(tmp_path, schema_version):
+    from experiment_design.contracts import DecisionResponse, ResearcherDecision
+    from experiment_design.decisions import respond
+
     store = Store(tmp_path / "legacy.db")
-    run = store.create_run(package(), {})
+    if schema_version == 1:
+        run = create_historical_run(store, package(), {})
+    else:
+        run = store.create_staged_run(source_snapshot(), {})
+        historical = store.run(run).model_copy(update={"plan_contract": None})
+        store.connection.execute(
+            "UPDATE runs SET data=? WHERE run_id=?", (historical.model_dump_json(), run)
+        )
+        store.save_decision(
+            ResearcherDecision(
+                id="old-question",
+                run_id=run,
+                binding=store.binding(run),
+                status="AWAITING_RESEARCHER",
+                problem="Old clarification",
+                affected_paths=[],
+            )
+        )
     before = store.events(run)
-    with pytest.raises(WorkflowError, match="schema"):
+    with pytest.raises(WorkflowError, match="schema|read/export only"):
         advance(run, Deps(store, ScriptedLLM([]), ScriptedJudge([]), RunConfig()))
+    assert store.events(run) == before
+    with pytest.raises(ValueError, match="read/export only"):
+        respond(
+            store,
+            run,
+            "old-question",
+            DecisionResponse(
+                revision=1,
+                action="PROPOSE_ALTERNATIVE",
+                text="New intent",
+                researcher="PI",
+                response_id="reply",
+            ),
+        )
     assert store.events(run) == before
     store.close()
 
@@ -299,7 +247,7 @@ def test_agent_decision_is_presented_against_committed_context(tmp_path):
     store.close()
 
 
-def test_understanding_stage_commit_failure_keeps_submission_and_rolls_back_context(
+def test_understanding_stage_commit_failure_keeps_accepted_framing_for_resume(
     tmp_path, monkeypatch
 ):
     store = Store(tmp_path / "atomic.db")
@@ -315,7 +263,8 @@ def test_understanding_stage_commit_failure_keeps_submission_and_rolls_back_cont
     monkeypatch.setattr(store, "commit_stage", interrupt)
     with pytest.raises(RuntimeError, match="stage commit"):
         advance(run, deps)
-    assert store.context(run) is None
+    assert store.context(run).revision == 1
+    assert store.run(run).stage_id == "S2"
     assert store.usage(run).llm_calls == 1
     monkeypatch.setattr(store, "commit_stage", commit)
     resumed = Deps(
@@ -325,14 +274,13 @@ def test_understanding_stage_commit_failure_keeps_submission_and_rolls_back_cont
         RunConfig(),
     )
     assert advance(run, resumed) == "REVIEWABLE"
-    assert len(resumed.llm.calls) == 5
+    assert len(resumed.llm.calls) == 3
     store.close()
 
 
 def test_context_change_during_drafting_cannot_commit_a_stale_initial_design(tmp_path):
-    from test_stages import staged
-
     from experiment_design.workflow import run_stage
+    from tests.support.scenarios import staged
 
     store = Store(tmp_path / "stale-draft.db")
     run, _ = staged(store)
@@ -347,7 +295,7 @@ def test_context_change_during_drafting_cannot_commit_a_stale_initial_design(tmp
         store.save_context(run, changed)
         return submit(
             "submit_design",
-            {"design": supported_design().model_dump(mode="json"), "rationale": "Earlier context"},
+            {"design": plan_body(supported_design()), "summary": "Earlier context"},
         )
 
     deps = Deps(store, ScriptedLLM([compose]), ScriptedJudge([]), RunConfig())
@@ -361,11 +309,10 @@ def test_context_change_during_drafting_cannot_commit_a_stale_initial_design(tmp
 def test_initial_draft_verification_receives_recorded_researcher_intent(tmp_path):
     import json
 
-    from test_stages import staged
-
     from experiment_design.contracts import DecisionResponse, ResearcherDecision
     from experiment_design.decisions import apply_decision, interpret, respond
     from experiment_design.workflow import run_stage
+    from tests.support.scenarios import staged
 
     store = Store(tmp_path / "initial-verification.db")
     run, _ = staged(store)
@@ -421,7 +368,7 @@ def test_initial_draft_verification_receives_recorded_researcher_intent(tmp_path
                 [
                     submit(
                         "submit_design",
-                        {"design": d.model_dump(mode="json"), "rationale": "Clarified draft"},
+                        {"design": plan_body(d), "summary": "Clarified draft"},
                     )
                 ]
             ),
@@ -586,8 +533,6 @@ def test_each_researcher_decision_keeps_its_comparison_and_verification(tmp_path
 def test_researcher_reconciliation_flows_through_scientific_review_to_publication(tmp_path):
     import json
 
-    from test_workflow import chain
-
     from experiment_design.contracts import Assumption, DecisionResponse
     from experiment_design.decisions import respond
     from experiment_design.output import export
@@ -602,13 +547,12 @@ def test_researcher_reconciliation_flows_through_scientific_review_to_publicatio
 
     def method_review(messages, tools):
         observations = [json.loads(m["content"]) for m in messages if m["role"] == "tool"]
-        assert observations[0]["result"]["analysis"]["method_id"] == "cluster_equal_size_t"
+        assert observations[0]["result"]["analysis"]["model"] == "Pooled t test of cluster means"
         assert observations[1]["result"][0]["status"] == "computed"
         ref = observations[0]["evidence_ref"]
         return submit(
             "submit_findings",
             {
-                "chain": chain(),
                 "summary": "Inspected class-mean SAP and missingness protocol",
                 "findings": [
                     {
@@ -627,8 +571,8 @@ def test_researcher_reconciliation_flows_through_scientific_review_to_publicatio
         return submit(
             "submit_design",
             {
-                "design": draft.model_dump(mode="json"),
-                "rationale": "Supported planning draft",
+                "design": plan_body(draft),
+                "summary": "Supported planning draft",
                 "decisions": [
                     {
                         "problem": "Clarify ITT estimand",
@@ -756,6 +700,7 @@ def test_researcher_reconciliation_flows_through_scientific_review_to_publicatio
             tool_call(
                 "compute_power",
                 {
+                    "calculator_id": "cluster_equal_size_t",
                     "overrides": {
                         "sd": {
                             "value": 12,
@@ -763,7 +708,7 @@ def test_researcher_reconciliation_flows_through_scientific_review_to_publicatio
                             "provenance": "assumption",
                             "note": "Sensitivity only",
                         },
-                    }
+                    },
                 },
             ).tool_calls
         )
@@ -827,10 +772,6 @@ def test_researcher_reconciliation_flows_through_scientific_review_to_publicatio
                 inspection_response(),
                 *review_responses(),
                 inspection_response(),
-                submit(
-                    "submit_handoff",
-                    {"handoff_complete": True, "risks": [], "findings": [], "evidence_refs": []},
-                ),
             ]
         ),
         ReconciliationJudge(),
@@ -878,11 +819,10 @@ def test_researcher_reconciliation_flows_through_scientific_review_to_publicatio
         "methodologist",
         "skeptic",
         "verifier",
-        "handoff",
     }
     approve(store, run, 3, "PI")
     paths = export(store, run, tmp_path / "publication")
-    assert limitation in paths["experiment_design.md"].read_text(encoding="utf-8")
+    assert limitation in paths["exp_plan.md"].read_text(encoding="utf-8")
     assert store.run(run).stage_id == "S7"
     assert {
         e.data["stage_id"]
@@ -893,10 +833,9 @@ def test_researcher_reconciliation_flows_through_scientific_review_to_publicatio
 
 
 def test_partial_decision_answers_resume_only_independent_work(tmp_path):
-    from test_decisions import decision_state
-
     from experiment_design.contracts import DecisionResponse, ResearcherDecision
     from experiment_design.decisions import respond
+    from tests.support.scenarios import decision_state
 
     store, run, context, decision = decision_state(tmp_path)
     store.update_run(run, stage_id="S4", status="NEEDS_RESEARCHER")
@@ -945,10 +884,9 @@ def test_partial_decision_answers_resume_only_independent_work(tmp_path):
 
 
 def test_two_independent_recorded_answers_apply_without_stale_failure(tmp_path):
-    from test_decisions import decision_state
-
     from experiment_design.contracts import DecisionResponse, ResearcherDecision
     from experiment_design.decisions import respond
+    from tests.support.scenarios import decision_state
 
     store, run, context, first = decision_state(tmp_path)
     store.update_run(run, stage_id="S4", status="NEEDS_RESEARCHER")
@@ -1013,10 +951,9 @@ def test_two_independent_recorded_answers_apply_without_stale_failure(tmp_path):
 
 
 def test_overlapping_recorded_answer_is_represented_with_raw_reply(tmp_path):
-    from test_decisions import decision_state
-
     from experiment_design.contracts import DecisionResponse, ResearcherDecision
     from experiment_design.decisions import respond
+    from tests.support.scenarios import decision_state
 
     store, run, context, first = decision_state(tmp_path)
     store.update_run(run, stage_id="S4")
@@ -1123,46 +1060,84 @@ def test_failed_understanding_keeps_source_and_failure_reason(tmp_path):
     store.close()
 
 
-def test_qualification_records_handoff_issue_for_pending_researcher_review(tmp_path):
-    store = Store(tmp_path / "return.db")
-    responses = normal_responses()[:5]
-    responses.append(
-        submit(
-            "submit_handoff",
+def test_qualification_feedback_redesigns_and_requalifies_in_one_run(tmp_path):
+    import json
+
+    store = Store(tmp_path / "feedback.db")
+    draft = supported_design()
+    draft.measurement.data_collection = None
+
+    def verified(messages, tools):
+        observation = json.loads(
+            next(m["content"] for m in reversed(messages) if m["role"] == "tool")
+        )
+        return submit(
+            "submit_verdicts",
             {
-                "handoff_complete": False,
-                "risks": ["Data collection responsibility is unresolved"],
-                "evidence_refs": [],
-                "findings": [
+                "verdicts": [
                     {
-                        "severity": "MAJOR",
-                        "paths": ["/measurement/data_collection"],
-                        "mechanism": "Data collection responsibility is unresolved",
-                        "consequence": "Implementation needs another scientific choice",
-                        "basis": "reasoning",
-                        "evidence_refs": ["S1"],
+                        "issue_id": "I1",
+                        "verdict": "resolved",
+                        "grounds": "The actual child patch specifies data collection",
+                        "evidence_refs": [observation["evidence_ref"]],
                     }
                 ],
+                "regressions": [],
             },
         )
+
+    responses = normal_responses()
+    responses[1] = submit(
+        "submit_design", {"design": plan_body(draft), "summary": "Incomplete draft"}
     )
+    responses += [
+        submit(
+            "submit_revision",
+            {
+                "patch": {
+                    "ops": [
+                        {
+                            "path": "/measurement/data_collection",
+                            "value": "Collect end-of-term test scores using the specified rubric",
+                        }
+                    ],
+                    "addresses": ["I1"],
+                    "rationale": "Fill the qualification gap",
+                }
+            },
+        ),
+        *review_responses(),
+        tool_call("read_diff", {"from_version": 1, "to_version": 2}),
+        verified,
+    ]
     deps = Deps(
         store,
         ScriptedLLM(responses),
         ScriptedJudge(
-            [{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}, {"next_action": "STOP"}]
+            [
+                {"next_action": "REVIEW"},
+                {"next_action": "QUALIFY"},
+                {"next_action": "REDESIGN"},
+                {"next_action": "REVIEW"},
+                {"next_action": "VERIFY"},
+                {"I1": "resolved"},
+                {"next_action": "QUALIFY"},
+            ]
         ),
         RunConfig(),
     )
     run = start_run(source_snapshot(), deps, {})
     assert advance(run, deps) == "REVIEWABLE"
-    issue = store.issues(run)[0]
-    event = next(
-        e for e in store.events(run) if e.type == "stage.result" and e.data.get("stage_id") == "S5"
-    )
-    assert event.data["target"] == "S6" and issue.id in event.data["issue_refs"]
-    assert store.run(run).stage_id == "S6" and not store.assessment(run).handoff_complete
-    assert not store.assessment(run).execution_ready
+    assert store.version(run).version == 2 and store.assessment(run).plan_complete
+    assert store.issues(run)[0].status == "resolved"
+    returns = [
+        e
+        for e in store.events(run)
+        if e.type == "stage.result" and e.data["stage_id"] == "S5" and e.data["target"] == "S3"
+    ]
+    assert len(returns) == 1 and returns[0].data["originating_ref"] == "I1"
+    assert store.connection.execute("SELECT count(*) FROM runs").fetchone()[0] == 1
+    assert not any(e.agent_id == "handoff" for e in store.events(run))
     store.close()
 
 
@@ -1187,9 +1162,9 @@ def test_qualification_presents_required_identified_decision(tmp_path):
     )
     deps = Deps(store, ScriptedLLM(normal_responses()[4:]), ScriptedJudge([]), RunConfig())
     result = run_stage(run, "S5", deps)
-    assert result.status == "COMPLETE"
+    assert result.status == "NEEDS_INPUT"
     assert store.assessment(run).review_status == "NEEDS_INPUT"
-    assert not store.assessment(run).execution_ready
+    assert not store.assessment(run).plan_complete
     presented = store.decision(run, decision.id)
     assert presented.status == "AWAITING_RESEARCHER"
     reply = respond(
@@ -1208,38 +1183,38 @@ def test_qualification_presents_required_identified_decision(tmp_path):
     store.close()
 
 
-def test_resolved_handoff_issue_gets_fresh_inspection(tmp_path):
+def test_resolved_scientific_issue_gets_fresh_qualification(tmp_path):
+    from experiment_design.contracts import ReviewIssue
     from experiment_design.workflow import run_stage
 
-    store = Store(tmp_path / "inspection.db")
-    run = store.create_staged_run(source_snapshot(), {})
-    store.save_context(run, source_context())
-    store.add_version(run, supported_design(), author="design", parent=None)
-    store.update_run(run, stage_id="S5")
-    finding = {
-        "severity": "MAJOR",
-        "paths": ["/measurement/data_collection"],
-        "mechanism": "Data collection needs confirmation",
-        "consequence": "Cannot execute",
-        "basis": "reasoning",
-        "evidence_refs": ["S1"],
-    }
-    first = submit(
-        "submit_handoff",
-        {"handoff_complete": False, "risks": [], "findings": [finding], "evidence_refs": []},
-    )
+    store = Store(tmp_path / "qualification.db")
     deps = Deps(
-        store, ScriptedLLM([tool_call("compute_power", {}), first]), ScriptedJudge([]), RunConfig()
+        store,
+        ScriptedLLM(normal_responses()),
+        ScriptedJudge([{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}]),
+        RunConfig(),
     )
-    assert run_stage(run, "S5", deps).status == "COMPLETE"
-    assert not store.assessment(run).execution_ready
-    issue = store.issues(run)[0]
+    run = start_run(source_snapshot(), deps, {})
+    advance(run, deps)
+    original = store.assessment(run)
+    issue = store.save_issue(
+        ReviewIssue(
+            run_id=run,
+            raised_by="researcher",
+            version_raised=1,
+            severity="MAJOR",
+            paths=["/measurement/data_collection"],
+            mechanism="Collection needs clarification",
+            consequence="Scientific procedure is uncertain",
+            basis="reasoning",
+        )
+    )
+    assert store.publication_snapshot(run).assessment is None
     issue.status = "resolved"
     store.save_issue(issue)
     store.update_run(run, stage_id="S5")
-    deps.llm = ScriptedLLM(normal_responses()[4:])
+    deps.llm = ScriptedLLM([])
     assert run_stage(run, "S5", deps).status == "COMPLETE"
-    assert len(deps.llm.calls) == 2
-    assert len(store.issues(run)) == 1
-    assert store.issues(run)[0].status == "resolved"
+    assert store.assessment(run).id != original.id and store.assessment(run).plan_complete
+    assert deps.llm.calls == [] and store.issues(run)[0].status == "resolved"
     store.close()

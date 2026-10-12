@@ -1,20 +1,21 @@
 import pytest
-from conftest import design, package
 
 from experiment_design.agents import design as designer
 from experiment_design.agents import methodologist
 from experiment_design.agents.tools import ToolContext, build_tools, validate_findings
-from experiment_design.contracts import Finding, ResearcherRequest
+from experiment_design.contracts import Finding
 from experiment_design.runtime.loop import SubmitRejected
 from experiment_design.runtime.store import Store
+from tests.support.builders import package
+from tests.support.scenarios import plan_body, seeded_run, supported_design
 
 
 @pytest.fixture
 def ctx(tmp_path):
     store = Store(tmp_path / "exd.db")
-    rid = store.create_run(package(), {})
-    version = store.add_version(rid, design(), author="design", parent=None)
-    yield ToolContext(store, rid, package(), version, set())
+    rid = seeded_run(store, package(), {})
+    version = store.add_version(rid, supported_design(), author="design", parent=None)
+    yield ToolContext(store, rid, package(), version, set(), task_id="agent-test")
     store.close()
 
 
@@ -34,106 +35,32 @@ def finding(**changes):
     )
 
 
-def chain():
-    return [
-        {"link": link, "status": "ok", "note": "Consistent", "evidence_refs": []}
-        for link in (
-            "hypothesis→estimand",
-            "estimand→unit",
-            "unit→sampling",
-            "sampling→metric",
-            "metric→analysis",
-            "analysis→decision_rule",
-        )
-    ]
-
-
 def test_findings_form_rejects_bad_path(ctx):
     assert any("/nope" in e for e in validate_findings([finding(paths=["/nope"])], ctx))
 
 
 def test_computation_basis_needs_tool_ref(ctx):
     assert validate_findings([finding(basis="computation")], ctx)
-    ctx.accepted_call_ids.add("abc")
+    observe(ctx, "abc", "compute_power")
     assert validate_findings([finding(basis="computation", evidence_refs=["tool:abc"])], ctx) == []
-
-
-def test_methodologist_chain_required(ctx):
-    submit = methodologist.submit_tool(ctx)
-    with pytest.raises(SubmitRejected, match="metric→analysis"):
-        submit.handler({"chain": chain()[:4] + chain()[5:], "findings": [], "summary": "Review"})
-    broken = chain()
-    broken[4]["status"] = "broken"
-    with pytest.raises(SubmitRejected, match="broken"):
-        submit.handler({"chain": broken, "findings": [], "summary": "Review"})
-
-
-def test_methodologist_accepts_prompt_link_names_without_changing_review(ctx):
-    links = (
-        "hypothesis → estimand",
-        "estimand → unit",
-        "unit → sampling/allocation",
-        "sampling/allocation → metric",
-        "metric → SAP",
-        "SAP → uncertainty/decision rule",
-    )
-    canonical = chain()
-    canonical[0].update(status="unclear", note="Estimand awaits researcher confirmation")
-    canonical[5].update(status="broken", note="Uncertainty ignores classes")
-    for link in canonical:
-        link["evidence_refs"] = ["S1"]
-    presented = [dict(link, link=name) for link, name in zip(canonical, links, strict=True)]
-    concern = finding().model_dump(mode="json")
-    accepted = methodologist.submit_tool(ctx).handler(
-        {"chain": presented, "findings": [concern], "summary": "Review with a material concern"}
-    )
-    assert accepted["chain"] == canonical
-    assert accepted["findings"] == [concern]
-    assert accepted["summary"] == "Review with a material concern"
-
-
-@pytest.mark.parametrize(
-    ("invalid", "reason"),
-    [
-        ("duplicate", "Chain requires exactly"),
-        ("unknown", "Chain requires exactly"),
-        ("uncovered", "needs a covering finding"),
-        ("unknown_evidence", "Unknown evidence ref"),
-    ],
-)
-def test_methodologist_prompt_link_names_preserve_scientific_guards(ctx, invalid, reason):
-    presented = chain()
-    presented[-1]["link"] = "SAP → uncertainty/decision rule"
-    if invalid == "duplicate":
-        presented.append(dict(presented[-1], link="analysis → decision_rule"))
-    elif invalid == "unknown":
-        presented[-1]["link"] = "SAP → publication"
-    elif invalid == "uncovered":
-        presented[-1]["status"] = "broken"
-    else:
-        presented[-1]["evidence_refs"] = ["tool:another-task"]
-    with pytest.raises(SubmitRejected, match=reason):
-        methodologist.submit_tool(ctx).handler(
-            {"chain": presented, "findings": [], "summary": "Review"}
-        )
 
 
 def test_evidence_ref_must_exist(ctx):
     assert validate_findings([finding(evidence_refs=["S9"])], ctx)
     assert validate_findings([finding()], ctx) == []
     assert validate_findings([finding(evidence_refs=["tool:abc"])], ctx)
-    ctx.accepted_call_ids.add("abc")
+    observe(ctx, "abc", "read_design")
     assert validate_findings([finding(evidence_refs=["tool:abc"])], ctx) == []
 
 
 def test_design_initial_submit_rejects_claim_change(ctx):
-    d = design()
+    d = supported_design()
     d.claim.margin.value = 5.0
     with pytest.raises(SubmitRejected, match="researcher-owned"):
         designer.submit_tool(ctx, mode="initial").handler(
             {
-                "design": d.model_dump(mode="json"),
-                "rationale": "Draft",
+                "design": plan_body(d),
+                "summary": "Draft",
             }
         )
 
@@ -141,12 +68,10 @@ def test_design_initial_submit_rejects_claim_change(ctx):
 def test_designer_can_implement_bound_commitments_without_unavailable_context_tool(tmp_path):
     import json
 
-    from fakes import ScriptedLLM, submit
-    from test_stage_pipeline import source_context, supported_design
-    from test_stages import staged
-
     from experiment_design.contracts import AgentTask, FieldAnnotation, TaskBudget
     from experiment_design.runtime.loop import run_agent
+    from tests.support.providers import ScriptedLLM, submit
+    from tests.support.scenarios import source_context, staged, supported_design
 
     store = Store(tmp_path / "commitments.db")
     run, _ = staged(store)
@@ -166,7 +91,7 @@ def test_designer_can_implement_bound_commitments_without_unavailable_context_to
     wrong.analysis.model = "Unrequested model"
     with pytest.raises(SubmitRejected) as rejected:
         designer.submit_tool(bound, mode="initial").handler(
-            {"design": wrong.model_dump(mode="json"), "rationale": "Draft"}
+            {"design": plan_body(wrong), "summary": "Draft"}
         )
     assert json.dumps(context.field_annotations["/analysis/model"].value) in str(rejected.value)
 
@@ -176,7 +101,7 @@ def test_designer_can_implement_bound_commitments_without_unavailable_context_to
         proposed.analysis.model = data["scientific_commitments"]["/analysis/model"]
         return submit(
             "submit_design",
-            {"design": proposed.model_dump(mode="json"), "rationale": "Bound intent"},
+            {"design": plan_body(proposed), "summary": "Bound intent"},
         )
 
     task = AgentTask(
@@ -209,13 +134,13 @@ def test_designer_can_implement_bound_commitments_without_unavailable_context_to
 
 
 def test_initial_submit_rejects_unattested_computation(ctx):
-    d = design()
+    d = supported_design()
     d.scenarios[0].sd.value = 1
     d.scenarios[0].sd.provenance = "computed"
     d.scenarios[0].sd.source_ref = None
     with pytest.raises(SubmitRejected, match="unattested computed quantity"):
         designer.submit_tool(ctx, mode="initial").handler(
-            {"design": d.model_dump(mode="json"), "rationale": "Draft"}
+            {"design": plan_body(d), "summary": "Draft"}
         )
 
 
@@ -235,8 +160,8 @@ def test_decision_proposal_rejects_unknown_scientific_path(ctx, path):
     with pytest.raises(SubmitRejected, match="pointer"):
         designer.submit_tool(ctx, mode="initial").handler(
             {
-                "design": design().model_dump(mode="json"),
-                "rationale": "Draft",
+                "design": plan_body(supported_design()),
+                "summary": "Draft",
                 "decisions": [{"problem": "Which model?", "affected_paths": [path]}],
             }
         )
@@ -244,12 +169,13 @@ def test_decision_proposal_rejects_unknown_scientific_path(ctx, path):
 
 def test_compute_power_tool_overrides(ctx):
     tool = build_tools(ctx)["compute_power"]
-    base = tool.handler({})[0]
+    base = tool.handler({"calculator_id": "cluster_equal_size_t"})[0]
     changed = tool.handler(
         {
+            "calculator_id": "cluster_equal_size_t",
             "overrides": {
                 "icc": {"value": 0.2, "unit": "", "provenance": "assumption"},
-            }
+            },
         }
     )[0]
     assert changed["power"] < base["power"]
@@ -264,18 +190,27 @@ def test_review_sensitivity_schema_uses_committed_design(ctx):
     assert "icc" in overrides["properties"]
     assert "scenarios[0].effect" not in overrides["properties"]
     with pytest.raises(ValueError, match="committed design"):
-        tool.handler({"design": design().model_dump(mode="json")})
+        tool.handler({"design": plan_body(supported_design())})
 
 
 def test_initial_scientific_preview_remains_available(ctx):
-    ctx.version = None
-    tool = build_tools(ctx)["compute_power"]
+    from tests.support.scenarios import source_context, source_snapshot, supported_design
+
+    run = ctx.store.create_staged_run(source_snapshot(), {})
+    context = ctx.store.save_context(run, source_context())
+    bound = ToolContext(ctx.store, run, context.package, None, set())
+    tool = build_tools(bound)["compute_power"]
     assert "design" in tool.parameters["properties"]
-    assert tool.handler({"design": design().model_dump(mode="json")})[0]["status"] == "computed"
+    assert (
+        tool.handler(
+            {"design": plan_body(supported_design()), "calculator_id": "cluster_equal_size_t"}
+        )[0]["status"]
+        == "computed"
+    )
 
 
 def test_rejected_reference_feedback_lists_usable_evidence(ctx):
-    ctx.accepted_call_ids.add("sensitivity-result")
+    observe(ctx, "sensitivity-result", "read_design")
     errors = validate_findings([finding(evidence_refs=["ICC sensitivity power 0.50"])], ctx)
     feedback = " ".join(errors)
     assert "Unknown evidence ref" in feedback
@@ -283,24 +218,41 @@ def test_rejected_reference_feedback_lists_usable_evidence(ctx):
 
 
 def test_researcher_input_visible_as_source(ctx):
-    ctx.store.save_request(
-        ResearcherRequest(
+    from experiment_design.contracts import DecisionResponse, ResearcherDecision
+    from experiment_design.decisions import respond
+
+    decision = ctx.store.save_decision(
+        ResearcherDecision(
+            id="observed-sd",
             run_id=ctx.run_id,
-            kind="input",
-            question="Observed SD?",
-            raised_by="design",
-            status="answered",
-            answer="Observed standard deviation is 12 points",
+            binding=ctx.binding,
+            status="AWAITING_RESEARCHER",
+            problem="Observed SD?",
+            affected_paths=["/scenarios/0/sd"],
         )
     )
+    respond(
+        ctx.store,
+        ctx.run_id,
+        decision.id,
+        DecisionResponse(
+            revision=1,
+            action="PROPOSE_ALTERNATIVE",
+            researcher="PI",
+            response_id="observed",
+            text="Observed standard deviation is 12 points",
+        ),
+    )
+    earlier = build_tools(ctx)["lookup_evidence"].handler({"query": "observed standard deviation"})
+    assert not any(h["source_id"].startswith("researcher:observed-sd") for h in earlier)
+    ctx.binding = ctx.store.binding(ctx.run_id)
     hits = build_tools(ctx)["lookup_evidence"].handler({"query": "observed standard deviation"})
-    assert hits[0]["source_id"] == "researcher:R1"
+    assert hits[0]["source_id"].startswith("researcher:observed-sd")
 
 
 def test_read_observation_cannot_attest_a_computation(tmp_path):
-    from test_decisions import decision_state
-
     from experiment_design.contracts import Observation
+    from tests.support.scenarios import decision_state
 
     store, run, context, _ = decision_state(tmp_path)
     bound = ToolContext(
@@ -325,8 +277,7 @@ def test_read_observation_cannot_attest_a_computation(tmp_path):
 
 
 def test_source_quantity_cannot_use_unrelated_span(tmp_path):
-    from test_decisions import decision_state
-    from test_stage_pipeline import supported_design
+    from tests.support.scenarios import decision_state, supported_design
 
     store, run, context, _ = decision_state(tmp_path)
     bound = ToolContext(store, run, context.package, None, set(), binding=store.binding(run))
@@ -334,14 +285,14 @@ def test_source_quantity_cannot_use_unrelated_span(tmp_path):
     d.scenarios[0].sd.source_span = "Typical class size 25"
     with pytest.raises(SubmitRejected, match="source span"):
         designer.submit_tool(bound, mode="initial").handler(
-            {"design": d.model_dump(mode="json"), "rationale": "Draft"}
+            {"design": plan_body(d), "summary": "Draft"}
         )
     assert store.version(run).version == 1
     store.close()
 
 
 def test_bound_power_preview_is_counterfactual_and_does_not_mutate(tmp_path):
-    from test_stage_pipeline import source_context, source_snapshot, supported_design
+    from tests.support.scenarios import source_context, source_snapshot, supported_design
 
     store = Store(tmp_path / "preview.db")
     run = store.create_staged_run(source_snapshot(), {})
@@ -350,8 +301,13 @@ def test_bound_power_preview_is_counterfactual_and_does_not_mutate(tmp_path):
     version = store.add_version(run, supported_design(), author="design", parent=None)
     bound = ToolContext(store, run, context.package, version, set(), binding=store.binding(run))
     tool = build_tools(bound)["compute_power"]
-    base = tool.handler({})[0]
-    preview = tool.handler({"ops": [{"path": "/claim/margin/value", "value": 2}]})[0]
+    base = tool.handler({"calculator_id": "cluster_equal_size_t"})[0]
+    preview = tool.handler(
+        {
+            "calculator_id": "cluster_equal_size_t",
+            "ops": [{"path": "/claim/margin/value", "value": 2}],
+        }
+    )[0]
     assert preview["counterfactual"] is True
     assert preview["power"] < base["power"]
     assert store.version(run).design_hash == version.design_hash
@@ -360,7 +316,7 @@ def test_bound_power_preview_is_counterfactual_and_does_not_mutate(tmp_path):
 
 
 def test_bound_power_rejects_forged_source_override(tmp_path):
-    from test_stage_pipeline import source_context, source_snapshot, supported_design
+    from tests.support.scenarios import source_context, source_snapshot, supported_design
 
     store = Store(tmp_path / "override.db")
     run = store.create_staged_run(source_snapshot(), {})
@@ -371,6 +327,7 @@ def test_bound_power_rejects_forged_source_override(tmp_path):
     with pytest.raises(ValueError, match="source span"):
         build_tools(bound)["compute_power"].handler(
             {
+                "calculator_id": "cluster_equal_size_t",
                 "overrides": {
                     "sd": {
                         "value": 100,
@@ -379,7 +336,7 @@ def test_bound_power_rejects_forged_source_override(tmp_path):
                         "source_ref": "S1",
                         "source_span": "Standard deviation 10 points",
                     }
-                }
+                },
             }
         )
     assert store.version(run).design_hash == version.design_hash
@@ -388,9 +345,8 @@ def test_bound_power_rejects_forged_source_override(tmp_path):
 
 @pytest.mark.parametrize("owner", ["methodologist", "skeptic"])
 def test_computation_ref_cannot_borrow_peer_observation(tmp_path, owner):
-    from test_stage_pipeline import source_context, source_snapshot, supported_design
-
     from experiment_design.contracts import Observation
+    from tests.support.scenarios import source_context, source_snapshot, supported_design
 
     store = Store(tmp_path / "peer.db")
     run = store.create_staged_run(source_snapshot(), {})
@@ -422,3 +378,36 @@ def test_computation_ref_cannot_borrow_peer_observation(tmp_path, owner):
     errors = validate_findings([finding(basis="computation", evidence_refs=["tool:peer"])], bound)
     assert bool(errors) == (owner != "skeptic")
     store.close()
+
+
+def test_methodologist_accepts_grounded_review_without_method_template(ctx):
+    concern = finding().model_dump(mode="json")
+    accepted = methodologist.submit_tool(ctx).handler(
+        {
+            "findings": [concern],
+            "summary": "Methodological assumptions need explicit justification",
+        }
+    )
+    assert accepted["findings"] == [concern]
+    assert set(accepted) == {"findings", "summary"}
+
+
+def observe(ctx, call_id, name):
+    from experiment_design.contracts import Observation
+
+    arguments = {"calculator_id": "cluster_equal_size_t"} if name == "compute_power" else {}
+    result = build_tools(ctx)[name].handler(arguments)
+    ctx.store.save_observation(
+        ctx.run_id,
+        Observation(
+            id=call_id,
+            task_id=ctx.task_id,
+            binding=ctx.binding,
+            tool_name=name,
+            arguments=arguments,
+            result={"value": result},
+            accepted=True,
+            evidence_ref=f"tool:{call_id}",
+        ),
+    )
+    ctx.accepted_call_ids.add(call_id)

@@ -1,5 +1,7 @@
 """Stress-test material assumptions and alternative explanations."""
 
+from pydantic import Field
+
 from experiment_design.agents.tools import (
     ToolContext,
     context_brief,
@@ -18,14 +20,15 @@ TOOLS = ("read_package", "lookup_evidence", "read_design", "read_issues", "compu
 
 class Submission(Record):
     findings: list[Finding]
-    scenarios_checked: list[str]
+    scenarios_checked: list[str] = Field(default_factory=list)
     summary: str
 
 
 def brief(ctx: ToolContext, **focus) -> str:
     return (
-        "Look for counterexamples and alternative explanations; use compute_power overrides for "
-        "sensitivity scenarios. Submit at most three new, material concerns. A risk resting on "
+        "Look for counterexamples, alternative methodologies, hidden assumptions, validity and "
+        "feasibility concerns. Reject the direction when it cannot address the question. "
+        "Use optional computation tools only when relevant. A risk resting on "
         "unknown data has basis unknown_assumption. Other findings need source or tool evidence. "
         "Do not repeat ledger or pending findings; do not inflate severity.\n" + context_brief(ctx)
     )
@@ -36,8 +39,6 @@ def submit_tool(ctx: ToolContext, **mode):
         errors = validate_findings(payload.findings, ctx) + validate_refs(
             payload.scenarios_checked, ctx
         )
-        if len(payload.findings) > 3:
-            errors.append("At most 3 material findings")
         for f in payload.findings:
             if f.basis != "unknown_assumption" and not f.evidence_refs:
                 errors.append("A grounded skeptic finding needs source or tool evidence")

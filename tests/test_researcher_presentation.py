@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from test_stage_pipeline import source_context, source_snapshot, supported_design
 
 from experiment_design.cli import _parser, _status
 from experiment_design.contracts import (
@@ -26,8 +25,10 @@ from experiment_design.contracts import (
     TaskBudget,
 )
 from experiment_design.decisions import apply_decision, interpret, respond
-from experiment_design.output import render_markdown, render_stage_artifacts
+from experiment_design.legacy_output import render_stage_artifacts
+from experiment_design.output import render_markdown
 from experiment_design.runtime.store import Store, TaskRecord
+from tests.support.scenarios import source_context, source_snapshot, supported_design
 
 
 def study(tmp_path):

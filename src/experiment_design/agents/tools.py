@@ -19,7 +19,7 @@ from experiment_design.contracts import (
     ResearcherDecision,
     ScientificPackage,
 )
-from experiment_design.package import all_sources, intake_gaps
+from experiment_design.package import all_sources
 from experiment_design.patch import (
     PatchError,
     apply_patch,
@@ -64,21 +64,7 @@ class DecisionProposal(Record):
 
 def sources(ctx: ToolContext):
     if ctx.store.run(ctx.run_id).schema_version == 2:
-        from experiment_design.contracts import Source
-
-        raw = [
-            Source(id=a.ref, title=a.path, kind="note", text=a.text)
-            for a in ctx.store.source_snapshot(ctx.run_id).artifacts
-        ]
-        context = ctx.store.context(ctx.run_id, ctx.binding.context_revision)
-        decisions = ctx.store._artifact_records(
-            ctx.run_id,
-            "researcher_decision",
-            ResearcherDecision,
-            ctx.issue_cutoff if ctx.cohort_id else None,
-        )
-        supplied = all_sources(context, decisions) if context else []
-        return list({s.id: s for s in supplied + raw}.values())
+        return ctx.store.bound_sources(ctx.run_id, ctx.binding)
     return all_sources(ctx.package, ctx.store.requests(ctx.run_id))
 
 
@@ -243,8 +229,9 @@ def context_brief(ctx: ToolContext) -> str:
         {
             "package": package,
             "scientific_commitments": scientific_commitments(context) if context else {},
-            "intake_gaps": intake_gaps(ctx.package),
             "version": ctx.version.version if ctx.version else None,
+            "design_hash": ctx.version.design_hash if ctx.version else None,
+            "design": ctx.version.design.model_dump(mode="json") if ctx.version else None,
             "issue_ledger": ledger,
             "pending_findings": []
             if ctx.cohort_id
@@ -347,6 +334,7 @@ def build_tools(ctx: ToolContext, *, compact_preview: bool = True) -> dict[str, 
                         preview_patch=Patch(ops=args["ops"], rationale="Read-only power preview")
                         if args.get("ops") is not None
                         else None,
+                        calculator_id=args.get("calculator_id"),
                     )
                 ).model_dump(mode="json")
                 for s in selected
@@ -479,6 +467,7 @@ def build_tools(ctx: ToolContext, *, compact_preview: bool = True) -> dict[str, 
             | {
                 "ops": ops,
                 "scenario": {"type": ["string", "null"]},
+                "calculator_id": {"type": "string"},
                 "overrides": {
                     "type": "object",
                     "properties": {

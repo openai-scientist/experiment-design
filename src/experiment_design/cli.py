@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from experiment_design.config import ConfigError, ExdConfig, RunConfig, load_config
 from experiment_design.contracts import DecisionResponse
 from experiment_design.decisions import respond
+from experiment_design.exploration_output import export_exploration, render_exploration
 from experiment_design.output import export, render_decision, render_markdown
 from experiment_design.package import PackageFormatError, all_sources, snapshot_sources
 from experiment_design.runtime.jev import JudgeError, TypeSafeJudge
@@ -22,7 +23,6 @@ from experiment_design.workflow import (
     Deps,
     WorkflowError,
     advance,
-    answer_request,
     approve,
     request_changes,
     start_run,
@@ -66,13 +66,10 @@ def _parser() -> argparse.ArgumentParser:
     decide.add_argument("--option")
     decide.add_argument("--text", default="")
     decide.add_argument("--by", required=True)
-    for command in ("resume", "status", "review", "answer", "request-changes", "approve", "export"):
+    for command in ("resume", "status", "review", "request-changes", "approve", "export"):
         sub = commands.add_parser(command)
         sub.add_argument("run")
-        if command == "answer":
-            sub.add_argument("request")
-            sub.add_argument("text")
-        elif command == "request-changes":
+        if command == "request-changes":
             sub.add_argument("text")
             sub.add_argument("--path")
             sub.add_argument("--by", required=True)
@@ -97,6 +94,38 @@ def _prefix(config: Path) -> str:
 
 def _status(store: Store, rid: str, config: Path) -> None:
     record, version, usage = store.run(rid), store.version(rid), store.usage(rid)
+    if store.is_exploration_run(rid):
+        print(f"status: {record.status}")
+        print("mode: exploration")
+        print("usage: " + ", ".join(f"{key}={value}" for key, value in usage.model_dump().items()))
+        snapshot = store.exploration_snapshot(rid)
+        if snapshot:
+            print(f"snapshot: {snapshot.id}; outcome: {snapshot.outcome}")
+            print(f"recommendation: {snapshot.selection.choice}")
+            print(f"next: {_prefix(config)} review {rid}")
+            print(f"export: {_prefix(config)} export {rid} --out <new-directory>")
+            if snapshot.outcome == "needs_input":
+                print(
+                    "Supply missing information in a new explore invocation; "
+                    "this snapshot is frozen."
+                )
+        else:
+            stops = [e.data for e in store.events(rid) if e.type == "budget.stop"]
+            if stops:
+                print(f"stop: scope={stops[-1]['scope']}, reason={stops[-1]['reason']}")
+            record_task_id = f"explore:{rid}:1"
+            try:
+                exhausted = store.task(record_task_id).status == "stopped"
+            except KeyError:
+                exhausted = False
+            if exhausted:
+                print(
+                    "Task allowance exhausted; start a new explore invocation. "
+                    "Prior evidence is retained."
+                )
+            else:
+                print(f"next: {_prefix(config)} resume {rid}")
+        return
     print(f"status: {record.status}")
     print(f"stage: {record.stage_id or 'legacy'}; schema: {record.schema_version}")
     print(f"latest version: {version.version if version else 0}")
@@ -159,11 +188,35 @@ def _status(store: Store, rid: str, config: Path) -> None:
 def _read_command(store: Store, args) -> None:
     rid = args.run
     prefix = _prefix(args.config)
+    if store.is_exploration_run(rid):
+        if args.command == "status":
+            _status(store, rid, args.config)
+        elif args.command == "review":
+            snapshot = store.exploration_snapshot(rid)
+            if snapshot is None:
+                raise WorkflowError("exploration has no frozen snapshot yet; use status or resume")
+            print(render_exploration(snapshot), end="")
+        elif args.command == "export":
+            if args.version is not None:
+                raise WorkflowError(
+                    "--version selects a DesignVersion, not an exploration snapshot"
+                )
+            for path in export_exploration(store, rid, args.out).values():
+                print(path)
+        else:
+            raise WorkflowError(
+                "exploration proposals cannot authorize canonical researcher decisions"
+            )
+        return
     if args.command == "status":
         _status(store, rid, args.config)
     elif args.command == "review":
         run, version = store.run(rid), store.version(rid)
         if version is None:
+            snapshot = store.exploration_snapshot(rid)
+            if snapshot and getattr(args, "version", None) is None:
+                print(render_exploration(snapshot), end="")
+                return
             raise WorkflowError("No design version exists yet")
         if run.schema_version == 2:
             print(render_markdown(store.publication_snapshot(rid)), end="")
@@ -186,11 +239,6 @@ def _read_command(store: Store, args) -> None:
             ),
             end="",
         )
-    elif args.command == "answer":
-        answer_request(store, rid, args.request, args.text)
-        print(f"answered {args.request}")
-        if not any(r.status == "open" for r in store.requests(rid)):
-            print(f"next: {prefix} resume {rid}")
     elif args.command == "decide":
         respond(
             store,
@@ -230,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         load_dotenv(dotenv_path=Path(".env"), override=False)
         cfg = load_config(args.config, require_provider_keys=args.command in {"run", "resume"})
         if args.command in {"run", "resume"}:
-            package = snapshot_sources(args.hypothesis) if args.command == "run" else None
+            package = snapshot_sources(args.hypothesis) if args.command in {"run"} else None
             deps = build_deps(cfg)
             store = deps.store
             rid = start_run(package, deps, cfg.model_dump(mode="json")) if package else args.run
@@ -238,8 +286,8 @@ def main(argv: list[str] | None = None) -> int:
                 deps.run = cfg.run = RunConfig.model_validate(store.run(rid).config["run"])
             if args.command == "resume" and args.llm_token_limit is not None:
                 record = store.run(rid)
-                if record.schema_version != 2:
-                    raise WorkflowError("schema-1 run cannot resume")
+                if record.plan_contract != "exp-plan/v1" or record.stage_id is None:
+                    raise WorkflowError("historical run cannot resume")
                 old = record.config.get("run", {}).get("llm_tokens", cfg.run.llm_tokens)
                 if args.llm_token_limit <= old:
                     raise WorkflowError("new token ceiling must exceed current ceiling")
@@ -260,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise
             print(f"run {rid}: {status}")
             _status(store, rid, args.config)
+            if store.is_exploration_run(rid) and (snapshot := store.exploration_snapshot(rid)):
+                print(render_exploration(snapshot), end="")
         else:
             store = Store(cfg.store)
             _read_command(store, args)
@@ -268,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
         WorkflowError,
         ConfigError,
         PackageFormatError,
-        FileNotFoundError,
+        OSError,
         KeyError,
         LLMError,
         JudgeError,

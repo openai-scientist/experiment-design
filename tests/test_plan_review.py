@@ -1,16 +1,6 @@
 import json
 
 import pytest
-from conftest import design
-from fakes import ScriptedJudge, ScriptedLLM, submit
-from test_stage_pipeline import (
-    inspection_response,
-    normal_responses,
-    review_responses,
-    source_context,
-    source_snapshot,
-)
-from test_workflow import chain
 
 from experiment_design.config import RunConfig
 from experiment_design.contracts import DecisionResponse, ReviewCohort
@@ -20,10 +10,19 @@ from experiment_design.qualification import can_approve
 from experiment_design.review import review_actions
 from experiment_design.runtime.store import Store
 from experiment_design.workflow import Deps, advance, approve, start_run
+from tests.support.builders import design
+from tests.support.providers import ScriptedJudge, ScriptedLLM, submit
+from tests.support.scenarios import (
+    normal_responses,
+    plan_body,
+    review_responses,
+    source_context,
+    source_snapshot,
+)
 
 
 def test_mixed_model_limitations_reach_pending_review_and_draft_publication(tmp_path):
-    context = source_context()
+    context = source_context(method="Mixed model with class random intercept")
     context.unknowns = ["District SD and ICC remain unverified"]
     draft = design()
     draft.scenarios[0].sd.provenance = "assumption"
@@ -36,7 +35,6 @@ def test_mixed_model_limitations_reach_pending_review_and_draft_publication(tmp_
     reviews[0] = submit(
         "submit_findings",
         {
-            "chain": chain(),
             "summary": "Unsupported mixed-model planning",
             "findings": [
                 {
@@ -69,7 +67,7 @@ def test_mixed_model_limitations_reach_pending_review_and_draft_publication(tmp_
                 ),
                 submit(
                     "submit_design",
-                    {"design": draft.model_dump(mode="json"), "rationale": "Mixed-model draft"},
+                    {"design": plan_body(draft), "summary": "Mixed-model draft"},
                 ),
                 *reviews,
                 submit(
@@ -108,16 +106,6 @@ def test_mixed_model_limitations_reach_pending_review_and_draft_publication(tmp_
                         "regressions": [],
                     },
                 ),
-                inspection_response(),
-                submit(
-                    "submit_handoff",
-                    {
-                        "handoff_complete": False,
-                        "risks": ["District SD and ICC remain unverified"],
-                        "findings": [],
-                        "evidence_refs": [],
-                    },
-                ),
             ]
         ),
         ScriptedJudge(
@@ -127,17 +115,16 @@ def test_mixed_model_limitations_reach_pending_review_and_draft_publication(tmp_
                 {"next_action": "VERIFY"},
                 {"I2": "unresolved"},
                 {"next_action": "QUALIFY"},
+                {"next_action": "REVIEW_PLAN"},
             ]
         ),
         RunConfig(),
     )
-    run = start_run(source_snapshot(), deps, {})
+    run = start_run(source_snapshot(method="Mixed model with class random intercept"), deps, {})
     assert advance(run, deps) == "REVIEWABLE"
     assessment = store.publication_snapshot(run).assessment
     assert assessment.review_status == "REVIEWABLE"
-    assert not assessment.handoff_complete
-    assert not assessment.execution_ready
-    assert "District SD and ICC remain unverified" in assessment.blockers
+    assert not assessment.plan_complete
     assert any("Mixed-model power unsupported" in b for b in assessment.blockers)
     assert can_approve(store.publication_snapshot(run))
     final = next(d for d in store.decisions(run) if d.purpose == "final_review")
@@ -148,23 +135,20 @@ def test_mixed_model_limitations_reach_pending_review_and_draft_publication(tmp_
         approve(store, run, 1, "PI")
     assert store.events(run) == before
     paths = export(store, run, tmp_path / "edp")
-    markdown = paths["experiment_design.md"].read_text(encoding="utf-8")
-    data = json.loads(paths["experiment_design.json"].read_text(encoding="utf-8"))
-    assert "Draft — not approved" in markdown
-    assert "Not computed:" in markdown
+    markdown = paths["exp_plan.md"].read_text(encoding="utf-8")
+    data = json.loads(paths["exp_plan.json"].read_text(encoding="utf-8"))
+    assert "Draft" in markdown
     assert "District SD and ICC remain unverified" in markdown
     assert "Mixed-model power unsupported" in markdown
-    assert data["provenance"]["approval"] is None
-    assert data["computed"] and all(
-        c["status"] == "not_computed" and c["power"] is None for c in data["computed"]
-    )
+    assert data["approval"] is None
+    assert data["calculations"] == []
     assert data["design"]["analysis"]["model"] == "Mixed model with class random intercept"
     assert next(i for i in data["issues"] if i["id"] == "I2")["status"] == "unresolved"
     assert store.decision(run, final.id) == final
     assert not store.approvals(run)
     assert store.run(run).stage_id == "S7"
     assert store.run(run).status == "REVIEWABLE"
-    artifacts = json.loads(paths["stage_artifacts.json"].read_text(encoding="utf-8"))
+    artifacts = store.stage_artifacts(run, store.publication_snapshot(run))
     assert artifacts["binding"]["design_version"] == 1
     assert set(artifacts["stages"]) == {"S1", "S2", "S3", "S4", "S5", "S6", "S7"}
     assert artifacts["stages"]["S1"]["source"]["artifacts"][0]["text"]
@@ -186,13 +170,10 @@ def test_mixed_model_limitations_reach_pending_review_and_draft_publication(tmp_
     assert artifacts["stages"]["S5"]["assessment"]["id"] == assessment.id
     assert artifacts["stages"]["S6"]["decisions"][-1]["responses"] == []
     assert artifacts["stages"]["S7"]["files"] == [
-        "experiment_design.md",
-        "experiment_design.json",
+        "exp_plan.md",
+        "exp_plan.json",
         "manifest.json",
     ]
-    readable = paths["stage_artifacts.md"].read_text(encoding="utf-8")
-    assert "Unsupported mixed-model planning" in readable
-    assert "S1" in readable and "S7" in readable and "AWAITING_RESEARCHER" in readable
     stages = [e.data for e in store.events(run) if e.type == "stage.result"]
     assert {s["stage_id"] for s in stages if s["output_refs"]} == {
         "S1",
@@ -258,7 +239,7 @@ def test_historical_export_cannot_complete_an_unpresented_final_review(tmp_path)
     run = start_run(source_snapshot(), deps, {})
     assert advance(run, deps) == "REVIEWABLE"
     historical = export(store, run, tmp_path / "historical", version=1)
-    data = json.loads(historical["experiment_design.json"].read_bytes())
+    data = json.loads(historical["exp_plan.json"].read_bytes())
     assert not any(d["purpose"] == "final_review" for d in data["decisions"])
     assert store.run(run).stage_id == "S6"
     assert not any(
@@ -307,8 +288,8 @@ def test_pending_final_review_does_not_block_scientific_response_reconciliation(
         RunConfig(),
     )
     run = start_run(source_snapshot(), deps, {})
-    assert advance(run, deps) == "REVIEWABLE"
-    final = next(d for d in store.decisions(run) if d.purpose == "final_review")
+    assert advance(run, deps) == "NEEDS_RESEARCHER"
+    assert not any(d.purpose == "final_review" for d in store.decisions(run))
     assert store.publication_snapshot(run).assessment.review_status == "NEEDS_INPUT"
     export(store, run, tmp_path / "draft")
     decision = store.decision(run, "margin-review")
@@ -346,7 +327,7 @@ def test_pending_final_review_does_not_block_scientific_response_reconciliation(
     assert store.run(run).stage_id == "S2"
     assert store.version(run).design.claim.margin.value == 2
     assert store.decision(run, decision.id).application["response_id"] == "new-margin"
-    assert store.decision(run, final.id) == final
+    assert not any(d.purpose == "final_review" for d in store.decisions(run))
     assert store.publication_snapshot(run).assessment is None
     assert not store.approvals(run)
     store.close()
@@ -376,7 +357,12 @@ def test_jev_receives_review_progress_and_bound_computation_limitations(tmp_path
     store.add_version(run, design(), author="design", parent=None)
     store.update_run(run, stage_id="S4", revisions_done=3, actions_done=5)
     result = calculate(
-        CalculationRequest(binding=store.binding(run), scenario_id="base", design=design())
+        CalculationRequest(
+            calculator_id=(design()).analysis.method_id,
+            binding=store.binding(run),
+            scenario_id="base",
+            design=design(),
+        )
     )
     store.save_observation(
         run,

@@ -1,6 +1,6 @@
 """Designer proposes initial content and coherent, targeted revisions."""
 
-from pydantic import AliasChoices, Field
+from pydantic import Field
 
 from experiment_design.agents.tools import (
     DecisionProposal,
@@ -30,7 +30,7 @@ TOOLS = (
 
 class InitialSubmission(Record):
     design: Design
-    rationale: str = Field(validation_alias=AliasChoices("summary", "rationale"))
+    summary: str = Field(min_length=1)
     decisions: list[DecisionProposal] = Field(default_factory=list)
 
 
@@ -58,13 +58,19 @@ def brief(ctx: ToolContext, **focus) -> str:
     return (
         "Researcher-owned claim fields cannot change. Request a decision on /claim/<field>. "
         "Every quantitative input must have honest provenance. Unknown values are assumptions with "
-        "a note, never invented sources. Inspect evidence and compute_power before submitting. "
-        "For an initial draft, pass your proposed design to compute_power and run_validators. "
+        "a note, never invented sources. Choose methodology through scientific reasoning from "
+        "hypothesis, evidence, context and constraints; explain suitability and alternatives. "
+        "Tools are optional; unsupported calculator coverage cannot choose your methodology. "
+        "For an initial draft, include execution with purpose/inputs/expected outputs and "
+        "concrete scientific procedure, rationale, resources and feasibility. "
+        "Use relevant validators/computations when warranted. "
         "For initial synthesis, use design.rationale for DesignChoice records (choice, why, "
         "alternatives_considered, tradeoffs). Explain source-fixed choices; methodological "
         "alternatives are proposals. The separate submission.summary must be a short string "
         "summary. Preserve canonical reasons, assumptions and limitations when correcting errors. "
         "Preserve scientific_commitments at their exact design paths and values. "
+        "For redesign, reconsider the approach from the selected candidate and critique; "
+        "replace obsolete methodology/protocol/analysis coherently with a protected patch. "
         "For revision inspect the committed design before canonical compute_power; sensitivity "
         "overrides are separate observations, never canonical results. Use check_patch; fix the "
         "batch together or rebut with evidence. Inspect the pending researcher decisions, their "
@@ -81,6 +87,10 @@ def submit_tool(ctx: ToolContext, **mode):
     if mode.get("mode", "initial") == "initial":
 
         def initial(payload):
+            if payload.design.execution is None:
+                raise SubmitRejected(["A new plan requires explicit execution details"])
+            if payload.design.analysis.method_id is not None:
+                raise SubmitRejected(["Use calculator_id only in optional computation requests"])
             context = ctx.store.context(
                 ctx.run_id, ctx.binding.context_revision if ctx.binding else None
             )
@@ -93,16 +103,16 @@ def submit_tool(ctx: ToolContext, **mode):
             validate_source_quantities(d, ctx)
             return {
                 "design": d.model_dump(mode="json"),
-                "rationale": payload.rationale,
+                "rationale": payload.summary,
                 "decisions": decision_proposals(payload.decisions, ctx),
             }
 
         tool = submit_schema("submit_design", InitialSubmission, initial)
-        if mode.get("legacy_summary"):
-            properties = tool.parameters["properties"]
-            properties["rationale"] = properties.pop("summary")
-            properties["rationale"]["title"] = "Rationale"
-            tool.parameters["required"] = ["design", "rationale"]
+        tool.parameters["$defs"]["AnalysisPlan"]["properties"].pop("method_id", None)
+        tool.parameters["$defs"]["Design"]["properties"]["execution"] = {
+            "$ref": "#/$defs/ExecutionSpec"
+        }
+        tool.parameters["$defs"]["Design"]["required"].append("execution")
         return tool
 
     def revision(payload):
@@ -126,6 +136,8 @@ def submit_tool(ctx: ToolContext, **mode):
             source_ids=source_ids(ctx),
             context=ctx.store.context(ctx.run_id),
         )
+        if changed.execution is not None and changed.analysis.method_id is not None:
+            raise SubmitRejected(["Use calculator_id only in optional computation requests"])
         validate_source_quantities(changed, ctx)
         return {
             "patch": payload.patch.model_dump(mode="json"),

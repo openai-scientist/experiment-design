@@ -3,9 +3,6 @@
 import ast
 import hashlib
 
-from fakes import ScriptedJudge, ScriptedLLM, submit
-from test_stage_pipeline import source_context, source_snapshot, supported_design
-
 from experiment_design.agents import design as designer
 from experiment_design.agents.tools import ToolContext
 from experiment_design.config import RunConfig
@@ -13,6 +10,8 @@ from experiment_design.contracts import DecisionResponse, ResearcherDecision, St
 from experiment_design.decisions import apply_decision, interpret, respond
 from experiment_design.runtime.store import Store
 from experiment_design.workflow import Deps, run_stage, start_run
+from tests.support.providers import ScriptedJudge, ScriptedLLM, submit
+from tests.support.scenarios import plan_body, source_context, source_snapshot, supported_design
 
 
 def focus_from(brief):
@@ -73,8 +72,8 @@ def test_initial_synthesis_receives_s2_pending_question_without_resolving_it(tmp
             return submit(
                 "submit_design",
                 {
-                    "design": supported_design().model_dump(mode="json"),
-                    "rationale": "Tentative draft",
+                    "design": plan_body(supported_design()),
+                    "summary": "Tentative draft",
                 },
             )
 
@@ -162,8 +161,8 @@ def test_initial_synthesis_receives_applied_reply_with_pending_verification(tmp_
             return submit(
                 "submit_design",
                 {
-                    "design": supported_design().model_dump(mode="json"),
-                    "rationale": "Recorded intent",
+                    "design": plan_body(supported_design()),
+                    "summary": "Recorded intent",
                 },
             )
 

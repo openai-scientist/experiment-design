@@ -1,6 +1,4 @@
 import pytest
-from conftest import design
-from test_stages import staged
 
 from experiment_design.contracts import (
     DecisionResponse,
@@ -9,27 +7,8 @@ from experiment_design.contracts import (
 )
 from experiment_design.decisions import apply_decision, interpret, respond
 from experiment_design.runtime.store import Store
-
-
-def decision_state(tmp_path):
-    store = Store(tmp_path / "decision.db")
-    run, _ = staged(store)
-    from test_stage_pipeline import source_context
-
-    context = source_context()
-    store.save_context(run, context)
-    store.add_version(run, design(), author="design", parent=None)
-    d = store.save_decision(
-        ResearcherDecision(
-            id="D1",
-            run_id=run,
-            binding=store.binding(run),
-            status="AWAITING_RESEARCHER",
-            problem="Choose margin",
-            affected_paths=["/claim/margin"],
-        )
-    )
-    return store, run, context, d
+from tests.support.builders import design
+from tests.support.scenarios import decision_state, staged
 
 
 def test_alternative_records_raw_intent_and_applies_once(tmp_path):
@@ -227,12 +206,11 @@ def test_authorized_sap_change_records_confirmed_commitment(tmp_path, path, valu
 
 
 def test_researcher_evidence_can_supply_source_quantity_for_independent_review(tmp_path):
-    from test_stage_pipeline import source_context, source_snapshot, supported_design
-
     from experiment_design.agents.tools import build_tools
     from experiment_design.contracts import AgentTask, TaskBudget
     from experiment_design.review import commit_revision, review_context, start_cohort
     from experiment_design.runtime.store import TaskRecord
+    from tests.support.scenarios import source_context, source_snapshot, supported_design
 
     store = Store(tmp_path / "evidence.db")
     run = store.create_staged_run(source_snapshot(), {})
@@ -298,7 +276,11 @@ def test_researcher_evidence_can_supply_source_quantity_for_independent_review(t
     ctx = review_context(store, run, task)
     hits = build_tools(ctx)["lookup_evidence"].handler({"query": "Observed standard deviation"})
     assert any(h["source_id"] == source_ref for h in hits)
-    result = build_tools(ctx)["compute_power"].handler({})[0]
+    result = build_tools(ctx)["compute_power"].handler(
+        {
+            "calculator_id": "cluster_equal_size_t",
+        }
+    )[0]
     assert result["status"] == "computed" and result["normalized_inputs"]["sd"] == 12
     updated = commit_revision(
         store,
@@ -431,11 +413,10 @@ def test_interpretation_submit_rejects_invalid_context_before_committing(tmp_pat
 def test_scoped_context_answer_preserves_snapshot_and_applies_only_authorized_fields(
     tmp_path, invalid
 ):
-    from test_stage_pipeline import source_context
-
     from experiment_design.agents import decision_interpretation
     from experiment_design.agents.tools import ToolContext
     from experiment_design.runtime.loop import SubmitRejected
+    from tests.support.scenarios import source_context
 
     store = Store(tmp_path / "context-answer.db")
     run, _ = staged(store)

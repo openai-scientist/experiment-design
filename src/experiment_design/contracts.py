@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 Provenance = Literal["source", "assumption", "computed", "llm"]
 Origin = Literal["package", "researcher", "designer_default", "missing"]
@@ -14,6 +14,7 @@ RunStatus = Literal[
     "RUNNING",
     "NEEDS_RESEARCHER",
     "REVIEWABLE",
+    "EXPLORED",
     "BLOCKED",
     "INCONCLUSIVE",
     "BUDGET_STOP",
@@ -61,12 +62,12 @@ class Hypothesis(Record):
 class Outcome(Record):
     name: str
     unit: str | None = None
-    kind: Literal["continuous", "binary"] | None = None
-    direction: Literal["increase", "decrease"] | None = None
+    kind: str | None = None
+    direction: str | None = None
 
 
 class Inference(Record):
-    contrast_type: ContrastType | None = None
+    contrast_type: str | None = None
     margin: float | None = None
     estimand: str | None = None
 
@@ -129,7 +130,7 @@ class DesignChoice(Record):
 
 class Condition(Record):
     name: str
-    role: Literal["treatment", "control", "baseline"]
+    role: str = Field(min_length=1)
     description: str
 
 
@@ -157,7 +158,7 @@ class Sampling(Record):
 
 class Metric(Record):
     name: str
-    kind: Literal["continuous", "binary"]
+    kind: str = Field(min_length=1)
     operationalization: str
     unit: str
     timing: str = ""
@@ -174,8 +175,8 @@ class AnalysisPlan(Record):
     method_id: str | None = None
     common_variance: bool | None = None
     model: str | None = None
-    sidedness: Literal["one_sided", "two_sided"] = "two_sided"
-    alpha: float = 0.05
+    sidedness: Literal["one_sided", "two_sided"] | None = None
+    alpha: float | None = None
     uncertainty: str | None = None
     decision_rule: str | None = None
     multiplicity: str | None = None
@@ -189,7 +190,7 @@ class PowerScenario(Record):
     sd: Quantity | None = None
     p_control: Quantity | None = None
     p_treatment: Quantity | None = None
-    target_power: float = 0.8
+    target_power: float | None = None
 
 
 class Protocol(Record):
@@ -205,6 +206,25 @@ class Risk(Record):
     mitigation: str | None = None
 
 
+class ExpectedOutput(Record):
+    name: str
+    description: str
+    format: str
+    validation: str
+
+
+class ExecutionSpec(Record):
+    purpose: str | None = None
+    inputs: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    fixed_scientific_choices: list[str] = Field(default_factory=list)
+    implementation_freedom: list[str] = Field(default_factory=list)
+    expected_outputs: list[ExpectedOutput] = Field(default_factory=list)
+    acceptance_checks: list[str] = Field(default_factory=list)
+    clarification_triggers: list[str] = Field(default_factory=list)
+    not_applicable: dict[str, str] = Field(default_factory=dict)
+
+
 class Design(Record):
     claim: Claim
     rationale: list[DesignChoice] = Field(default_factory=list)
@@ -217,6 +237,43 @@ class Design(Record):
     validity: list[Risk] = Field(default_factory=list)
     assumptions: list[Assumption] = Field(default_factory=list)
     handoff: list[str] = Field(default_factory=list)
+    execution: ExecutionSpec | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def historical_defaults(cls, data):
+        if not isinstance(data, dict) or data.get("execution") is not None:
+            return data
+        data = dict(data)
+        analysis = data.get("analysis", {})
+        analysis = (
+            analysis.model_dump(exclude_unset=True)
+            if isinstance(analysis, AnalysisPlan)
+            else dict(analysis)
+        )
+        analysis.setdefault("alpha", 0.05)
+        analysis.setdefault("sidedness", "two_sided")
+        data["analysis"] = analysis
+        scenarios = []
+        for item in data.get("scenarios", []):
+            item = (
+                item.model_dump(exclude_unset=True)
+                if isinstance(item, PowerScenario)
+                else dict(item)
+            )
+            item.setdefault("target_power", 0.8)
+            scenarios.append(item)
+        data["scenarios"] = scenarios
+        return data
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        data = handler(self)
+        if self.execution is None:
+            data.pop("execution", None)
+        else:
+            data["analysis"].pop("method_id", None)
+        return data
 
 
 class PatchOp(Record):
@@ -455,8 +512,10 @@ class ReadinessAssessment(Record):
     run_id: str
     binding: ArtifactBinding
     review_status: Literal["REVIEWABLE", "NEEDS_INPUT", "NOT_READY"]
-    handoff_complete: bool
-    execution_ready: bool = False
+    plan_complete: bool | None = None
+    # Historical records only. Active assessment serialization omits these fields.
+    handoff_complete: bool | None = None
+    execution_ready: bool | None = None
     blockers: list[str] = Field(default_factory=list)
     decision_ids: list[str] = Field(default_factory=list)
     computation_refs: list[str] = Field(default_factory=list)
@@ -467,7 +526,7 @@ class ReadinessAssessment(Record):
     @classmethod
     def preserve_existing_readiness(cls, data):
         # Earlier schema-2 complete handoffs already required execution readiness.
-        if isinstance(data, dict) and "execution_ready" not in data:
+        if isinstance(data, dict) and "plan_complete" not in data and "execution_ready" not in data:
             data = dict(data)
             data["execution_ready"] = (
                 data.get("handoff_complete") is True
@@ -475,6 +534,16 @@ class ReadinessAssessment(Record):
                 and not data.get("blockers")
                 and not data.get("decision_ids")
             )
+        return data
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        data = handler(self)
+        if self.plan_complete is None:
+            data.pop("plan_complete", None)
+        else:
+            for key in ("handoff_complete", "execution_ready", "handoff_risks"):
+                data.pop(key, None)
         return data
 
 
@@ -488,6 +557,16 @@ class PublicationSnapshot(Record):
     approval: Approval | None
     calculations: list["CalculationResult"] = Field(default_factory=list)
     binding: ArtifactBinding
+    review: dict | None = None
+    observations: list[Observation] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        data = handler(self)
+        if self.review is None:
+            data.pop("review", None)
+            data.pop("observations", None)
+        return data
 
 
 class CalculationRequest(Record):
@@ -496,6 +575,14 @@ class CalculationRequest(Record):
     design: Design
     overrides: dict[str, Quantity] = Field(default_factory=dict)
     preview_patch: Patch | None = None
+    calculator_id: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        data = handler(self)
+        if self.calculator_id is None:
+            data.pop("calculator_id", None)
+        return data
 
 
 class CalculationResult(Record):

@@ -106,6 +106,8 @@ def respond(
     store: Store, run_id: str, decision_id: str, response: DecisionResponse
 ) -> ResearcherDecision:
     with store.transaction():
+        if store.run(run_id).plan_contract != "exp-plan/v1":
+            raise ValueError("Historical runs are read/export only; start a new run from sources")
         decision = store.decision(run_id, decision_id)
         existing = next(
             (r for r in decision.responses if r.response_id == response.response_id), None

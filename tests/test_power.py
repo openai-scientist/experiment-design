@@ -1,8 +1,8 @@
 import pytest
-from conftest import design
 
 from experiment_design.contracts import ClusterSpec, Quantity
 from experiment_design.science.power import compute_scenario, design_effect
+from tests.support.builders import design
 
 
 @pytest.mark.parametrize(
@@ -43,6 +43,7 @@ def test_method_power_matches_independent_r_reference(case):
             d.scenarios[0].effect = q(0.5)
     r = calculate(
         CalculationRequest(
+            calculator_id=(d).analysis.method_id,
             binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
             scenario_id="base",
             design=d,
@@ -66,6 +67,7 @@ def test_cluster_t_integer_search_and_unsupported_method():
     d.sampling.unit_of_analysis = "class"
     d.sampling.cluster.equal_size = d.sampling.cluster.independent_clusters = True
     request = CalculationRequest(
+        calculator_id=(d).analysis.method_id,
         binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
         scenario_id="base",
         design=d,
@@ -243,10 +245,9 @@ def test_unattested_computed_input_not_computed():
     ],
 )
 def test_t_method_refuses_inputs_outside_its_applicability(case):
-    from test_stage_pipeline import supported_design
-
     from experiment_design.contracts import ArtifactBinding, CalculationRequest
     from experiment_design.science.power import calculate
+    from tests.support.scenarios import supported_design
 
     d = supported_design()
     if case == "binary":
@@ -273,6 +274,7 @@ def test_t_method_refuses_inputs_outside_its_applicability(case):
         d.scenarios[0].sd.unit = "kg"
     result = calculate(
         CalculationRequest(
+            calculator_id=(d).analysis.method_id,
             binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
             scenario_id="base",
             design=d,
@@ -284,13 +286,13 @@ def test_t_method_refuses_inputs_outside_its_applicability(case):
 
 @pytest.mark.parametrize("unit", ["%", "kg", "people"])
 def test_cluster_size_override_requires_canonical_count_unit(unit):
-    from test_stage_pipeline import supported_design
-
     from experiment_design.contracts import ArtifactBinding, CalculationRequest
     from experiment_design.science.power import calculate
+    from tests.support.scenarios import supported_design
 
     result = calculate(
         CalculationRequest(
+            calculator_id=(supported_design()).analysis.method_id,
             binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
             scenario_id="base",
             design=supported_design(),
@@ -302,10 +304,9 @@ def test_cluster_size_override_requires_canonical_count_unit(unit):
 
 @pytest.mark.parametrize("method", ["linear_mixed_model", "independent_pooled_t"])
 def test_cluster_diagnostics_distinguish_unsupported_and_independent_methods(method):
-    from test_stage_pipeline import supported_design
-
     from experiment_design.contracts import ArtifactBinding, CalculationRequest
     from experiment_design.science.power import calculate
+    from tests.support.scenarios import supported_design
 
     d = supported_design()
     d.analysis.method_id = method
@@ -316,6 +317,7 @@ def test_cluster_diagnostics_distinguish_unsupported_and_independent_methods(met
     )
     result = calculate(
         CalculationRequest(
+            calculator_id=(d).analysis.method_id,
             binding=ArtifactBinding(source_snapshot_id="source", event_id=1),
             scenario_id="base",
             design=d,

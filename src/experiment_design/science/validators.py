@@ -8,7 +8,7 @@ from experiment_design.contracts import (
     Severity,
 )
 from experiment_design.patch import design_hash, package_claim, quantities, resolve
-from experiment_design.science.power import compute_scenarios, contrast_from
+from experiment_design.science.power import contrast_from
 
 
 class ValidationFinding(Record):
@@ -53,10 +53,9 @@ def validate_design(
         )
 
     required = (
-        "/claim/estimand/value",
-        "/sampling/unit_of_randomization",
-        "/sampling/unit_of_analysis",
+        "/claim/hypothesis/value",
         "/measurement/primary_metric",
+        "/measurement/data_collection",
         "/analysis/model",
         "/analysis/uncertainty",
         "/analysis/decision_rule",
@@ -64,16 +63,52 @@ def validate_design(
         "/protocol/steps",
         "/protocol/stop_conditions",
     )
+    if design.execution is not None:
+        required = (
+            "/claim/hypothesis/value",
+            "/analysis/model",
+            "/measurement/primary_metric",
+            "/measurement/data_collection",
+            "/analysis/decision_rule",
+            "/analysis/stopping",
+            "/protocol/steps",
+            "/protocol/stop_conditions",
+            "/execution/purpose",
+            "/execution/inputs",
+            "/execution/expected_outputs",
+            "/execution/fixed_scientific_choices",
+            "/rationale",
+            "/analysis/uncertainty",
+            "/protocol/resources",
+            "/protocol/feasibility",
+        )
     for path in required:
-        if not resolve(design, path):
+        omitted = design.execution.not_applicable.get(path, "").strip() if design.execution else ""
+        if omitted and path in {
+            "/measurement/primary_metric",
+            "/measurement/data_collection",
+            "/protocol/resources",
+            "/protocol/feasibility",
+            "/analysis/uncertainty",
+        }:
+            continue
+        value = resolve(design, path)
+        if not value or isinstance(value, str) and not value.strip():
             add(
                 "missing_required",
                 "MAJOR",
                 path.removesuffix("/value"),
                 "Required scientific content is missing",
             )
-    if not any(c.role in {"control", "baseline"} for c in design.conditions):
-        add("missing_required", "MAJOR", "/conditions", "A control or baseline is required")
+    if design.claim.contrast_type.value is not None and not design.conditions:
+        add("missing_required", "MAJOR", "/conditions", "The declared contrast needs comparators")
+    if design.sampling.randomization and not design.sampling.unit_of_randomization:
+        add(
+            "missing_required",
+            "MAJOR",
+            "/sampling/unit_of_randomization",
+            "Assignment unit is missing",
+        )
     known = package_claim(package)
     for field, value in known.items():
         claim_field = getattr(design.claim, field)
@@ -84,20 +119,28 @@ def validate_design(
                 f"/claim/{field}",
                 f"Package-owned {field} differs from the researcher input",
             )
-    contrast = contrast_from(design.claim, design.analysis.sidedness, design.analysis.alpha)
+    contrast = (
+        contrast_from(design.claim, design.analysis.sidedness, design.analysis.alpha)
+        if design.claim.contrast_type.value is not None
+        else None
+    )
     needed = ["contrast_type", "direction"]
     if design.claim.contrast_type.value in {"non_inferiority", "superiority_by_margin"}:
         needed.append("margin")
-    for field in needed:
+    for field in needed if design.claim.contrast_type.value is not None else []:
         if isinstance(contrast, list) and getattr(design.claim, field).origin == "missing":
             add("claim_missing", "MAJOR", f"/claim/{field}", f"{field} is needed for the contrast")
     metric = design.measurement.primary_metric
-    if metric and (
-        metric.name.strip().casefold()
-        != str(design.claim.primary_outcome.value or "").strip().casefold()
-        or metric.unit.strip().casefold()
-        != str(design.claim.outcome_unit.value or "").strip().casefold()
-        or metric.kind != design.claim.outcome_kind.value
+    if (
+        metric
+        and design.claim.primary_outcome.value is not None
+        and (
+            metric.name.strip().casefold()
+            != str(design.claim.primary_outcome.value or "").strip().casefold()
+            or metric.unit.strip().casefold()
+            != str(design.claim.outcome_unit.value or "").strip().casefold()
+            or metric.kind != design.claim.outcome_kind.value
+        )
     ):
         add(
             "unit_mismatch",
@@ -135,7 +178,7 @@ def validate_design(
             "/analysis/sidedness",
             "This contrast requires one-sided inference",
         )
-    results = calculations if calculations is not None else compute_scenarios(design)
+    results = calculations or []
     if calculations is not None and any(
         r.binding.design_hash != design_hash(design) for r in calculations
     ):

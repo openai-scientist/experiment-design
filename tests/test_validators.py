@@ -1,6 +1,5 @@
-from conftest import design, package
-
 from experiment_design.science.validators import validate_design
+from tests.support.builders import design, package
 
 
 def findings(d):
@@ -34,7 +33,7 @@ def test_claim_missing():
     d = design()
     d.claim.direction.value = None
     d.claim.direction.origin = "missing"
-    assert codes(d) == ["claim_missing", "no_computable_scenario"]
+    assert codes(d) == ["claim_missing"]
 
 
 def test_unit_mismatch():
@@ -59,7 +58,7 @@ def test_unsourced_quantity():
 def test_llm_quantity_as_input():
     d = design()
     d.scenarios[0].sd.provenance = "llm"
-    assert codes(d) == ["llm_quantity_as_input", "no_computable_scenario"]
+    assert codes(d) == ["llm_quantity_as_input"]
 
 
 def test_alpha_sidedness():
@@ -68,8 +67,8 @@ def test_alpha_sidedness():
     assert codes(d) == ["alpha_sidedness"]
 
 
-def test_no_computable_scenario():
+def test_missing_optional_computation_does_not_invalidate_scientific_form():
     d = design()
     d.scenarios[0].sd = None
     f = findings(d)
-    assert [(x.code, x.severity) for x in f] == [("no_computable_scenario", "MINOR")]
+    assert f == []

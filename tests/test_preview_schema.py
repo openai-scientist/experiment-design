@@ -4,14 +4,15 @@ import json
 from hashlib import sha256
 
 import pytest
-from test_stage_pipeline import source_context, source_snapshot, supported_design
 
 from experiment_design.agents import design
 from experiment_design.agents.tools import ToolContext, build_tools
 from experiment_design.contracts import DesignChoice
 from experiment_design.runtime.loop import SubmitRejected
 from experiment_design.runtime.store import Store
-from experiment_design.workflow import Deps, _agent
+from experiment_design.stages.common import run_specialist
+from experiment_design.workflow import Deps
+from tests.support.scenarios import plan_body, source_context, source_snapshot, supported_design
 
 
 @pytest.fixture
@@ -38,33 +39,32 @@ def test_initial_preview_schema_budget_retains_full_submission_contract(initial)
     assert tools["compute_power"].parameters["$defs"]["Quantity"]["properties"]["provenance"]
 
 
-def test_summary_schema_distinguishes_canonical_choices_and_accepts_old_summary_key(initial):
+def test_summary_schema_keeps_canonical_choices_and_rejects_legacy_alias(initial):
     reason = DesignChoice(
         choice="Class randomization",
         why="Assignment follows the supplied class-based intervention",
         alternatives_considered=["Individual assignment risks shared classroom exposure"],
         tradeoffs="Fewer independent units; precision needs design-specific assessment",
     )
-    draft = supported_design().model_dump(mode="json")
+    draft = plan_body(supported_design())
     draft["rationale"] = [reason.model_dump(mode="json")]
     submission = design.submit_tool(initial)
     properties = submission.parameters["properties"]
     assert properties["summary"]["type"] == "string"
     assert "rationale" not in properties
-    for name in ("summary", "rationale"):
-        with pytest.raises(SubmitRejected):
-            submission.handler({"design": draft, name: [reason.model_dump(mode="json")]})
-        corrected = submission.handler({"design": draft, name: "Source-consistent synthesis"})
-        assert corrected["design"]["rationale"] == [reason.model_dump(mode="json")]
-        assert corrected["rationale"] == "Source-consistent synthesis"
+    with pytest.raises(SubmitRejected):
+        submission.handler({"design": draft, "summary": [reason.model_dump(mode="json")]})
+    with pytest.raises(SubmitRejected):
+        submission.handler({"design": draft, "rationale": "Legacy alias"})
+    corrected = submission.handler({"design": draft, "summary": "Source-consistent synthesis"})
+    assert corrected["design"]["rationale"] == [reason.model_dump(mode="json")]
+    assert corrected["rationale"] == "Source-consistent synthesis"
     assert initial.store.version(initial.run_id) is None
 
 
 def test_compact_preview_still_validates_design_and_source_authority(initial):
     tools = build_tools(initial)
-    draft = supported_design().model_dump(mode="json")
-    draft["analysis"]["method_id"] = "mixed_model"
-    draft["analysis"]["model"] = "Mixed model with class random intercept"
+    draft = plan_body(supported_design())
     for name in ("run_validators", "compute_power"):
         with pytest.raises(ValueError, match="extra_forbidden"):
             tools[name].handler({"design": draft | {"invented_field": "invalid"}})
@@ -72,20 +72,19 @@ def test_compact_preview_still_validates_design_and_source_authority(initial):
         forged["scenarios"][0]["sd"]["value"] = 999
         with pytest.raises(ValueError, match="source span does not support"):
             tools[name].handler({"design": forged})
-    results = tools["compute_power"].handler({"design": draft})
+    results = tools["compute_power"].handler({"design": draft, "calculator_id": "unimplemented"})
     assert results[0]["status"] == "not_computed"
     assert results[0]["power"] is None
     assert results[0]["implementation"] == "unavailable"
-    assert tools["run_validators"].handler({"design": draft})
+    assert tools["run_validators"].handler({"design": draft}) == []
 
 
 @pytest.mark.parametrize("contract", ["legacy", "compact", "current", "unexpected_drift"])
 def test_interrupted_initial_task_keeps_its_original_preview_schema(initial, contract):
-    from fakes import ScriptedJudge, ScriptedLLM, submit
-
     from experiment_design.config import RunConfig
     from experiment_design.contracts import AgentTask, TaskBudget
     from experiment_design.runtime.store import TaskRecord
+    from tests.support.providers import ScriptedJudge, ScriptedLLM, submit
 
     tools = build_tools(initial)
     # Recreate the actual pre-optimization contract, independent of any fallback code.
@@ -144,19 +143,23 @@ def test_interrupted_initial_task_keeps_its_original_preview_schema(initial, con
             submit(
                 "submit_design",
                 {
-                    "design": supported_design().model_dump(mode="json"),
-                    "rationale": "Resume original draft",
+                    "design": plan_body(supported_design()),
+                    "summary": "Resume original draft",
                 },
             )
         ]
     )
     deps = Deps(initial.store, llm, ScriptedJudge([]), RunConfig())
-    if contract == "unexpected_drift":
+    if contract != "current":
         with pytest.raises(ValueError, match="task tool schemas changed on resume"):
-            _agent(deps, initial.run_id, design, ctx=initial, task_id=task.id, mode="initial")
+            run_specialist(
+                deps, initial.run_id, design, ctx=initial, task_id=task.id, mode="initial"
+            )
         assert not llm.calls
         return
-    result = _agent(deps, initial.run_id, design, ctx=initial, task_id=task.id, mode="initial")
+    result = run_specialist(
+        deps, initial.run_id, design, ctx=initial, task_id=task.id, mode="initial"
+    )
     assert result.completion_status == "completed"
     assert llm.calls[0][1] == schemas
     assert llm.calls[0][0][:2] == prefix

@@ -3,9 +3,6 @@
 import json
 
 import pytest
-from fakes import ScriptedLLM, submit, tool_call
-from test_agents import chain
-from test_stage_pipeline import source_context, source_snapshot, supported_design
 
 from experiment_design.agents import methodologist, skeptic
 from experiment_design.agents.tools import ToolContext, build_tools
@@ -13,6 +10,8 @@ from experiment_design.contracts import AgentTask, TaskBudget
 from experiment_design.runtime.loop import run_agent
 from experiment_design.runtime.store import Store
 from experiment_design.science.validators import validate_design
+from tests.support.providers import ScriptedLLM, submit, tool_call
+from tests.support.scenarios import source_context, source_snapshot, supported_design
 
 
 @pytest.mark.parametrize("reviewer", [methodologist, skeptic], ids=["methodologist", "skeptic"])
@@ -66,19 +65,7 @@ def test_review_acceptance_does_not_conflate_numerical_status_or_choose_verdict(
             "evidence_refs": ["S1"] if case == "scientific_defect" else [ref],
         }
         payload = {"findings": [finding], "summary": notes[case]}
-        if reviewer is methodologist:
-            links = chain()
-            links[-1].update(
-                status="broken"
-                if case == "scientific_defect"
-                else "ok"
-                if case == "computed"
-                else "unclear",
-                note=notes[case],
-                evidence_refs=[ref],
-            )
-            payload["chain"] = links
-        else:
+        if reviewer is skeptic:
             payload["scenarios_checked"] = [ref]
 
         def respond_to_observation(messages, tools):
@@ -99,7 +86,18 @@ def test_review_acceptance_does_not_conflate_numerical_status_or_choose_verdict(
             reviewer.brief(ctx),
             build_tools(ctx),
             reviewer.submit_tool(ctx),
-            ScriptedLLM([tool_call("compute_power", {}, call_id="power"), respond_to_observation]),
+            ScriptedLLM(
+                [
+                    tool_call(
+                        "compute_power",
+                        {
+                            "calculator_id": "cluster_equal_size_t",
+                        },
+                        call_id="power",
+                    ),
+                    respond_to_observation,
+                ]
+            ),
             store,
             run,
             ctx.accepted_call_ids,
@@ -107,9 +105,7 @@ def test_review_acceptance_does_not_conflate_numerical_status_or_choose_verdict(
         assert result.completion_status == "completed"
         assert result.findings_or_changes["findings"][0]["severity"] == finding["severity"]
         assert result.findings_or_changes["summary"] == notes[case]
-        if reviewer is methodologist:
-            assert result.findings_or_changes["chain"][-1]["status"] == links[-1]["status"]
-        else:
+        if reviewer is skeptic:
             assert result.findings_or_changes["scenarios_checked"] == [ref]
         assert store.task(task_id).submission == result
         observation = store.accepted_observations(task_id)[0]

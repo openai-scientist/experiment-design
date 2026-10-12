@@ -1,0 +1,272 @@
+{
+  "design": {
+    "claim": {
+      "hypothesis": {
+        "value": "AI feedback is non-inferior to teacher feedback",
+        "origin": "package"
+      },
+      "prediction": {
+        "value": "Lower bound exceeds -3 points",
+        "origin": "package"
+      },
+      "failure_condition": {
+        "value": "Lower bound is at most -3 points",
+        "origin": "package"
+      },
+      "exposure": {
+        "value": "Weekly AI feedback",
+        "origin": "package"
+      },
+      "inference_scope": {
+        "value": "Grade-7 classes in one district for one term",
+        "origin": "package"
+      },
+      "primary_outcome": {
+        "value": "math score",
+        "origin": "package"
+      },
+      "outcome_unit": {
+        "value": "points",
+        "origin": "package"
+      },
+      "outcome_kind": {
+        "value": "continuous",
+        "origin": "package"
+      },
+      "direction": {
+        "value": "increase",
+        "origin": "package"
+      },
+      "contrast_type": {
+        "value": "non_inferiority",
+        "origin": "package"
+      },
+      "margin": {
+        "value": 3.0,
+        "origin": "package"
+      },
+      "estimand": {
+        "value": "ITT difference in class means",
+        "origin": "package"
+      }
+    },
+    "rationale": [],
+    "conditions": [
+      {
+        "name": "AI",
+        "role": "treatment",
+        "description": "Weekly AI written feedback"
+      },
+      {
+        "name": "Teacher",
+        "role": "control",
+        "description": "Teacher written feedback"
+      }
+    ],
+    "sampling": {
+      "population": "Grade-7 classes in one district for one term",
+      "inclusion": "Grade 7",
+      "exclusion": "None",
+      "allocation": "1:1",
+      "randomization": "Computer-generated class assignment",
+      "unit_of_randomization": "class",
+      "unit_of_analysis": "class",
+      "repetitions": "One term",
+      "n_per_arm": null,
+      "cluster": {
+        "unit": "class",
+        "size": {
+          "value": 25.0,
+          "unit": "students",
+          "provenance": "assumption",
+          "source_ref": null,
+          "source_span": null,
+          "note": ""
+        },
+        "clusters_per_arm": 25,
+        "icc": {
+          "value": 0.1,
+          "unit": "",
+          "provenance": "source",
+          "source_ref": "S1",
+          "source_span": "ICC 0.10",
+          "note": ""
+        },
+        "equal_size": true,
+        "independent_clusters": true
+      }
+    },
+    "measurement": {
+      "primary_metric": {
+        "name": "math score",
+        "kind": "continuous",
+        "operationalization": "Standardized end-of-term score",
+        "unit": "points",
+        "timing": "End of term"
+      },
+      "secondary_metrics": [],
+      "data_collection": "District test records",
+      "missingness": "Report attrition by arm"
+    },
+    "analysis": {
+      "method_id": "cluster_equal_size_t",
+      "common_variance": true,
+      "model": "Pooled t test of cluster means",
+      "sidedness": "one_sided",
+      "alpha": 0.025,
+      "uncertainty": "Lower 97.5% one-sided confidence bound",
+      "decision_rule": "Non-inferior if the lower bound exceeds -3 points",
+      "multiplicity": null,
+      "stopping": "Fixed end-of-term analysis; no interim efficacy analysis",
+      "sensitivity": []
+    },
+    "scenarios": [
+      {
+        "name": "base",
+        "effect": {
+          "value": 0.0,
+          "unit": "points",
+          "provenance": "assumption",
+          "source_ref": null,
+          "source_span": null,
+          "note": ""
+        },
+        "sd": {
+          "value": 10.0,
+          "unit": "points",
+          "provenance": "source",
+          "source_ref": "S1",
+          "source_span": "Standard deviation 10 points",
+          "note": ""
+        },
+        "p_control": null,
+        "p_treatment": null,
+        "target_power": 0.8
+      }
+    ],
+    "protocol": {
+      "steps": [
+        "Assign classes using recorded allocation",
+        "Deliver weekly feedback",
+        "Collect end-of-term scores",
+        "Analyze assigned classes using the specified SAP"
+      ],
+      "resources": [],
+      "feasibility": null,
+      "stop_conditions": [
+        "Suspend collection if research consent is withdrawn"
+      ]
+    },
+    "validity": [],
+    "assumptions": [],
+    "handoff": []
+  },
+  "design_hash": "2702de0adb190b7105b49e9e927a7599eaacef59bcc1851f5706f618e9fe8810",
+  "standalone_exploration": {
+    "schema_version": 1,
+    "policy": {
+      "schema_version": 1,
+      "version": 1,
+      "mode": "exploration"
+    },
+    "id": "exploration:r258828f7:1",
+    "run_id": "r258828f7",
+    "task_id": "explore:r258828f7:1",
+    "binding": {
+      "source_snapshot_id": "source-1",
+      "context_revision": null,
+      "design_version": null,
+      "design_hash": null,
+      "event_id": 4
+    },
+    "source": {
+      "id": "source-1",
+      "artifacts": [
+        {
+          "ref": "S1",
+          "path": "hypothesis.md",
+          "text": "AI feedback is non-inferior to teacher feedback\nLower bound exceeds -3 points\nLower bound is at most -3 points\nWeekly AI feedback\nGrade-7 classes in one district for one term\nmath score\npoints\ncontinuous\nincrease\nnon_inferiority\n3.0\nITT difference in class means\nMargin 3 points. Standard deviation 10 points. Class size 25. ICC 0.10. At most 60 classes.",
+          "sha256": "ee17a2ad8099e09fa3c0acb43911eff12422a30f970e236f59200c47136ecfe2",
+          "metadata": {}
+        }
+      ],
+      "intake_issues": []
+    },
+    "observations": [],
+    "submission": {
+      "intent_interpretation": "Investigate the proposed signal before committing a full plan",
+      "intent_source_refs": [
+        "S1"
+      ],
+      "candidates": [
+        {
+          "id": "probe-a",
+          "purpose": "Check measurement feasibility",
+          "question": "Can the proposed measure detect the intended signal?",
+          "target_uncertainty": "Measurement reliability",
+          "alternative_explanations": [
+            "An apparent effect is measurement drift"
+          ],
+          "method_sketch": "Repeat blinded measurements on a small calibration sample",
+          "outcomes": [
+            {
+              "observation": "Measurements disagree across repeats",
+              "next_step": "Improve the measurement before an efficacy experiment",
+              "inference_limit": "This does not test efficacy"
+            }
+          ],
+          "assumptions": [
+            "Repeat measurement is possible"
+          ],
+          "evidence_refs": [],
+          "resources": {
+            "requirements": [
+              "Calibration sample"
+            ],
+            "cost_basis": "Small repeated-measurement probe; actual cost unknown",
+            "unknowns": [
+              "Sample access"
+            ]
+          },
+          "feasibility": "unknown",
+          "feasibility_basis": "Sample access has not been established",
+          "conditions": [],
+          "limitations": [
+            "Cannot estimate a treatment effect"
+          ]
+        }
+      ],
+      "priorities": [
+        {
+          "candidate_ids": [
+            "probe-a"
+          ],
+          "rationale": "Resolve the measurement uncertainty cheaply first",
+          "evidence_refs": [],
+          "conditions": [
+            "Confirm sample access"
+          ]
+        }
+      ],
+      "unknowns": [
+        "Sample availability"
+      ],
+      "focused_questions": [],
+      "rationale": "A provisional methodological proposal, not empirical support",
+      "defer_reason": null
+    },
+    "selection": {
+      "task_id": "explore:r258828f7:1",
+      "binding": {
+        "source_snapshot_id": "source-1",
+        "context_revision": null,
+        "design_version": null,
+        "design_hash": null,
+        "event_id": 4
+      },
+      "choice": "recommend:probe-a"
+    },
+    "outcome": "recommendation",
+    "created_at": "2026-10-12T11:41:26.793413+00:00"
+  }
+}

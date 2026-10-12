@@ -1,14 +1,15 @@
 import pytest
-from conftest import design, package
 
 from experiment_design.contracts import ReviewIssue
 from experiment_design.runtime.store import Store
+from tests.support.builders import design, package
+from tests.support.scenarios import seeded_run
 
 
 @pytest.fixture
 def state(tmp_path):
     store = Store(tmp_path / "exd.db")
-    run = store.create_run(package(), {"provider": "configured"})
+    run = seeded_run(store, package(), {"provider": "configured"})
     yield store, run
     store.close()
 
@@ -55,9 +56,10 @@ def test_issue_id_assigned_once(state):
 
 def test_unknown_event_type_rejected(state):
     store, run = state
+    before = store.events(run)
     with pytest.raises(ValueError, match="unknown event"):
         store.append_event(run, "fabricated", {})
-    assert len(store.events(run)) == 1
+    assert store.events(run) == before
 
 
 def test_events_after_id(state):
@@ -65,13 +67,16 @@ def test_events_after_id(state):
     cursor = store.events(run)[-1].event_id
     store.update_run(run, status="REVIEWABLE")
     events = store.events(run, after_id=cursor)
-    assert [(e.type, e.data["status"]) for e in events] == [("run.status", "REVIEWABLE")]
+    assert [(e.type, e.data["status"]) for e in events] == [
+        ("run.status", "REVIEWABLE"),
+        ("run.updated", "REVIEWABLE"),
+    ]
 
 
 def test_reopen_store_persists(tmp_path):
     path = tmp_path / "exd.db"
     first = Store(path)
-    run = first.create_run(package(), {"provider": "configured"})
+    run = seeded_run(first, package(), {"provider": "configured"})
     first.add_version(run, design(), author="design", parent=None)
     first.save_issue(issue(run))
     first.close()

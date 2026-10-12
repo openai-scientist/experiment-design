@@ -4,6 +4,7 @@ import pytest
 
 from experiment_design.config import JevConfig
 from experiment_design.runtime.jev import JudgeError, Question, TypeSafeJudge
+from tests.support.scenarios import seeded_run
 
 
 class Client:
@@ -63,15 +64,14 @@ def test_model_passed_only_when_set():
 
 
 def test_jev_call_limit_and_missing_usage(tmp_path):
-    from conftest import package
-    from fakes import ScriptedJudge
-
     from experiment_design.config import RunConfig
     from experiment_design.runtime.jev import bounded_decide
     from experiment_design.runtime.store import Store
+    from tests.support.builders import package
+    from tests.support.providers import ScriptedJudge
 
     store = Store(tmp_path / "routing.db")
-    run = store.create_run(package(), {})
+    run = seeded_run(store, package(), {})
     judge = ScriptedJudge([{"next": "REVIEW"}])
     cfg = RunConfig(jev_max_calls=1)
     bounded_decide(judge, store, run, cfg, {}, questions())
