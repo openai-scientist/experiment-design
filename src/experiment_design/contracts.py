@@ -28,6 +28,8 @@ class Finding(Record):
     issue: str
     consequence: str
     suggestion: str
+    anchor: str = ""
+    category: str = "other"
     evidence_refs: list[str] = Field(default_factory=list)
 
 
