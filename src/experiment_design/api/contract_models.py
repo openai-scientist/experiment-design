@@ -9,7 +9,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 CONTRACT_VERSION = "1.0.0"
 
@@ -371,6 +371,44 @@ class EventEnvelope(Wire):
     summary: str | None = None
     refs: list[str] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def conditions_of_the_event_type(self) -> "EventEnvelope":
+        """The conditions the schema attaches to each type (allOf), checked on the way out."""
+        if self.event_class is EventClass.activity:
+            if not (self.step_key and self.actor and self.summary and self.summary.strip()):
+                raise ValueError("an activity needs step_key, actor and summary")
+            return self
+        payload_model = EVENT_PAYLOADS.get(self.type)
+        if payload_model is not None:
+            payload_model.model_validate(self.payload)
+        if self.type in PHASE_REQUIRED and self.phase is None:
+            raise ValueError(f"{self.type} needs a phase")
+        if self.type in FIXED_PHASE and self.phase is not FIXED_PHASE[self.type]:
+            raise ValueError(f"{self.type} needs phase {FIXED_PHASE[self.type].value}")
+        if self.type == "run.step_changed" and not self.step_key:
+            raise ValueError("run.step_changed needs a step_key")
+        return self
+
+
+EVENT_PAYLOADS: dict[str, type[BaseModel]] = {
+    "run.phase_changed": PhaseChanged,
+    "run.step_changed": StepChanged,
+    "run.gate_opened": Gate,
+    "run.gate_closed": GateClosed,
+    "review.completed": ReviewCompleted,
+    "artifact.delivered": ArtifactDelivered,
+    "run.published": RunPublished,
+    "run.failed": FailureInfo,
+    "run.cancelled": EmptyPayload,
+    "run.cost": RunCost,
+}
+PHASE_REQUIRED = frozenset({"run.phase_changed", "run.gate_opened"})
+FIXED_PHASE = {
+    "run.published": Phase.published,
+    "run.failed": Phase.failed,
+    "run.cancelled": Phase.cancelled,
+}
 
 
 class EventBatch(Wire):

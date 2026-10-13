@@ -5,7 +5,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -52,10 +52,16 @@ def _json(path: Path, data: dict) -> None:
     _atomic(path, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
+# A store change: ('event', kind, data) after the journal write, or ('state', old, new)
+# after the checkpoint write.
+StoreChange = tuple[Literal["event"], str, dict] | tuple[Literal["state"], RunState, RunState]
+
+
 class RunStore:
     def __init__(self, run_dir: Path):
         self.path = Path(run_dir).resolve()
         self._executing = False
+        self._listeners: list[Callable[[StoreChange], None]] = []
         if self.path.is_file():
             raise WorkflowError(
                 "Legacy SQLite runs are unsupported; supply a filesystem run directory"
@@ -107,10 +113,19 @@ class RunStore:
         store.complete(1, [], ["hypothesis.md"])
         return store
 
+    def subscribe(self, listener: Callable[[StoreChange], None]) -> None:
+        """Listener errors propagate: a failed projection must not look like success."""
+        self._listeners.append(listener)
+
+    def _notify(self, change: StoreChange) -> None:
+        for listener in list(self._listeners):
+            listener(change)
+
     def update(self, **fields) -> RunState:
         state = RunState.model_validate({**self.state.model_dump(), **fields})
         _json(self.path / "checkpoint.json", state.model_dump(mode="json"))
-        self.state = state
+        previous, self.state = self.state, state
+        self._notify(("state", previous, state))
         return state
 
     def config(self) -> dict:
@@ -295,6 +310,7 @@ class RunStore:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
+        self._notify(("event", kind, data))
 
     def activity(
         self,
