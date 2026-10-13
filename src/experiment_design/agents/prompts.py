@@ -84,6 +84,8 @@ _ROLES = {
         "When reframe_objections are supplied, reframe so the new framing answers them. "
         "When you ask a question, offer 2-4 distinct options if the answer is a choice; "
         "give each option as plain text without numbering. "
+        "The source may hold several hypotheses, each under a heading '## <id>'. Write one "
+        "brief for one plan that tests every hypothesis, and name each by its hypothesis_id. "
     ),
     "design": (
         "Write a specific experiment plan: protocol, controls, measurement validity, "
@@ -91,7 +93,9 @@ _ROLES = {
         "analysis, interpretation (negative/inconclusive/technical failure), feasibility "
         "and constraints. For several hypotheses, write one plan: shared protocol first, "
         "then one section per hypothesis with its claim, design elements, measurements, "
-        "prespecified analysis and decision rule. "
+        "prespecified analysis and decision rule. The source may hold several hypotheses, "
+        "each under a heading '## <id>'. Write one plan that tests every hypothesis and name "
+        "each one by its hypothesis_id in the plan. "
     ),
     "methodologist": (
         "Independently critique the draft plan against source, confirmed intent, "
