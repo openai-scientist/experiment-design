@@ -730,6 +730,49 @@ def test_source_span_must_be_substantial_exact_text(tmp_path):
     assert ["error" in r for r in results[:5]] == [True, True, True, False, True]
 
 
+def test_workspace_document_quote_is_a_citable_location_not_evidence(tmp_path):
+    from experiment_design.agents.tools import run_specialist
+
+    store = store_for(tmp_path)
+    workspace = {"plan": "Randomize classes after the baseline test is scored.\n"}
+    quote = {"name": "plan", "span": "Randomize classes after the baseline"}
+    provider = ToolProvider([("source", quote), ("submit", {"markdown": "Review"})])
+    run_specialist("skeptic", store, provider, RunConfig(task_max_turns=3), workspace, [])
+    result = [e["data"]["result"] for e in store.events() if e["kind"] == "tool.result"][0]
+    assert result["kind"] == "document"
+    assert result["evidence_ref"].startswith("document:")
+
+    finding = MAJOR | {"evidence_refs": [result["evidence_ref"]]}
+    cited = ToolProvider(
+        [("source", quote), ("submit", {"markdown": "Review", "findings": [finding]})]
+    )
+    output = run_specialist("skeptic", store, cited, RunConfig(task_max_turns=3), workspace, [])
+    assert output.findings[0].evidence_refs == [result["evidence_ref"]]
+
+
+def test_calculation_value_cannot_come_from_a_workspace_document(tmp_path):
+    from experiment_design.agents.tools import run_specialist
+
+    store = store_for(tmp_path)
+    workspace = {"plan": "Assume the effect was 20 points in the pilot.\n"}
+    effect = {
+        "value": 20,
+        "unit": "points",
+        "provenance": "source",
+        "source_ref": "plan",
+        "source_span": "Assume the effect was 20 points",
+    }
+    provider = ToolProvider(
+        [
+            ("calculate", {"calculator_id": "independent_pooled_t", "effect": effect}),
+            ("submit", {"markdown": "done"}),
+        ]
+    )
+    run_specialist("design", store, provider, RunConfig(), workspace, [])
+    result = [e["data"]["result"] for e in store.events() if e["kind"] == "tool.result"][0]
+    assert "lacks supplied source support" in result["error"]
+
+
 def test_calculation_source_span_must_be_substantial(tmp_path):
     from experiment_design.agents.tools import run_specialist
 

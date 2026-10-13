@@ -209,8 +209,10 @@ def run_specialist(
         ),
         _tool(
             "source",
-            "Retrieve an exact supplied source span: a verbatim quote copied from the document "
-            "(at least 12 non-whitespace characters), not line numbers",
+            "Quote an exact span from any workspace document to cite it in findings: a "
+            "verbatim quote (at least 12 non-whitespace characters), not line numbers. "
+            "Supplied sources give kind 'source' (evidence); other documents give kind "
+            "'document' (a quoted location, not evidence of a value)",
             {
                 "type": "object",
                 "properties": {
@@ -358,13 +360,21 @@ def run_specialist(
                 elif call.name == "search":
                     result = _search(workspace, args)
                 elif call.name == "source":
-                    sources = store.sources()
                     name, span = args["name"], args["span"]
-                    if not _exact_span(sources, name, span):
-                        raise ValueError("Unknown source or fabricated source span")
-                    ref = "source:" + hashlib.sha256((name + span).encode()).hexdigest()
+                    # Supplied sources are evidence; other workspace documents are quoted
+                    # locations (plan text, actual replies) and never count as source values.
+                    if _exact_span(store.sources(), name, span):
+                        kind = "source"
+                    elif _exact_span(workspace, name, span):
+                        kind = "document"
+                    else:
+                        raise ValueError(
+                            "Span is not an exact quote of at least 12 non-whitespace "
+                            f"characters from document {name!r}"
+                        )
+                    ref = f"{kind}:" + hashlib.sha256((name + span).encode()).hexdigest()
                     accepted_refs.add(ref)
-                    result = {"evidence_ref": ref, "source": name, "span": span}
+                    result = {"evidence_ref": ref, "source": name, "kind": kind, "span": span}
                 elif call.name == "calculate":
                     request = CalculationRequest.model_validate(args)
                     if not request.calculator_id:

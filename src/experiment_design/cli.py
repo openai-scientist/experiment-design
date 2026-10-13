@@ -146,6 +146,10 @@ def _status(store: RunStore) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    # Plans and replies are UTF-8; a redirected Windows console would otherwise mangle them.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     try:
         if args.command == "run":
             from experiment_design.workflow.engine import start_run
