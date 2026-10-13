@@ -14,6 +14,11 @@ class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class Profile(Record):
+    domain: str | None = None
+    research_type: str | None = None
+
+
 _ENUMERATOR = re.compile(r"^\s*(?:\(\d+\)|\d+[.)]|-)\s+")
 
 
