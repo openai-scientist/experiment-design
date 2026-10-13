@@ -31,3 +31,14 @@ def lookup_evidence(query: str, sources: list[Source], limit: int = 5) -> list[E
                 )
     ranked.sort(key=lambda pair: -pair[0])
     return [hit for _, hit in ranked[: max(0, limit)]]
+
+
+def supports_number(value: float | None, span: str | None) -> bool:
+    return (
+        value is not None
+        and span is not None
+        and any(
+            float(number) == value
+            for number in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", span)
+        )
+    )

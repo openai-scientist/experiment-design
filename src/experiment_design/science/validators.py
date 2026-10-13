@@ -7,7 +7,7 @@ from experiment_design.contracts import (
     ScientificPackage,
     Severity,
 )
-from experiment_design.patch import design_hash, package_claim, quantities, resolve
+from experiment_design.design.patch import design_hash, package_claim, quantities, resolve
 from experiment_design.science.power import contrast_from
 
 

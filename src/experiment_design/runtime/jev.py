@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from typesafe_sdk import Choice, RetryPolicy, TypeSafeClient
 
 from experiment_design.config import ConfigError, JevConfig, RunConfig
-from experiment_design.runtime.store import Store
+from experiment_design.persistence.store import Store
 
 
 @dataclass(frozen=True)

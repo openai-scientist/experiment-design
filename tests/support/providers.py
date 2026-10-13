@@ -4,7 +4,7 @@ import json
 from copy import deepcopy
 from uuid import uuid4
 
-from experiment_design.runtime.jev import Decision
+from experiment_design.runtime.jev import Decision, Question
 from experiment_design.runtime.llm import LLMResponse, ToolCall
 
 
@@ -57,3 +57,7 @@ def tool_call(name, args, call_id=None):
 
 def submit(name, payload):
     return tool_call(name, payload)
+
+
+def questions():
+    return {"next": Question("Choose next action", {"REVIEW": "Review", "STOP": "Stop"})}

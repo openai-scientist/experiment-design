@@ -3,7 +3,7 @@
 from uuid import uuid4
 
 from experiment_design.contracts import ResearcherRequest, ScientificPackage
-from experiment_design.runtime.store import RunRecord, now
+from experiment_design.persistence.store import RunRecord, now
 
 
 def create_historical_run(store, package: ScientificPackage, config: dict) -> str:

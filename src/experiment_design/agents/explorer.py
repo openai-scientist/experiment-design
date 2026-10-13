@@ -9,7 +9,11 @@ from experiment_design.agents.tools import (
     submit_schema,
     validate_refs,
 )
-from experiment_design.exploration import ExplorationSubmission, evidence_refs, validate_exploration
+from experiment_design.design.exploration import (
+    ExplorationSubmission,
+    evidence_refs,
+    validate_exploration,
+)
 from experiment_design.runtime.loop import AgentSpec, Tool
 
 TOOLS = ("read_sources", "lookup_evidence")

@@ -281,7 +281,7 @@ def calculate(request: CalculationRequest) -> CalculationResult:
     digest = hashlib.sha256(raw.encode()).hexdigest()
     design = request.design
     if request.preview_patch:
-        from experiment_design.patch import _apply_patch
+        from experiment_design.design.patch import _apply_patch
 
         ids = {
             q.source_ref for s in design.scenarios for q in (s.effect, s.sd) if q and q.source_ref

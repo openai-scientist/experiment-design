@@ -19,8 +19,8 @@ from experiment_design.contracts import (
     ResearcherDecision,
     ScientificPackage,
 )
-from experiment_design.package import all_sources
-from experiment_design.patch import (
+from experiment_design.design.intake import all_sources
+from experiment_design.design.patch import (
     PatchError,
     apply_patch,
     design_diff,
@@ -29,9 +29,9 @@ from experiment_design.patch import (
     resolve,
     scientific_commitments,
 )
+from experiment_design.persistence.store import Store
 from experiment_design.runtime.loop import SubmitRejected, Tool
-from experiment_design.runtime.store import Store
-from experiment_design.science.evidence import lookup_evidence
+from experiment_design.science.evidence import lookup_evidence, supports_number
 from experiment_design.science.power import calculate, compute_scenario
 from experiment_design.science.validators import validate_design
 
@@ -129,8 +129,6 @@ def validate_findings(findings: list[Finding], ctx: ToolContext) -> list[str]:
 def validate_source_quantities(design: Design | dict, ctx: ToolContext) -> None:
     if ctx.binding is None:
         return
-    from experiment_design.agents.understanding import supports_number
-
     known = {s.id: s for s in sources(ctx)}
     data = design.model_dump(mode="json") if isinstance(design, Design) else design
     for path, quantity in quantities(data):

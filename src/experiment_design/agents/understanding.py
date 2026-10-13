@@ -13,9 +13,15 @@ from experiment_design.contracts import (
     ResearchContext,
     ResearcherDecision,
 )
-from experiment_design.decisions import pending_reconciliation
-from experiment_design.patch import PatchError, package_claim, resolve, scientific_commitments
+from experiment_design.design.decisions import pending_reconciliation
+from experiment_design.design.patch import (
+    PatchError,
+    package_claim,
+    resolve,
+    scientific_commitments,
+)
 from experiment_design.runtime.loop import AgentSpec, SubmitRejected
+from experiment_design.science.evidence import supports_number
 
 SPEC = AgentSpec(
     "understanding", "Understand the supplied research, preserving intent and uncertainty."
@@ -337,14 +343,3 @@ def _schema_path(schema: dict, parts: list[str], definitions: dict) -> bool:
     if "items" in schema and re.fullmatch(r"0|[1-9][0-9]*", parts[0]):
         return _schema_path(schema["items"], parts[1:], definitions)
     return False
-
-
-def supports_number(value: float | None, span: str | None) -> bool:
-    return (
-        value is not None
-        and span is not None
-        and any(
-            float(number) == value
-            for number in re.findall(r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?", span)
-        )
-    )

@@ -4,8 +4,8 @@ import json
 
 from experiment_design.agents.tools import ToolContext, context_brief, submit_schema
 from experiment_design.contracts import Patch, Record, ResearchContext
-from experiment_design.decisions import interpret
-from experiment_design.patch import scientific_path
+from experiment_design.design.decisions import interpret
+from experiment_design.design.patch import scientific_path
 from experiment_design.runtime.loop import AgentSpec
 
 SPEC = AgentSpec(

@@ -38,8 +38,8 @@ def framed_run(store, snapshot=None):
 def advance_framing(rid, deps):
     """Drive just the real S2 handler for focused exploration/recovery tests."""
     from experiment_design.runtime.jev import JudgeBudgetStop
-    from experiment_design.stages.common import BudgetStop
     from experiment_design.workflow import run_stage
+    from experiment_design.workflow.stages.common import BudgetStop
 
     with deps.store.run_execution(rid):
         try:
@@ -54,8 +54,8 @@ def historical_exploration(store, snapshot):
     """Load a historical candidate packet for read/export tests; no old controller."""
     from uuid import uuid4
 
-    from experiment_design.exploration import ExplorationPolicy
-    from experiment_design.runtime.store import RunRecord, now
+    from experiment_design.design.exploration import ExplorationPolicy
+    from experiment_design.persistence.store import RunRecord, now
 
     rid = "r" + uuid4().hex[:8]
     policy = ExplorationPolicy()

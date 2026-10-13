@@ -15,7 +15,7 @@ from experiment_design.agents.tools import (
     validate_source_quantities,
 )
 from experiment_design.contracts import Design, Patch, Record, ResearcherDecision
-from experiment_design.patch import apply_patch, initial_design
+from experiment_design.design.patch import apply_patch, initial_design
 from experiment_design.runtime.loop import AgentSpec, SubmitRejected
 
 SPEC = AgentSpec("design", "Design a coherent experiment using evidence and scientific tools.")

@@ -8,13 +8,13 @@ from experiment_design.contracts import (
     SourceArtifact,
     SourceSnapshot,
 )
-from experiment_design.runtime.store import Store
+from experiment_design.persistence.store import Store
 from tests.support.builders import design, package
 from tests.support.providers import submit, tool_call
 
 
 def source_snapshot(method="Pooled t test of cluster means"):
-    from experiment_design.patch import package_claim
+    from experiment_design.design.patch import package_claim
 
     text = "\n".join(str(v) for v in package_claim(package()).values())
     text += (
@@ -86,7 +86,7 @@ def plan_body(d):
 
 def source_context(method="Pooled t test of cluster means"):
     from experiment_design.contracts import FieldAnnotation, ResearchContext
-    from experiment_design.patch import package_claim
+    from experiment_design.design.patch import package_claim
 
     p = package()
     p.hypothesis.method = method

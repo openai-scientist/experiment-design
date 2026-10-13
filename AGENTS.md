@@ -13,7 +13,7 @@ Python 3.12+, `uv`, PowerShell; commands run from the repository root.
 |---|---|
 | Install locked dependencies | `uv sync --locked` |
 | CLI usage | `uv run exd --help` |
-| Focused check | `uv run pytest tests/test_<module>.py -q` |
+| Focused check (review example) | `uv run pytest tests/integration/review -q` |
 | Complete deterministic suite | `uv run pytest -q` |
 | Lint / formatting | `uv run ruff check .` / `uv run ruff format --check .` |
 | Measure test time | `uv run pytest -q --durations=15` |
@@ -38,18 +38,33 @@ At final review, `decide --action CLARIFY --text <question>` records a question;
 researcher approval pending and does not revise scientific choices. Answers remain
 in the decision history and publication; clarification questions are not confirmed intent.
 
-## Code ownership
+## Components
 
 Under `src/experiment_design/`:
 
-- `contracts.py`, `stages/`: records, stage contracts and explicit stage owners.
-- `package.py`, `patch.py`: source intake and protected design changes.
-- `workflow.py`, `review.py`, `qualification.py`, `decisions.py`: coordination,
-  independent review, plan qualification and researcher decisions.
-- `runtime/`, `agents/`, `science/`: Store/provider loop, role tools and statistics.
-- `output.py`, `cli.py`: exports and researcher commands.
+| Component | Responsibility |
+|---|---|
+| `contracts.py` | Shared records, transitions and errors. |
+| `design/` | Source intake, protected changes, directions, approval policy and transactional researcher decisions. |
+| `persistence/` | Authoritative Store, atomic SQLite updates, journal and snapshots. |
+| `runtime/` | Provider calls, task execution and usage budgets. |
+| `agents/` | Scientific reasoning and specialist tool use. |
+| `science/` | Statistical computation, validation and evidence. |
+| `workflow/` | Stage coordination, independent review and qualification. |
+| `publication/` | Plan rendering, frozen exports and isolated historical readers. |
+| `cli.py`, `config.py` | Researcher commands and configuration. |
 
-`tests/fixtures/` holds reusable references. `docs/`, `pilot/`, `.exd/`, `exd.yaml`
+Keep dependencies acyclic. Pure design policies never import services;
+`design.decisions` may use persistence, but persistence imports only shared
+contracts and pure design policies, never workflow or agents. Agents never import
+workflow execution. Publication consumes frozen records without invoking workflow
+or agents. Stage owners live in `workflow/stages/`; public workflow APIs are
+exported by `workflow/__init__.py`.
+
+Tests use `unit/`, `integration/` and `e2e/`, grouped by behavior, not source files.
+Shared builders/fake external providers live in `tests/support/`; test modules do
+not import one another. `tests/fixtures/` holds reusable references.
+`docs/`, `pilot/`, `.exd/`, `exd.yaml`
 and `.env` are ignored/local; deterministic checks must not require them.
 Preserve researcher inputs and run evidence.
 
@@ -57,9 +72,12 @@ Preserve researcher inputs and run evidence.
 
 - Inspect code, callers, tests and Git changes; preserve others' work. Plan complex
   changes; implement clear, authorized changes directly.
-- Reuse code and keep fixes scoped. Avoid speculative abstractions, dead code,
-  placeholders and unrequested frameworks/architecture changes. Use domain names,
-  typed public functions and Ruff; keep task/plan numbers out of code.
+- Keep components small, with one clear responsibility and direct control flow.
+  Extend the existing owner first; add a module or abstraction only when a concrete
+  requirement needs it. Avoid extra layers, generic frameworks, speculative
+  abstractions, dead code, placeholders and unrequested architecture changes.
+- Reuse code and keep fixes scoped. Use domain names, typed public functions and
+  Ruff; keep task/plan numbers out of code.
 - Delegate only when requested or required by applicable instructions, with bounded
   context, disjoint ownership and verified results. Never invoke/delegate to Astra
   unless the user explicitly requests it.
@@ -70,8 +88,9 @@ Preserve researcher inputs and run evidence.
 
 - JEV chooses WHAT/NEXT among legal code-enumerated options; agents choose HOW.
   Code validates transitions and computes statistics.
-- SQLite is authoritative; the append-only journal is the event source. Package
-  owns intake reads, Store owns state, export owns outputs; CLI/config load config.
+- SQLite is authoritative; the append-only journal is the event source. Design
+  intake owns source reads, Store owns state, publication owns outputs;
+  CLI/config load configuration.
   Persist meaningful stage outputs with version/input references.
 - One canonical design per version; after synthesis, use validated `apply_patch`.
   Protect source/confirmed intent, measurement mirrors, context values and typed
@@ -132,8 +151,9 @@ confirm failure, restore exactly and inspect the diff.
 Use focused checks while editing; run full tests for shared contracts, Store,
 science or workflow changes. Before code commit/handoff, run full tests, lint and
 format checks. Documentation-only edits need path/command/diff verification.
-Use the focused lane commands in TESTING.md; shared contracts/runtime/Store and
-unmatched changes require the full suite. Retain full coverage before handoff.
+Use focused behavior groups under `tests/unit/`, `tests/integration/` or `tests/e2e/`;
+shared contracts/runtime/Store and unmatched changes require the full suite.
+Retain full coverage before handoff.
 Report changes, actual results and limitations using PASS/FAIL/INCONCLUSIVE.
 Never claim unperformed checks or researcher acceptance.
 

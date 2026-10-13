@@ -8,8 +8,8 @@ from typing import Any
 from uuid import uuid4
 
 from experiment_design.contracts import AgentResult, AgentTask, Observation
+from experiment_design.persistence.store import Store, TaskRecord
 from experiment_design.runtime.llm import LLMClient
-from experiment_design.runtime.store import Store, TaskRecord
 
 
 @dataclass(frozen=True)
