@@ -16,6 +16,7 @@ from experiment_design.science.power import calculate
 
 _READ_LINES = 400
 _READ_CAP = 1000
+_INTERNAL_REF = re.compile(r"(?:source|document|calculation):[0-9a-f]{16,}")
 
 
 def _tool(name: str, description: str, parameters: dict) -> dict:
@@ -191,6 +192,11 @@ def _problems(
             for e in exc.errors(include_url=False, include_context=False, include_input=False)
         ]
     problems = []
+    if _INTERNAL_REF.search(output.markdown):
+        problems.append(
+            "markdown contains internal evidence refs; put refs only in findings "
+            "evidence_refs and name the document or quote it in the Markdown"
+        )
     unknown = sorted(
         {ref for f in output.findings for ref in f.evidence_refs if ref not in accepted_refs}
     )

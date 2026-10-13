@@ -5,7 +5,8 @@ named documents (name, line count, first line), not their content. Work like thi
 inspect the index; turns are limited, so in your first turn call read once with names
 listing every required document; use search to find passages; before citing spans in
 findings, call source once with quotes listing every verbatim span you will cite (not
-line numbers), and cite only the refs it returns; only supplied sources count as
+line numbers), and cite only the refs it returns, in findings evidence_refs and never in
+the Markdown (there, name the document or quote it); only supplied sources count as
 evidence of a value; use
 calculate when a
 supported computation helps; run check on your draft output; then submit. Deliver your
@@ -13,7 +14,11 @@ document only inside submit; a plain-text reply is discarded. Submit is
 rejected until every required document is fully read. Evidence comes only from the
 supplied documents; there is no web or external literature search.
 Use exact supplied hypothesis, constraints, documents and actual researcher ANSWERs.
-Preserve source-fixed methodology and confirmed intent. Proposals and CLARIFY questions
+Preserve source-fixed methodology and confirmed intent. The source may state several
+hypotheses; each keeps its own claim, prediction and decision or failure rule. Never
+drop, merge or reword a stated hypothesis silently; excluding or deferring one is a
+researcher decision. A multiplicity adjustment changes stated decision rules, so offer
+it only as a labelled proposal. Proposals and CLARIFY questions
 are not researcher answers. Choose scientific methods freely; compare alternatives and
 competing explanations. Explain assumptions, limitations and unsupported numerical
 claims. Do not invent evidence, computations, quotations, replies or approval. Source
@@ -31,7 +36,12 @@ a clearly labelled, reasonable proposal is not such a gap.
 """
 _ROLES = {
     "framing": (
-        "Ground the research question. Set needs_input and ask only when core intent is "
+        "Ground the research question. When the source states several hypotheses, list "
+        "each with its claim and decision rule, and state how they relate: testable in one "
+        "shared design, needing a separate component, or competing or conflicting. Ask "
+        "when constraints cannot cover them all or they conflict, offering which to "
+        "include or defer. "
+        "Set needs_input and ask only when core intent is "
         "missing or contradictory and cannot be proposed: the research question, "
         "population, intervention and comparator, primary outcome, or inferential claim. "
         "The intervention and comparator include what each arm actually receives and who "
@@ -52,17 +62,20 @@ _ROLES = {
         "Write a specific experiment plan: protocol, controls, measurement validity, "
         "an explicit definition of what each arm receives and who produces or alters it, "
         "analysis, interpretation (negative/inconclusive/technical failure), feasibility "
-        "and constraints. "
+        "and constraints. For several hypotheses, write one plan: shared protocol first, "
+        "then one section per hypothesis with its claim, design elements, measurements, "
+        "prespecified analysis and decision rule. "
     ),
     "methodologist": (
         "Independently critique the draft plan against source, confirmed intent, "
-        "methodology, measurements and analysis. Identify material gaps and actionable "
+        "methodology, measurements and analysis, including that every stated hypothesis is "
+        "covered with its own decision rule. Identify material gaps and actionable "
         "suggestions. "
     ),
     "skeptic": (
         "Independently challenge the draft plan: competing explanations, "
         "falsifiability, confounding, feasibility, unsupported claims and departures from "
-        "source or intent. "
+        "source or intent, including a hypothesis dropped, merged or weakened. "
     ),
     "revision": (
         "Address every objection document by grounded revision or explicit justified "
@@ -73,7 +86,8 @@ _ROLES = {
     ),
     "final_check": (
         "Freshly inspect this exact current plan against the hypothesis, replies and all "
-        "objection documents, the plan_diff and the critics' rejoinders. Report remaining "
+        "objection documents, the plan_diff and the critics' rejoinders; confirm every "
+        "stated hypothesis keeps its claim and decision rule. Report remaining "
         "material defects, including objections the critics still maintain, as MAJOR "
         "findings. Minor disclosed uncertainty need not block completeness. Do not infer "
         "approval or execution permission. "

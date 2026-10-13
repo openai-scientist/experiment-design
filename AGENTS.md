@@ -42,7 +42,7 @@ CLI/config own researcher commands and configuration.
 | Stage | Responsibility |
 |---|---|
 | S1 | Snapshot exact immutable source text and provenance. |
-| S2 | Frame the question, compare directions and expose actual researcher questions. |
+| S2 | Frame the question (one or several hypotheses), compare directions and expose actual researcher questions. |
 | S3 | Write a grounded scientific plan with protocol, measurements and analysis. |
 | S4 | Independent Methodologist/Skeptic reviews; bounded revision or reframe. |
 | S5 | Fresh check of the current plan, source/replies and objection handling. |
@@ -57,7 +57,9 @@ Keep TypeSafe/JEV provider dependency and public configuration.
 
 ## Authority and scientific honesty
 
-Supplied hypothesis/constraints and actual confirmed replies are authoritative.
+Supplied hypotheses/constraints and actual confirmed replies are authoritative. One input
+may state several hypotheses; the single plan covers each with its own claim and decision
+rule, and only the researcher excludes or defers one.
 Agent proposals and clarification questions are not confirmed researcher intent.
 Record exact replies, identity, UTC time, current attempt and relevant document or
 source/question bindings. Stale replies/reviews cannot bless a revised document.

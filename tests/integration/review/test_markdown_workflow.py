@@ -279,6 +279,17 @@ def test_fabricated_evidence_ref_rejected_at_submit(tmp_path):
     assert "not accepted" in provider.inputs[-1][-1]["content"]
 
 
+def test_markdown_with_internal_evidence_ref_is_rejected(tmp_path):
+    from experiment_design.agents.tools import run_specialist
+
+    store = store_for(tmp_path)
+    ref = "source:" + "7c2487ed" * 8
+    provider = Provider([{"markdown": f"Margin is 3 points [{ref}]."}, {"markdown": "Clean"}])
+    result = run_specialist("design", store, provider, RunConfig(), {}, [])
+    assert result.markdown == "Clean"
+    assert "internal evidence refs" in provider.inputs[-1][-1]["content"]
+
+
 def test_task_budget_cumulative_after_interrupted_submission(tmp_path):
     from experiment_design.agents.tools import run_specialist
 
