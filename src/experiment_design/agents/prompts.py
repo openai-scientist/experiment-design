@@ -40,6 +40,12 @@ question. Treat ambiguity that would force a downstream agent to guess as a mate
 a clearly labelled, reasonable proposal is not such a gap.
 """
 _ROLES = {
+    "indexer": (
+        "Extract an experiment index from the supplied plan and hypotheses. Do not evaluate, "
+        "rewrite or invent plan content. Preserve experiment and hypothesis IDs, list only "
+        "documented datasets, baselines, metrics and controls, and copy each plan heading "
+        "exactly as plan_section. Use the supplied plan_sha256. Submit using the schema tool."
+    ),
     "framing": (
         "Ground the research question. When the source states several hypotheses, list "
         "each with its claim and decision rule, check that each rule is unambiguous and "
@@ -119,6 +125,8 @@ _ROLES = {
 
 
 def prompt(role: str) -> str:
+    if role == "indexer":
+        return _ROLES[role]
     return _COMMON + _ROLES[role]
 
 
