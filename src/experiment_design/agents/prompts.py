@@ -40,6 +40,22 @@ question. Treat ambiguity that would force a downstream agent to guess as a mate
 a clearly labelled, reasonable proposal is not such a gap.
 """
 _ROLES = {
+    "surveyor": (
+        "Survey evaluation resources for the research brief and hypotheses. Submit at most "
+        "five short HuggingFace dataset search queries, the task keywords that describe the "
+        "research, and the datasets, benchmarks, baselines and metrics named in the supplied "
+        "sources or brief. Give a source_url only when it appears verbatim in the supplied "
+        "text. Do not invent resources, sizes, licenses or URLs. Submit using the schema tool."
+    ),
+    "selector": (
+        "Rank and select evaluation resources for the research brief from the supplied "
+        "candidates only. Use the exact resource_id of each candidate; never add a candidate. "
+        "For each selected resource give rank (1 is best), a one-sentence rationale, the "
+        "hypothesis IDs it serves and its benchmark contamination risk (low, medium, high or "
+        "unknown when you cannot tell). When researcher comments ask for a resource that is "
+        "not a candidate, list it in additions with its kind. Do not claim a resource is "
+        "verified. Submit using the schema tool."
+    ),
     "indexer": (
         "Extract an experiment index from the supplied plan and hypotheses. Do not evaluate, "
         "rewrite or invent plan content. Preserve experiment and hypothesis IDs, list only "
@@ -124,8 +140,11 @@ _ROLES = {
 }
 
 
+_SUBMIT_ONLY = frozenset({"indexer", "surveyor", "selector"})
+
+
 def prompt(role: str) -> str:
-    if role == "indexer":
+    if role in _SUBMIT_ONLY:
         return _ROLES[role]
     return _COMMON + _ROLES[role]
 
