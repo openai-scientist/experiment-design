@@ -1,597 +1,119 @@
-"""Canonical scientific records and agent task contracts."""
+"""Small records shared by the seven-stage Markdown workflow."""
 
-from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-Provenance = Literal["source", "assumption", "computed", "llm"]
-Origin = Literal["package", "researcher", "designer_default", "missing"]
-ContrastType = Literal["superiority", "non_inferiority", "superiority_by_margin"]
-Severity = Literal["BLOCKER", "MAJOR", "MINOR"]
-IssueStatus = Literal["open", "addressed", "rebutted", "resolved", "unresolved", "duplicate"]
-RunStatus = Literal[
-    "RUNNING",
-    "NEEDS_RESEARCHER",
-    "REVIEWABLE",
-    "EXPLORED",
-    "BLOCKED",
-    "INCONCLUSIVE",
-    "BUDGET_STOP",
-    "APPROVED",
-    "PUBLISHED",
-    "FAILED",
-]
+
+class WorkflowError(ValueError):
+    pass
 
 
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class Finding(Record):
+    id: str
+    severity: Literal["MAJOR", "MINOR"]
+    issue: str
+    consequence: str
+    suggestion: str
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class AgentOutput(Record):
+    markdown: str
+    findings: list[Finding] = Field(default_factory=list)
+    needs_input: bool = False
+    question: str = ""
+    recommended_action: str = ""
+    options: list[str] = Field(default_factory=list)
+
+    @field_validator("markdown")
+    @classmethod
+    def nonblank_markdown(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("markdown must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def valid_options(self) -> "AgentOutput":
+        if not self.options:
+            return self
+        if not self.question.strip():
+            raise ValueError("options require a nonblank question")
+        if not 2 <= len(self.options) <= 4:
+            raise ValueError("options must be empty or contain 2 to 4 items")
+        if any(not option.strip() for option in self.options):
+            raise ValueError("options must not be blank")
+        if len({option.strip().casefold() for option in self.options}) != len(self.options):
+            raise ValueError("options must be distinct")
+        return self
+
+
+class RunState(Record):
+    run_id: str
+    stage: int = Field(default=1, ge=1, le=7)
+    status: str = "RUNNING"
+    attempt: int = Field(default=1, ge=1)
+    refinements: int = Field(default=0, ge=0)
+    llm_tokens: int = Field(default=0, ge=0)
+    llm_token_limit: int = Field(default=1_000_000, gt=0)
+    jev_calls: int = Field(default=0, ge=0)
+    usage_unknown: bool = False
+    plan_stage: int | None = None
+    plan_name: str | None = None
+    plan_hash: str | None = None
+    review_complete: bool = False
+    approval: str = "pending"
+    question: str = ""
+    question_kind: str = ""
+    question_options: list[str] = Field(default_factory=list)
+
+
 class Quantity(Record):
     value: float | None = None
     unit: str = ""
-    provenance: Provenance
+    provenance: str
     source_ref: str | None = None
     source_span: str | None = None
     note: str = ""
 
 
-class Source(Record):
-    id: str
-    title: str
-    kind: Literal["paper", "dataset", "note", "researcher_input"]
-    text: str
-
-
-class Assumption(Record):
-    id: str
-    statement: str
-    quantity: Quantity | None = None
-
-
-class Hypothesis(Record):
-    statement: str
-    prediction: str | None = None
-    failure_condition: str | None = None
-    exposure: str | None = None
-    method: str | None = None
-    limitations: list[str] = Field(default_factory=list)
-
-
-class Outcome(Record):
-    name: str
-    unit: str | None = None
-    kind: str | None = None
-    direction: str | None = None
-
-
-class Inference(Record):
-    contrast_type: str | None = None
-    margin: float | None = None
-    estimand: str | None = None
-
-
-class ScientificPackage(Record):
-    id: str
-    research_question: str
-    hypothesis: Hypothesis
-    scope: str | None = None
-    outcome: Outcome | None = None
-    inference: Inference | None = None
-    constraints: list[str] = Field(default_factory=list)
-    budget: str | None = None
-    assumptions: list[Assumption] = Field(default_factory=list)
-    sources: list[Source] = Field(default_factory=list)
-
-
-class ClaimField(Record):
-    value: str | float | None = None
-    origin: Origin = "missing"
-
-
-CLAIM_FIELDS = (
-    "hypothesis",
-    "prediction",
-    "failure_condition",
-    "exposure",
-    "inference_scope",
-    "primary_outcome",
-    "outcome_unit",
-    "outcome_kind",
-    "direction",
-    "contrast_type",
-    "margin",
-    "estimand",
-)
-
-
-class Claim(Record):
-    hypothesis: ClaimField = Field(default_factory=ClaimField)
-    prediction: ClaimField = Field(default_factory=ClaimField)
-    failure_condition: ClaimField = Field(default_factory=ClaimField)
-    exposure: ClaimField = Field(default_factory=ClaimField)
-    inference_scope: ClaimField = Field(default_factory=ClaimField)
-    primary_outcome: ClaimField = Field(default_factory=ClaimField)
-    outcome_unit: ClaimField = Field(default_factory=ClaimField)
-    outcome_kind: ClaimField = Field(default_factory=ClaimField)
-    direction: ClaimField = Field(default_factory=ClaimField)
-    contrast_type: ClaimField = Field(default_factory=ClaimField)
-    margin: ClaimField = Field(default_factory=ClaimField)
-    estimand: ClaimField = Field(default_factory=ClaimField)
-
-
-class DesignChoice(Record):
-    choice: str
-    why: str
-    alternatives_considered: list[str] = Field(default_factory=list)
-    tradeoffs: str = ""
-
-
-class Condition(Record):
-    name: str
-    role: str = Field(min_length=1)
-    description: str
-
-
-class ClusterSpec(Record):
+class ClusterInputs(Record):
     unit: str
-    size: Quantity
-    clusters_per_arm: int | None = None
+    size: Quantity | None = None
     icc: Quantity | None = None
+    clusters_per_arm: int | None = None
     equal_size: bool | None = None
     independent_clusters: bool | None = None
 
 
-class Sampling(Record):
-    population: str | None = None
-    inclusion: str | None = None
-    exclusion: str | None = None
-    allocation: str | None = None
-    randomization: str | None = None
-    unit_of_randomization: str | None = None
-    unit_of_analysis: str | None = None
-    repetitions: str | None = None
-    n_per_arm: int | None = None
-    cluster: ClusterSpec | None = None
-
-
-class Metric(Record):
-    name: str
-    kind: str = Field(min_length=1)
-    operationalization: str
-    unit: str
-    timing: str = ""
-
-
-class Measurement(Record):
-    primary_metric: Metric | None = None
-    secondary_metrics: list[Metric] = Field(default_factory=list)
-    data_collection: str | None = None
-    missingness: str | None = None
-
-
-class AnalysisPlan(Record):
-    method_id: str | None = None
-    common_variance: bool | None = None
+class CalculationRequest(Record):
+    calculator_id: str | None = None
     model: str | None = None
-    sidedness: Literal["one_sided", "two_sided"] | None = None
+    contrast_type: str | None = None
+    direction: str | None = None
+    outcome_kind: str | None = None
+    outcome_unit: str = ""
     alpha: float | None = None
-    uncertainty: str | None = None
-    decision_rule: str | None = None
-    multiplicity: str | None = None
-    stopping: str | None = None
-    sensitivity: list[str] = Field(default_factory=list)
-
-
-class PowerScenario(Record):
-    name: str
+    sidedness: str | None = None
+    margin: Quantity | None = None
     effect: Quantity | None = None
     sd: Quantity | None = None
-    p_control: Quantity | None = None
-    p_treatment: Quantity | None = None
+    n_per_arm: int | None = None
     target_power: float | None = None
-
-
-class Protocol(Record):
-    steps: list[str] = Field(default_factory=list)
-    resources: list[str] = Field(default_factory=list)
-    feasibility: str | None = None
-    stop_conditions: list[str] = Field(default_factory=list)
-
-
-class Risk(Record):
-    threat: str
-    mechanism: str
-    mitigation: str | None = None
-
-
-class ExpectedOutput(Record):
-    name: str
-    description: str
-    format: str
-    validation: str
-
-
-class ExecutionSpec(Record):
-    purpose: str | None = None
-    inputs: list[str] = Field(default_factory=list)
-    prerequisites: list[str] = Field(default_factory=list)
-    fixed_scientific_choices: list[str] = Field(default_factory=list)
-    implementation_freedom: list[str] = Field(default_factory=list)
-    expected_outputs: list[ExpectedOutput] = Field(default_factory=list)
-    acceptance_checks: list[str] = Field(default_factory=list)
-    clarification_triggers: list[str] = Field(default_factory=list)
-    not_applicable: dict[str, str] = Field(default_factory=dict)
-
-
-class Design(Record):
-    claim: Claim
-    rationale: list[DesignChoice] = Field(default_factory=list)
-    conditions: list[Condition] = Field(default_factory=list)
-    sampling: Sampling = Field(default_factory=Sampling)
-    measurement: Measurement = Field(default_factory=Measurement)
-    analysis: AnalysisPlan = Field(default_factory=AnalysisPlan)
-    scenarios: list[PowerScenario] = Field(default_factory=list)
-    protocol: Protocol = Field(default_factory=Protocol)
-    validity: list[Risk] = Field(default_factory=list)
-    assumptions: list[Assumption] = Field(default_factory=list)
-    handoff: list[str] = Field(default_factory=list)
-    execution: ExecutionSpec | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def historical_defaults(cls, data):
-        if not isinstance(data, dict) or data.get("execution") is not None:
-            return data
-        data = dict(data)
-        analysis = data.get("analysis", {})
-        analysis = (
-            analysis.model_dump(exclude_unset=True)
-            if isinstance(analysis, AnalysisPlan)
-            else dict(analysis)
-        )
-        analysis.setdefault("alpha", 0.05)
-        analysis.setdefault("sidedness", "two_sided")
-        data["analysis"] = analysis
-        scenarios = []
-        for item in data.get("scenarios", []):
-            item = (
-                item.model_dump(exclude_unset=True)
-                if isinstance(item, PowerScenario)
-                else dict(item)
-            )
-            item.setdefault("target_power", 0.8)
-            scenarios.append(item)
-        data["scenarios"] = scenarios
-        return data
-
-    @model_serializer(mode="wrap")
-    def serialize(self, handler):
-        data = handler(self)
-        if self.execution is None:
-            data.pop("execution", None)
-        else:
-            data["analysis"].pop("method_id", None)
-        return data
-
-
-class PatchOp(Record):
-    path: str
-    value: Any
-
-
-class Patch(Record):
-    ops: list[PatchOp]
-    rationale: str
-    addresses: list[str] = Field(default_factory=list)
-
-
-class DesignVersion(Record):
-    run_id: str
-    version: int
-    design: Design
-    parent: int | None
-    author: str
-    patch: Patch | None
-    design_hash: str
-    created_at: str
-
-
-class Finding(Record):
-    severity: Severity
-    paths: list[str]
-    mechanism: str
-    consequence: str
-    suggested_fix: str = ""
-    evidence_refs: list[str] = Field(default_factory=list)
-    basis: Literal["evidence", "computation", "reasoning", "unknown_assumption"]
-    duplicate_of: str | None = None
-
-
-class ReviewIssue(Finding):
-    id: str = ""
-    run_id: str
-    raised_by: str
-    status: IssueStatus = "open"
-    version_raised: int
-    addressed_in: int | None = None
-    rebuttal: str | None = None
-    validator_code: str | None = None
-
-
-class ResearcherRequest(Record):
-    id: str = ""
-    run_id: str
-    kind: Literal["decision", "input"]
-    question: str
-    path: str | None = None
-    options: list[str] = Field(default_factory=list)
-    status: Literal["draft", "open", "answered"] = "draft"
-    answer: str | None = None
-    raised_by: str
-    applied_in: int | None = None
-
-
-class Approval(Record):
-    run_id: str
-    version: int
-    design_hash: str
-    approver: str
-    at: str
-
-
-class TaskBudget(Record):
-    max_turns: int
-    max_tokens: int
-
-
-class AgentTask(Record):
-    id: str = ""
-    stage_id: Literal["S1", "S2", "S3", "S4", "S5", "S6", "S7"] | None = None
-    binding: "ArtifactBinding | None" = None
-    cohort_id: str | None = None
-    objective: str
-    package_ref: str
-    design_version: int | None
-    focus_paths: list[str] = Field(default_factory=list)
-    issue_refs: list[str] = Field(default_factory=list)
-    allowed_tools: list[str]
-    budget: TaskBudget
-    exit_conditions: list[str]
-
-
-class AgentResult(Record):
-    findings_or_changes: dict | None
-    rationale: str = ""
-    evidence_refs: list[str] = Field(default_factory=list)
-    tool_observations: list[str] = Field(default_factory=list)
-    uncertainty: str = ""
-    completion_status: Literal["completed", "budget_exhausted", "failed"]
-    tokens_in: int = 0
-    tokens_out: int = 0
-    llm_calls: int = 0
-    tokens_cached: int = 0
-    cache_usage_missing_calls: int = 0
-    stop_reason: Literal["token_limit", "turn_limit"] | None = None
-
-
-StageId = Literal["S1", "S2", "S3", "S4", "S5", "S6", "S7"]
-
-
-class ArtifactBinding(Record):
-    source_snapshot_id: str
-    context_revision: int | None = None
-    design_version: int | None = None
-    design_hash: str | None = None
-    event_id: int
-
-
-class SourceArtifact(Record):
-    ref: str
-    path: str
-    text: str
-    sha256: str
-    metadata: dict = Field(default_factory=dict)
-
-
-class SourceSnapshot(Record):
-    id: str
-    artifacts: list[SourceArtifact]
-    intake_issues: list[str] = Field(default_factory=list)
-
-
-class FieldAnnotation(Record):
-    status: Literal["source-stated", "agent-proposed", "unknown", "researcher-confirmed"]
-    source_ref: str | None = None
-    source_span: str | None = None
-    note: str = ""
-    value: Any = None
-
-
-class ResearchContext(Record):
-    id: str
-    revision: int
-    source_snapshot_id: str
-    package: ScientificPackage
-    field_annotations: dict[str, FieldAnnotation] = Field(default_factory=dict)
-    unknowns: list[str] = Field(default_factory=list)
-    decision_ids: list[str] = Field(default_factory=list)
-
-
-class StageSpec(Record):
-    id: StageId
-    objective: str
-    input_kinds: list[str]
-    completion_condition: str
-    permitted_return_targets: list[StageId] = Field(default_factory=list)
-
-
-class StageResult(Record):
-    stage_id: StageId
-    status: Literal["COMPLETE", "NEEDS_INPUT", "REVISION_REQUIRED", "STOPPED", "FAILED"]
-    binding: ArtifactBinding
-    output_refs: list[str] = Field(default_factory=list)
-    issue_refs: list[str] = Field(default_factory=list)
-    evidence_refs: list[str] = Field(default_factory=list)
-    reason: str
-
-
-class DecisionOption(Record):
-    id: str
-    label: str
-    proposal: dict = Field(default_factory=dict)
-    consequences: list[str] = Field(default_factory=list)
-    evidence_refs: list[str] = Field(default_factory=list)
-    uncertainty: str = ""
-
-
-class DecisionResponse(Record):
-    revision: int
-    action: Literal[
-        "SELECT_OPTION",
-        "PROPOSE_ALTERNATIVE",
-        "DEFER",
-        "APPROVE_VERSION",
-        "REQUEST_CHANGES",
-        "CLARIFY",
-        "REJECT",
-        "HOLD",
-    ]
-    option_id: str | None = None
-    text: str = ""
-    researcher: str
-    response_id: str
-    affected_paths: list[str] = Field(default_factory=list)
-    at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-
-class ResearcherDecision(Record):
-    id: str
-    run_id: str
-    revision: int = 1
-    purpose: Literal["scientific", "final_review"] = "scientific"
-    status: Literal["IDENTIFIED", "EXPLORING", "AWAITING_RESEARCHER", "ANSWERED", "APPLIED"] = (
-        "IDENTIFIED"
-    )
-    binding: ArtifactBinding
-    problem: str
-    affected_paths: list[str] = Field(default_factory=list)
-    dependencies: list[str] = Field(default_factory=list)
-    options: list[DecisionOption] = Field(default_factory=list)
-    recommendation: str = ""
-    responses: list[DecisionResponse] = Field(default_factory=list)
-    interpretation: dict = Field(default_factory=dict)
-    application: dict = Field(default_factory=dict)
-    verification: dict = Field(default_factory=dict)
-    reconciliation: dict = Field(default_factory=dict)
-
-
-class ReviewCohort(Record):
-    id: str
-    run_id: str
-    binding: ArtifactBinding
-    member_task_ids: dict[str, str]
-    submission_refs: list[str] = Field(default_factory=list)
-    published_event_id: int | None = None
-    superseded_by: str | None = None
-
-
-class Observation(Record):
-    id: str
-    task_id: str
-    binding: ArtifactBinding
-    tool_name: str
-    arguments: dict
-    result: dict
-    accepted: bool
-    evidence_ref: str
-
-
-class ReadinessAssessment(Record):
-    id: str
-    run_id: str
-    binding: ArtifactBinding
-    review_status: Literal["REVIEWABLE", "NEEDS_INPUT", "NOT_READY"]
-    plan_complete: bool | None = None
-    # Historical records only. Active assessment serialization omits these fields.
-    handoff_complete: bool | None = None
-    execution_ready: bool | None = None
-    blockers: list[str] = Field(default_factory=list)
-    decision_ids: list[str] = Field(default_factory=list)
-    computation_refs: list[str] = Field(default_factory=list)
-    handoff_risks: list[str] = Field(default_factory=list)
-    evidence_refs: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def preserve_existing_readiness(cls, data):
-        # Earlier schema-2 complete handoffs already required execution readiness.
-        if isinstance(data, dict) and "plan_complete" not in data and "execution_ready" not in data:
-            data = dict(data)
-            data["execution_ready"] = (
-                data.get("handoff_complete") is True
-                and data.get("review_status") == "REVIEWABLE"
-                and not data.get("blockers")
-                and not data.get("decision_ids")
-            )
-        return data
-
-    @model_serializer(mode="wrap")
-    def serialize(self, handler):
-        data = handler(self)
-        if self.plan_complete is None:
-            data.pop("plan_complete", None)
-        else:
-            for key in ("handoff_complete", "execution_ready", "handoff_risks"):
-                data.pop(key, None)
-        return data
-
-
-class PublicationSnapshot(Record):
-    run: dict
-    context: ResearchContext | None
-    version: DesignVersion
-    issues: list[ReviewIssue]
-    decisions: list[ResearcherDecision]
-    assessment: ReadinessAssessment | None
-    approval: Approval | None
-    calculations: list["CalculationResult"] = Field(default_factory=list)
-    binding: ArtifactBinding
-    review: dict | None = None
-    observations: list[Observation] = Field(default_factory=list)
-
-    @model_serializer(mode="wrap")
-    def serialize(self, handler):
-        data = handler(self)
-        if self.review is None:
-            data.pop("review", None)
-            data.pop("observations", None)
-        return data
-
-
-class CalculationRequest(Record):
-    binding: ArtifactBinding
-    scenario_id: str
-    design: Design
-    overrides: dict[str, Quantity] = Field(default_factory=dict)
-    preview_patch: Patch | None = None
-    calculator_id: str | None = None
-
-    @model_serializer(mode="wrap")
-    def serialize(self, handler):
-        data = handler(self)
-        if self.calculator_id is None:
-            data.pop("calculator_id", None)
-        return data
+    common_variance: bool | None = None
+    allocation: str = "1:1"
+    unit_of_randomization: str | None = None
+    unit_of_analysis: str | None = None
+    cluster: ClusterInputs | None = None
 
 
 class CalculationResult(Record):
-    scenario_id: str = ""
-    counterfactual: bool = False
     id: str
     request_hash: str
-    binding: ArtifactBinding
     method_id: str
     implementation: str = "scipy-noncentral-t"
     applicability: list[str] = Field(default_factory=list)
@@ -605,57 +127,3 @@ class CalculationResult(Record):
     df: int | None = None
     mde: float | None = None
     reasons: list[str] = Field(default_factory=list)
-
-
-AgentTask.model_rebuild()
-PublicationSnapshot.model_rebuild()
-
-
-def stage_specs() -> dict[StageId, StageSpec]:
-    rows = [
-        ("S1", "Artifact intake", ["Markdown"], "Immutable readable source snapshot", []),
-        ("S2", "Exploration and framing", ["SourceSnapshot"], "Grounded selected direction", []),
-        ("S3", "Experiment design synthesis", ["ResearchContext"], "Reviewable draft", ["S2"]),
-        (
-            "S4",
-            "Scientific review and refinement",
-            ["DesignVersion"],
-            "Independent critique, revisions and disclosed limitations",
-            ["S2", "S3"],
-        ),
-        (
-            "S5",
-            "Design qualification",
-            ["DesignVersion", "ReviewIssue"],
-            "Readiness assessment",
-            ["S2", "S3", "S4"],
-        ),
-        (
-            "S6",
-            "Researcher review",
-            ["ReadinessAssessment"],
-            "Version-bound pending review or researcher response",
-            ["S2", "S3", "S4"],
-        ),
-        (
-            "S7",
-            "EDP publication",
-            ["PublicationSnapshot"],
-            "Consistent draft or approved bundle",
-            ["S2", "S3", "S4"],
-        ),
-    ]
-    return {
-        id: StageSpec(
-            id=id,
-            objective=objective,
-            input_kinds=inputs,
-            completion_condition=completion,
-            permitted_return_targets=targets,
-        )
-        for id, objective, inputs, completion, targets in rows
-    }
-
-
-class WorkflowError(ValueError):
-    pass

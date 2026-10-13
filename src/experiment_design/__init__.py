@@ -1,1 +1,1 @@
-"""Scientific experiment design with researcher-owned claims."""
+"""Seven-stage scientific experiment plans from researcher Markdown."""

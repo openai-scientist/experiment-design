@@ -19,8 +19,8 @@ class ToolCall(Record):
 class LLMResponse(Record):
     content: str | None
     tool_calls: list[ToolCall]
-    tokens_in: int
-    tokens_out: int
+    tokens_in: int = Field(ge=0, strict=True)
+    tokens_out: int = Field(ge=0, strict=True)
     tokens_cached: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
@@ -42,6 +42,8 @@ class LLMClient:
         transport: httpx.BaseTransport | None = None,
     ):
         self.cfg = cfg
+        self.last_attempts: list[dict] = []
+        self.max_attempts = cfg.max_retries + 1
         self.client = httpx.Client(
             timeout=cfg.timeout_sec,
             transport=transport,
@@ -52,7 +54,10 @@ class LLMClient:
         self.client.close()
 
     def complete(self, messages: list[dict], tools: list[dict]) -> LLMResponse:
-        for attempt in range(self.cfg.max_retries + 1):
+        self.last_attempts = []
+        if not 1 <= self.max_attempts <= self.cfg.max_retries + 1:
+            raise LLMError("LLM attempt cap exceeds configured retry allowance")
+        for attempt in range(self.max_attempts):
             try:
                 response = self.client.post(
                     self.cfg.base_url.rstrip("/") + "/chat/completions",
@@ -66,19 +71,46 @@ class LLMClient:
                 )
                 response.raise_for_status()
             except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                # A 4xx other than 408 was rejected before processing: usage is known zero.
+                usage = 0 if code is not None and 400 <= code < 500 and code != 408 else None
+                self.last_attempts.append(
+                    {
+                        "status": "error",
+                        "tokens_in": usage,
+                        "tokens_out": usage,
+                        "tokens_cached": usage,
+                        "content": None,
+                        "tool_calls": [],
+                        "error_type": type(exc).__name__,
+                        "status_code": code,
+                    }
+                )
                 retryable = isinstance(exc, httpx.TimeoutException) or (
                     exc.response.status_code == 429 or exc.response.status_code >= 500
                 )
-                if not retryable or attempt == self.cfg.max_retries:
+                if not retryable or attempt == self.max_attempts - 1:
                     raise LLMError(f"LLM request failed: {exc}") from exc
                 time.sleep(self.cfg.retry_base_delay * 2**attempt)
                 continue
             except httpx.RequestError as exc:
+                self.last_attempts.append(
+                    {
+                        "status": "error",
+                        "tokens_in": None,
+                        "tokens_out": None,
+                        "tokens_cached": None,
+                        "content": None,
+                        "tool_calls": [],
+                        "error_type": type(exc).__name__,
+                        "status_code": None,
+                    }
+                )
                 raise LLMError(f"LLM connection failed: {exc}") from exc
             try:
                 body = response.json()
                 message = body["choices"][0]["message"]
-                return LLMResponse(
+                parsed = LLMResponse(
                     content=message.get("content"),
                     tool_calls=[
                         ToolCall(
@@ -94,6 +126,31 @@ class LLMClient:
                         "cached_tokens"
                     ),
                 )
+                self.last_attempts.append(
+                    {
+                        "status": "success",
+                        "tokens_in": parsed.tokens_in,
+                        "tokens_out": parsed.tokens_out,
+                        "tokens_cached": parsed.tokens_cached,
+                        "error_type": None,
+                        "status_code": response.status_code,
+                        "content": message.get("content"),
+                        "tool_calls": message.get("tool_calls", []),
+                    }
+                )
+                return parsed
             except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
+                self.last_attempts.append(
+                    {
+                        "status": "error",
+                        "tokens_in": None,
+                        "tokens_out": None,
+                        "tokens_cached": None,
+                        "content": None,
+                        "tool_calls": [],
+                        "error_type": type(exc).__name__,
+                        "status_code": response.status_code,
+                    }
+                )
                 raise LLMError(f"malformed LLM response: {exc}") from exc
         raise LLMError("LLM retry budget exhausted")

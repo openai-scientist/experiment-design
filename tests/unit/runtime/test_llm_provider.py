@@ -112,3 +112,93 @@ def test_complete_raises_after_max_retries(monkeypatch):
         assert len(requests) == 3
     finally:
         llm.close()
+
+
+@pytest.mark.parametrize("field,value", [("prompt_tokens", -1), ("completion_tokens", -1)])
+def test_negative_usage_is_rejected(field, value):
+    data = response()
+    data["usage"][field] = value
+    llm = client(lambda _: httpx.Response(200, json=data))
+    try:
+        with pytest.raises(LLMError, match="malformed"):
+            llm.complete([], [])
+    finally:
+        llm.close()
+
+
+def test_retry_attempt_telemetry_preserves_unknown_usage(monkeypatch):
+    monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", lambda _: None)
+    calls = []
+
+    def handler(_):
+        calls.append(1)
+        return httpx.Response(429) if len(calls) == 1 else httpx.Response(200, json=response())
+
+    llm = client(handler)
+    try:
+        llm.complete([], [])
+        assert [a["status"] for a in llm.last_attempts] == ["error", "success"]
+        assert llm.last_attempts[0]["tokens_in"] == 0
+        assert llm.last_attempts[0]["tokens_out"] == 0
+        assert llm.last_attempts[0]["tokens_cached"] == 0
+        assert llm.last_attempts[0]["status_code"] == 429
+        assert llm.last_attempts[1]["tokens_in"] == 11
+        assert (
+            llm.last_attempts[1]["tool_calls"] == response()["choices"][0]["message"]["tool_calls"]
+        )
+        llm.complete([], [])
+        assert len(llm.last_attempts) == 1
+    finally:
+        llm.close()
+
+
+def test_missing_usage_is_recorded_and_rejected():
+    data = response()
+    data.pop("usage")
+    llm = client(lambda _: httpx.Response(200, json=data))
+    try:
+        with pytest.raises(LLMError):
+            llm.complete([], [])
+        assert llm.last_attempts[-1]["status"] == "error"
+        assert llm.last_attempts[-1]["tokens_in"] is None
+    finally:
+        llm.close()
+
+
+def test_llm_retry_attempts_can_be_capped(monkeypatch):
+    monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", lambda _: None)
+    calls = []
+
+    def handler(_):
+        calls.append(1)
+        return httpx.Response(500)
+
+    llm = client(handler)
+    llm.max_attempts = 1
+    try:
+        with pytest.raises(LLMError):
+            llm.complete([], [])
+        assert len(calls) == 1
+    finally:
+        llm.close()
+
+
+@pytest.mark.parametrize(
+    "status,known",
+    [(400, True), (401, True), (404, True), (408, False), (500, False), (503, False)],
+)
+def test_rejected_request_usage_is_zero_only_for_4xx_except_408(monkeypatch, status, known):
+    monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", lambda _: None)
+    llm = client(lambda _: httpx.Response(status), retries=0)
+    try:
+        with pytest.raises(LLMError):
+            llm.complete([], [])
+        attempt = llm.last_attempts[0]
+        expected = 0 if known else None
+        assert (attempt["tokens_in"], attempt["tokens_out"], attempt["tokens_cached"]) == (
+            expected,
+            expected,
+            expected,
+        )
+    finally:
+        llm.close()

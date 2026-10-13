@@ -12,10 +12,9 @@ jev:
   api_key_env: TYPESAFE_API_KEY
   model: null
 run:
-  llm_tokens: 300000
-  max_actions: 12
-  max_reviews: 2
-  max_revisions: 3
-  task_max_turns: 15
-  task_max_tokens: 60000
-store: .exd/exd.db
+  llm_tokens: 1000000
+  jev_max_calls: 24
+  max_refinements: 2
+  task_max_turns: 12
+  task_max_tokens: 120000
+runs_root: runs

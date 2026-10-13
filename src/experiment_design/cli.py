@@ -1,344 +1,195 @@
-"""Researcher commands for a single canonical design workflow."""
+"""Researcher commands for the seven-stage Markdown workflow."""
 
 import argparse
+import json
 import os
-import shlex
 import sys
-from collections import Counter
 from pathlib import Path
-from uuid import uuid4
 
 from dotenv import load_dotenv
 
-from experiment_design.config import ConfigError, ExdConfig, RunConfig, load_config
-from experiment_design.contracts import DecisionResponse
-from experiment_design.design.decisions import respond
-from experiment_design.design.intake import PackageFormatError, all_sources, snapshot_sources
-from experiment_design.persistence.store import Store
-from experiment_design.publication import export, render_decision, render_markdown
-from experiment_design.publication.exploration_history import export_exploration, render_exploration
+from experiment_design.config import ConfigError, ExdConfig, load_config
+from experiment_design.contracts import RunState, WorkflowError
+from experiment_design.persistence.store import RunStore
+from experiment_design.publication import (
+    clarifications,
+    current_plan,
+    export,
+    question_text,
+    render_review,
+)
 from experiment_design.runtime.jev import JudgeError, TypeSafeJudge
 from experiment_design.runtime.llm import LLMClient, LLMError
-from experiment_design.workflow import (
-    Deps,
-    WorkflowError,
-    advance,
-    approve,
-    request_changes,
-    start_run,
-)
 
 
-def build_deps(cfg: ExdConfig) -> Deps:
-    judge = TypeSafeJudge(cfg.jev)
-    llm = LLMClient(cfg.llm, os.environ[cfg.llm.api_key_env])
-    try:
-        return Deps(Store(cfg.store), llm, judge, cfg.run)
-    except Exception:
-        llm.close()
-        raise
+def respond(
+    store: RunStore,
+    *,
+    action: str,
+    text: str,
+    researcher: str,
+    revision: int,
+    option: int | None = None,
+) -> RunState:
+    from experiment_design.workflow.engine import respond as record_response
+
+    return record_response(
+        store, action=action, text=text, researcher=researcher, revision=revision, option=option
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="exd", description="Reviewable scientific experiment design"
-    )
+    parser = argparse.ArgumentParser(prog="exd", description="Reviewed scientific experiment plans")
     parser.add_argument("--config", type=Path, default=Path("exd.yaml"))
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run")
-    run.add_argument("hypothesis", type=Path, nargs="+")
-    decide = commands.add_parser("decide")
-    decide.add_argument("run")
-    decide.add_argument("decision")
-    decide.add_argument("--revision", type=int, required=True)
-    decide.add_argument(
-        "--action",
-        choices=[
-            "SELECT_OPTION",
-            "PROPOSE_ALTERNATIVE",
-            "DEFER",
-            "REQUEST_CHANGES",
-            "CLARIFY",
-            "REJECT",
-            "HOLD",
-        ],
-        required=True,
-    )
-    decide.add_argument("--option")
-    decide.add_argument("--text", default="")
-    decide.add_argument("--by", required=True)
-    for command in ("resume", "status", "review", "request-changes", "approve", "export"):
-        sub = commands.add_parser(command)
-        sub.add_argument("run")
-        if command == "request-changes":
-            sub.add_argument("text")
-            sub.add_argument("--path")
-            sub.add_argument("--by", required=True)
-            sub.add_argument("--revision", type=int, required=True)
-        elif command == "approve":
-            sub.add_argument("--version", type=int, required=True)
-            sub.add_argument("--by", required=True)
-        elif command == "export":
-            sub.add_argument("--out", type=Path, required=True)
-            sub.add_argument("--version", type=int)
-        elif command == "resume":
-            sub.add_argument("--llm-token-limit", type=int)
-            sub.add_argument("--reason", default="Explicit operator budget increase")
+    run = commands.add_parser("run", help="Start a new run; calls configured providers")
+    run.add_argument("inputs", type=Path, nargs="+")
+    for name in ("resume", "status", "review", "decide", "export"):
+        command = commands.add_parser(name)
+        command.add_argument("run", help="Run directory, or ID under configured runs_root")
+        if name == "resume":
+            command.add_argument("--llm-token-limit", type=int)
+            command.add_argument("--reason", default="")
+        elif name == "decide":
+            command.add_argument(
+                "--action",
+                required=True,
+                choices=["ANSWER", "APPROVE", "REQUEST_CHANGES", "CLARIFY", "REJECT"],
+            )
+            command.add_argument("--text", default="")
+            command.add_argument(
+                "--option", type=int, help="1-based option of the pending question (ANSWER only)"
+            )
+            command.add_argument("--by", required=True)
+            command.add_argument(
+                "--revision", type=int, required=True, help="Current attempt shown by status"
+            )
+        elif name == "export":
+            command.add_argument("--out", type=Path, required=True)
+            command.add_argument("--allow-draft", action="store_true")
     return parser
 
 
-def _prefix(config: Path) -> str:
-    if config.resolve() == Path("exd.yaml").resolve():
-        return "exd"
-    return f"exd --config {shlex.quote(str(config))}"
-
-
-def _status(store: Store, rid: str, config: Path) -> None:
-    record, version, usage = store.run(rid), store.version(rid), store.usage(rid)
-    if store.is_exploration_run(rid):
-        print(f"status: {record.status}")
-        print("mode: exploration")
-        print("usage: " + ", ".join(f"{key}={value}" for key, value in usage.model_dump().items()))
-        snapshot = store.exploration_snapshot(rid)
-        if snapshot:
-            print(f"snapshot: {snapshot.id}; outcome: {snapshot.outcome}")
-            print(f"recommendation: {snapshot.selection.choice}")
-            print(f"next: {_prefix(config)} review {rid}")
-            print(f"export: {_prefix(config)} export {rid} --out <new-directory>")
-            if snapshot.outcome == "needs_input":
-                print(
-                    "Supply missing information in a new explore invocation; "
-                    "this snapshot is frozen."
-                )
-        else:
-            stops = [e.data for e in store.events(rid) if e.type == "budget.stop"]
-            if stops:
-                print(f"stop: scope={stops[-1]['scope']}, reason={stops[-1]['reason']}")
-            record_task_id = f"explore:{rid}:1"
-            try:
-                exhausted = store.task(record_task_id).status == "stopped"
-            except KeyError:
-                exhausted = False
-            if exhausted:
-                print(
-                    "Task allowance exhausted; start a new explore invocation. "
-                    "Prior evidence is retained."
-                )
-            else:
-                print(f"next: {_prefix(config)} resume {rid}")
-        return
-    print(f"status: {record.status}")
-    print(f"stage: {record.stage_id or 'legacy'}; schema: {record.schema_version}")
-    print(f"latest version: {version.version if version else 0}")
-    print(f"reviewed version: {record.reviewed_version}")
-    counts = Counter(issue.status for issue in store.issues(rid))
-    print(
-        "issues: "
-        + (", ".join(f"{key}={value}" for key, value in sorted(counts.items())) or "none")
+def _store(value: str, config_path: Path) -> RunStore:
+    path = Path(value)
+    if path.exists() or path.is_absolute() or len(path.parts) > 1:
+        return RunStore(path)
+    root = (
+        load_config(config_path, require_provider_keys=False).runs_root
+        if config_path.exists()
+        else Path("runs")
     )
-    print("usage: " + ", ".join(f"{key}={value}" for key, value in usage.model_dump().items()))
-    if record.status == "BUDGET_STOP":
-        stops = [event.data for event in store.events(rid) if event.type == "budget.stop"]
-        if stops:
-            stop = stops[-1]
-            detail = f"scope={stop['scope']}, reason={stop['reason']}"
-            if stop.get("agent_id"):
-                detail += f", agent={stop['agent_id']}"
-            if "tokens_used" in stop:
-                detail += f", tokens={stop['tokens_used']}/{stop['tokens_limit']}"
-            if "actions_used" in stop:
-                detail += f", actions={stop['actions_used']}/{stop['actions_limit']}"
-            if "llm_calls" in stop:
-                detail += f", calls={stop['llm_calls']}"
-                if "max_turns" in stop:
-                    detail += f"/{stop['max_turns']}"
-            print("budget stop: " + detail)
-        else:
-            print("budget stop: reason unavailable in this older journal")
-    for request in store.requests(rid):
-        if request.status == "open":
-            print(request.question)
-            print(f'  {_prefix(config)} answer {rid} {request.id} "<your answer>"')
-    if record.schema_version == 2:
-        for decision in store.decisions(rid):
-            if decision.status == "AWAITING_RESEARCHER":
-                print(render_decision(decision), end="")
-                if decision.purpose == "scientific":
-                    print(
-                        f"  {_prefix(config)} decide {rid} {decision.id} "
-                        f"--revision {decision.revision} "
-                        '--action PROPOSE_ALTERNATIVE --text "<your answer>" --by "<your name>"'
-                    )
-                    for option in decision.options:
-                        option_arg = shlex.quote(option.id)
-                        if os.name == "nt":
-                            option_arg = "'" + option.id.replace("'", "''") + "'"
-                        print(
-                            f"  {_prefix(config)} decide {rid} {decision.id} "
-                            f"--revision {decision.revision} "
-                            f"--action SELECT_OPTION --option={option_arg} "
-                            '--by "<your name>"'
-                        )
-                else:
-                    print(
-                        f"  {_prefix(config)} decide {rid} {decision.id} "
-                        f"--revision {decision.revision} --action CLARIFY "
-                        '--text "<your question>" --by "<your name>"'
-                    )
-                    print(
-                        f"  {_prefix(config)} approve {rid} --version {version.version} "
-                        '--by "<your name>"'
-                    )
+    return RunStore(root / path)
 
 
-def _read_command(store: Store, args) -> None:
-    rid = args.run
-    prefix = _prefix(args.config)
-    if store.is_exploration_run(rid):
-        if args.command == "status":
-            _status(store, rid, args.config)
-        elif args.command == "review":
-            snapshot = store.exploration_snapshot(rid)
-            if snapshot is None:
-                raise WorkflowError("exploration has no frozen snapshot yet; use status or resume")
-            print(render_exploration(snapshot), end="")
-        elif args.command == "export":
-            if args.version is not None:
-                raise WorkflowError(
-                    "--version selects a DesignVersion, not an exploration snapshot"
-                )
-            for path in export_exploration(store, rid, args.out).values():
-                print(path)
-        else:
+def raise_budget(store: RunStore, ceiling: int, reason: str) -> None:
+    with store.execution():
+        state = store.state
+        if state.usage_unknown:
+            raise WorkflowError("Unknown provider usage cannot be cleared by a token increase.")
+        if ceiling <= max(state.llm_token_limit, state.llm_tokens):
             raise WorkflowError(
-                "exploration proposals cannot authorize canonical researcher decisions"
+                "Token ceiling must exceed its previous limit and cumulative usage."
             )
-        return
-    if args.command == "status":
-        _status(store, rid, args.config)
-    elif args.command == "review":
-        run, version = store.run(rid), store.version(rid)
-        if version is None:
-            snapshot = store.exploration_snapshot(rid)
-            if snapshot and getattr(args, "version", None) is None:
-                print(render_exploration(snapshot), end="")
-                return
-            raise WorkflowError("No design version exists yet")
-        if run.schema_version == 2:
-            print(render_markdown(store.publication_snapshot(rid)), end="")
-            return
-        approvals = [
-            a
-            for a in store.approvals(rid)
-            if a.version == version.version and a.design_hash == version.design_hash
-        ]
-        print(
-            render_markdown(
-                run.package,
-                all_sources(run.package, store.requests(rid)),
-                version,
-                run.status,
-                version.version,
-                store.issues(rid),
-                store.requests(rid),
-                approval=approvals[-1] if approvals else None,
-            ),
-            end="",
+        if not reason.strip():
+            raise WorkflowError("A nonblank --reason is required for a token ceiling increase.")
+        previous = state.llm_token_limit
+        store.update(llm_token_limit=ceiling)
+        store.event(
+            "budget.increased",
+            {
+                "previous": previous,
+                "ceiling": ceiling,
+                "reason": reason,
+                "llm_tokens": state.llm_tokens,
+            },
         )
-    elif args.command == "decide":
-        respond(
-            store,
-            rid,
-            args.decision,
-            DecisionResponse(
-                revision=args.revision,
-                action=args.action,
-                option_id=args.option,
-                text=args.text,
-                researcher=args.by,
-                response_id="response:" + uuid4().hex,
-            ),
-        )
-        print(f"recorded decision {args.decision}")
-        print(f"next: {prefix} resume {rid}")
-    elif args.command == "request-changes":
-        request_changes(
-            store, rid, args.text, args.path, researcher=args.by, revision=args.revision
-        )
-        print(f"next: {prefix} resume {rid}")
-    elif args.command == "approve":
-        approve(store, rid, args.version, args.by)
-        print(f"approved v{args.version}")
-    elif args.command == "export":
-        for path in export(store, rid, args.out, args.version).values():
-            print(path)
+
+
+def _advance(store: RunStore, cfg: ExdConfig) -> None:
+    from experiment_design.workflow.engine import advance
+
+    judge = TypeSafeJudge(cfg.jev)
+    llm = LLMClient(cfg.llm, os.environ[cfg.llm.api_key_env])
+    try:
+        advance(store, llm, judge, cfg.run)
+    finally:
+        llm.close()
+
+
+def _status(store: RunStore) -> None:
+    state = store.state
+    display = state.model_dump(mode="json")
+    complete = bool(
+        state.review_complete
+        and state.plan_stage is not None
+        and store.valid(state.plan_stage)
+        and store.valid(5)
+        and store.valid(6)
+    )
+    if complete:
+        try:
+            current_plan(store)
+        except (WorkflowError, OSError):
+            complete = False
+    display["review_complete"] = complete
+    if not complete:
+        display["approval"] = "pending"
+    print(json.dumps(display, ensure_ascii=False, indent=2))
+    print(f"Run directory: {store.path}")
+    if state.question:
+        print(f"Pending question: {question_text(state)}")
+    print(f"Clarification explanations for current plan: {len(clarifications(store))}")
+    if state.plan_stage is not None and state.plan_name:
+        print(f"Plan: {store.path / f'stage-{state.plan_stage:02d}' / state.plan_name}")
 
 
 def main(argv: list[str] | None = None) -> int:
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8")
     args = _parser().parse_args(argv)
-    deps, store = None, None
     try:
-        load_dotenv(dotenv_path=Path(".env"), override=False)
-        cfg = load_config(args.config, require_provider_keys=args.command in {"run", "resume"})
-        if args.command in {"run", "resume"}:
-            package = snapshot_sources(args.hypothesis) if args.command in {"run"} else None
-            deps = build_deps(cfg)
-            store = deps.store
-            rid = start_run(package, deps, cfg.model_dump(mode="json")) if package else args.run
-            if args.command == "resume" and store.run(rid).config.get("run"):
-                deps.run = cfg.run = RunConfig.model_validate(store.run(rid).config["run"])
-            if args.command == "resume" and args.llm_token_limit is not None:
-                record = store.run(rid)
-                if record.plan_contract != "exp-plan/v1" or record.stage_id is None:
-                    raise WorkflowError("historical run cannot resume")
-                old = record.config.get("run", {}).get("llm_tokens", cfg.run.llm_tokens)
-                if args.llm_token_limit <= old:
-                    raise WorkflowError("new token ceiling must exceed current ceiling")
-                store.append_event(
-                    rid,
-                    "budget.changed",
-                    {"old": old, "new": args.llm_token_limit, "reason": args.reason},
-                )
-                cfg.run.llm_tokens = args.llm_token_limit
-                config = record.config | {"run": cfg.run.model_dump()}
-                store.update_run(rid, config=config)
-                deps.run = cfg.run
-            try:
-                status = advance(rid, deps)
-            except (LLMError, JudgeError):
-                print(f"run {rid}: {store.run(rid).status}")
-                print(f"next: {_prefix(args.config)} resume {rid}")
-                raise
-            print(f"run {rid}: {status}")
-            _status(store, rid, args.config)
-            if store.is_exploration_run(rid) and (snapshot := store.exploration_snapshot(rid)):
-                print(render_exploration(snapshot), end="")
-        else:
-            store = Store(cfg.store)
-            _read_command(store, args)
+        if args.command == "run":
+            from experiment_design.workflow.engine import start_run
+
+            load_dotenv()
+            cfg = load_config(args.config)
+            store = start_run(args.inputs, cfg)
+            print(f"Run directory: {store.path}", flush=True)
+            _advance(store, cfg)
+            _status(store)
+            return 0
+        store = _store(args.run, args.config)
+        if args.command == "status":
+            _status(store)
+        elif args.command == "review":
+            if store.state.plan_stage is None:
+                _status(store)
+            else:
+                print(render_review(store))
+        elif args.command == "decide":
+            respond(
+                store,
+                action=args.action,
+                text=args.text,
+                researcher=args.by,
+                revision=args.revision,
+                option=args.option,
+            )
+            _status(store)
+        elif args.command == "export":
+            print(export(store, args.out, allow_draft=args.allow_draft))
+        elif args.command == "resume":
+            if args.llm_token_limit is None and args.reason:
+                raise WorkflowError("--reason requires --llm-token-limit.")
+            load_dotenv()
+            cfg = load_config(args.config)
+            if args.llm_token_limit is not None:
+                raise_budget(store, args.llm_token_limit, args.reason)
+            _advance(store, cfg)
+            _status(store)
         return 0
-    except (
-        WorkflowError,
-        ConfigError,
-        PackageFormatError,
-        OSError,
-        KeyError,
-        LLMError,
-        JudgeError,
-        ValueError,
-    ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    finally:
-        if store:
-            store.close()
-        if deps:
-            close = getattr(deps.llm, "close", None)
-            if close:
-                close()
+    except (ConfigError, WorkflowError, LLMError, JudgeError, OSError, ValueError) as exc:
+        print(f"exd: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

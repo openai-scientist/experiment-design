@@ -1,29 +1,8 @@
-from experiment_design.contracts import Source
-from experiment_design.science.evidence import lookup_evidence
+from experiment_design.science.evidence import supports_number
 
 
-def test_lookup_evidence_ranks_and_cites(tmp_path):
-    sources = [
-        Source(id="S1", title="Brief", kind="note", text="Scores are available."),
-        Source(
-            id="S2",
-            title="Data",
-            kind="note",
-            text="Standard deviation of term scores is 10 points.",
-        ),
-    ]
-    hits = lookup_evidence("standard deviation term scores", sources)
-    assert [hit.source_id for hit in hits] == ["S2", "S1"]
-    assert hits[0].excerpt == "Standard deviation of term scores is 10 points."
-
-
-def test_lookup_evidence_no_match_empty():
-    assert (
-        lookup_evidence(
-            "unrelated phrase",
-            [
-                Source(id="S1", title="Note", kind="note", text="District scores"),
-            ],
-        )
-        == []
-    )
+def test_numbers_do_not_match_digits_inside_other_numbers():
+    assert supports_number(25, "There are 25 students.")
+    assert not supports_number(25, "There are 125 students.")
+    assert not supports_number(0.05, None)
+    assert supports_number(0.05, "ICC 5e-2")

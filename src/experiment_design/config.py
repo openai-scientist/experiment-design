@@ -27,19 +27,17 @@ class JevConfig(Record):
 
 class RunConfig(Record):
     jev_max_calls: int = Field(default=24, gt=0)
-    llm_tokens: int = Field(default=300_000, gt=0)
-    max_actions: int = Field(default=12, gt=0)
-    max_reviews: int = Field(default=2, ge=0)
-    max_revisions: int = Field(default=3, ge=0)
-    task_max_turns: int = Field(default=15, gt=0)
-    task_max_tokens: int = Field(default=60_000, gt=0)
+    llm_tokens: int = Field(default=1_000_000, gt=0)
+    max_refinements: int = Field(default=2, ge=0)
+    task_max_turns: int = Field(default=12, gt=0)
+    task_max_tokens: int = Field(default=120_000, gt=0)
 
 
 class ExdConfig(Record):
     llm: LLMConfig
     jev: JevConfig = Field(default_factory=JevConfig)
     run: RunConfig = Field(default_factory=RunConfig)
-    store: Path = Path(".exd/exd.db")
+    runs_root: Path = Path("runs")
 
 
 class ConfigError(ValueError):
@@ -48,9 +46,24 @@ class ConfigError(ValueError):
 
 def load_config(path: Path, *, require_provider_keys: bool = True) -> ExdConfig:
     try:
-        cfg = ExdConfig.model_validate(yaml.safe_load(Path(path).read_text(encoding="utf-8")))
-    except (yaml.YAMLError, ValidationError) as exc:
-        raise ConfigError(f"invalid configuration: {exc}") from exc
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ConfigError(f"Cannot read configuration: {exc.strerror}") from exc
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ConfigError(f"Invalid configuration YAML{location}") from None
+    try:
+        cfg = ExdConfig.model_validate(raw)
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+            for error in exc.errors(include_input=False, include_context=False, include_url=False)
+        )
+        raise ConfigError(
+            "Invalid configuration (use runs_root and max_refinements; "
+            "legacy store, max_actions, max_reviews and max_revisions are retired): " + details
+        ) from None
     if require_provider_keys and not os.environ.get(cfg.llm.api_key_env):
         raise ConfigError(f"missing API key environment variable {cfg.llm.api_key_env}")
     return cfg
