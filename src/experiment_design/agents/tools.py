@@ -9,10 +9,11 @@ from pydantic import ValidationError
 from experiment_design.agents.prompts import prompt
 from experiment_design.config import RunConfig
 from experiment_design.contracts import AgentOutput, CalculationRequest, WorkflowError
+from experiment_design.packs import Pack
 from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.science.evidence import supports_number
-from experiment_design.science.power import calculate
+from experiment_design.science.registry import LEGACY_CALCULATORS, calculate
 
 _READ_LINES = 400
 _READ_CAP = 1000
@@ -222,6 +223,8 @@ def run_specialist(
     cfg: RunConfig,
     workspace: dict[str, str],
     required: list[str],
+    *,
+    pack: Pack | None = None,
 ) -> AgentOutput:
     missing = [name for name in required if name not in workspace]
     if missing:
@@ -476,7 +479,15 @@ def run_specialist(
                     request = CalculationRequest.model_validate(args)
                     if not request.calculator_id:
                         raise ValueError("Explicit calculator_id required")
-                    quantities = [request.margin, request.effect, request.sd]
+                    quantities = [
+                        request.margin,
+                        request.effect,
+                        request.sd,
+                        request.a12,
+                        request.cliffs_delta,
+                        request.p_discordant_10,
+                        request.p_discordant_01,
+                    ]
                     if request.cluster:
                         quantities += [request.cluster.size, request.cluster.icc]
                     sources = store.sources()
@@ -490,7 +501,7 @@ def run_specialist(
                             )
                         ):
                             raise ValueError("Calculation value/span lacks supplied source support")
-                    computed = calculate(request)
+                    computed = calculate(request, pack.calculators if pack else LEGACY_CALCULATORS)
                     ref = (
                         "calculation:"
                         + hashlib.sha256(
