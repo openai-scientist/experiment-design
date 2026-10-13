@@ -132,6 +132,17 @@ class CalculationRequest(Record):
     unit_of_randomization: str | None = None
     unit_of_analysis: str | None = None
     cluster: ClusterInputs | None = None
+    p_discordant_10: Quantity | None = None
+    p_discordant_01: Quantity | None = None
+    n_pairs: int | None = None
+    family_size: int | None = None
+    p_values: list[float] | None = None
+    values: list[float] | None = None
+    confidence: float | None = None
+    a12: Quantity | None = None
+    cliffs_delta: Quantity | None = None
+    resamples: int | None = None
+    random_seed: int | None = None
 
 
 class CalculationResult(Record):
@@ -150,3 +161,6 @@ class CalculationResult(Record):
     df: int | None = None
     mde: float | None = None
     reasons: list[str] = Field(default_factory=list)
+    ci_low: float | None = None
+    ci_high: float | None = None
+    adjusted: list[float] | None = None
