@@ -1,0 +1,40 @@
+# Curated entries. Sizes and licenses are left out until a source has been checked.
+- name: SST-2
+  kind: benchmark
+  tasks: [classification, nlp, sentiment]
+  source_url: https://huggingface.co/datasets/stanfordnlp/sst2
+  hf_repo_id: stanfordnlp/sst2
+- name: GLUE
+  kind: benchmark
+  tasks: [classification, nlp, fine-tuning]
+  source_url: https://huggingface.co/datasets/nyu-mll/glue
+  hf_repo_id: nyu-mll/glue
+- name: IMDb
+  kind: dataset
+  tasks: [classification, nlp, sentiment]
+  source_url: https://huggingface.co/datasets/stanfordnlp/imdb
+  hf_repo_id: stanfordnlp/imdb
+- name: AG News
+  kind: dataset
+  tasks: [classification, nlp]
+  source_url: https://huggingface.co/datasets/fancyzhx/ag_news
+  hf_repo_id: fancyzhx/ag_news
+- name: SQuAD
+  kind: benchmark
+  tasks: [question-answering, nlp]
+  source_url: https://huggingface.co/datasets/rajpurkar/squad
+  hf_repo_id: rajpurkar/squad
+- name: CIFAR-10
+  kind: dataset
+  tasks: [classification, vision]
+  source_url: https://huggingface.co/datasets/uoft-cs/cifar10
+  hf_repo_id: uoft-cs/cifar10
+- name: MNIST
+  kind: dataset
+  tasks: [classification, vision]
+  source_url: https://huggingface.co/datasets/ylecun/mnist
+  hf_repo_id: ylecun/mnist
+- name: OpenML-CC18
+  kind: benchmark
+  tasks: [classification, tabular]
+  source_url: https://www.openml.org/search?type=study&study_type=task&id=99
