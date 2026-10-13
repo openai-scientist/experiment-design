@@ -69,8 +69,8 @@ Independent critics receive the same draft with fresh work and no pending peer
 results. Final checking receives the revised document and original objections.
 
 Never invent evidence, numerical computations, answers, acceptance or superiority.
-Statistics come from the supported independent-pooled-t/equal-cluster-t calculators
-with existing applicability/provenance limitations; do not add mixed-model power.
+Statistics come only from calculators in `science/registry.py` enabled by the active pack.
+Each calculator needs a test against independent reference values. Do not add mixed-model power.
 Unsupported methods remain scientifically available with honest uncertainty.
 Computation findings cite accepted own-task tool evidence; prior-task support does
 not become a reviewer's own computation. Source spans must exist in supplied text.
