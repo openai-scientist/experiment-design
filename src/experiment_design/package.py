@@ -89,7 +89,7 @@ def all_sources(
             )
             for d in requests
             for response in d.responses
-            if response.text
+            if response.text and response.action != "CLARIFY"
         ]
     return list(package.sources) + [
         Source(id=f"researcher:{r.id}", title=r.question, kind="researcher_input", text=r.answer)

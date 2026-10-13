@@ -1,5 +1,7 @@
 """Designer proposes initial content and coherent, targeted revisions."""
 
+import json
+
 from pydantic import Field
 
 from experiment_design.agents.tools import (
@@ -46,7 +48,23 @@ class RevisionSubmission(Record):
     decisions: list[DecisionProposal] = Field(default_factory=list)
 
 
+class ClarificationSubmission(Record):
+    explanation: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
 def brief(ctx: ToolContext, **focus) -> str:
+    if focus.get("mode") == "clarification":
+        return (
+            "Explain the recorded final-review question using the bound plan, context and "
+            "existing assessment/calculations. This is explanation only: do not propose a "
+            "patch, change scientific choices, treat the question as confirmed intent, "
+            "or approve the plan. Disclose uncertainty and any need for a separate change "
+            "request. Cite exact source or accepted own-task references when using evidence.\n"
+            + context_brief(ctx)
+            + "\nClarification focus: "
+            + json.dumps(focus, ensure_ascii=False)
+        )
     if ctx.version is None and ctx.binding:
         focus["researcher_decisions"] = [
             decision.model_dump(mode="json")
@@ -84,6 +102,17 @@ def brief(ctx: ToolContext, **focus) -> str:
 
 
 def submit_tool(ctx: ToolContext, **mode):
+    if mode.get("mode") == "clarification":
+
+        def explain(payload):
+            errors = validate_refs(payload.evidence_refs, ctx)
+            if not payload.explanation.strip():
+                errors.append("Clarification needs an explanation")
+            if errors:
+                raise SubmitRejected(errors)
+            return payload.model_dump(mode="json")
+
+        return submit_schema("submit_clarification", ClarificationSubmission, explain)
     if mode.get("mode", "initial") == "initial":
 
         def initial(payload):

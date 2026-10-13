@@ -63,6 +63,15 @@ def render_plan(snapshot: PublicationSnapshot) -> str:
         ]
     section("Scientific rationale and methodology", rationale)
     section(
+        "Researcher constraints and budget",
+        [f"- Constraint: {v}" for v in snapshot.context.package.constraints]
+        + (
+            [f"- Budget: {snapshot.context.package.budget}"]
+            if snapshot.context.package.budget
+            else []
+        ),
+    )
+    section(
         "Conditions and sampling",
         [f"- {c.name} ({c.role}): {c.description}" for c in d.conditions] + entries(d.sampling),
     )
@@ -177,11 +186,32 @@ def render_plan(snapshot: PublicationSnapshot) -> str:
 def plan_payload(
     snapshot: PublicationSnapshot, source: SourceSnapshot, selected: SelectedCandidateInput | None
 ) -> dict:
+    finals = [
+        d
+        for d in snapshot.decisions
+        if d.purpose == "final_review"
+        and d.binding.model_dump(exclude={"event_id"})
+        == snapshot.binding.model_dump(exclude={"event_id"})
+    ]
+    last_action = finals[-1].responses[-1].action if finals and finals[-1].responses else None
+    if snapshot.approval:
+        publication_status = approval_status = "approved"
+    else:
+        approval_status = {"REJECT": "rejected", "HOLD": "held"}.get(
+            last_action, "pending" if finals else "not_requested"
+        )
+        publication_status = (
+            "blocked"
+            if snapshot.assessment and snapshot.assessment.plan_complete is not True
+            else "draft"
+        )
     return {
         "contract": "exp-plan/v1",
         "schema_version": 2,
         "run_id": snapshot.run["run_id"],
         "version": snapshot.version.version,
+        "publication_status": publication_status,
+        "approval_status": approval_status,
         "binding": snapshot.binding.model_dump(),
         "source": source.model_dump(mode="json"),
         "context": snapshot.context.model_dump(mode="json"),
@@ -233,6 +263,8 @@ def export_plan(
         "schema_version": 2,
         "run_id": run_id,
         "version": snapshot.version.version,
+        "publication_status": data["publication_status"],
+        "approval_status": data["approval_status"],
         "design_hash": snapshot.version.design_hash,
         "binding": snapshot.binding.model_dump(),
         "support_hash": hashlib.sha256(raw_json).hexdigest(),
@@ -305,6 +337,11 @@ def render_decision(decision: ResearcherDecision) -> str:
             lines.append(f"- Selected option: {response.option_id}")
         if response.text:
             lines.append(f"- Exact reply: {response.text}")
+        answer = decision.interpretation.get("clarifications", {}).get(response.response_id)
+        if answer:
+            lines.append(f"- Plan clarification: {answer['explanation']}")
+            if answer.get("evidence_refs"):
+                lines.append("- Clarification evidence: " + ", ".join(answer["evidence_refs"]))
         if response.affected_paths:
             lines.append("- Response scope: " + ", ".join(response.affected_paths))
     if decision.verification:

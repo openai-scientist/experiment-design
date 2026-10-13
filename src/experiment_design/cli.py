@@ -58,6 +58,7 @@ def _parser() -> argparse.ArgumentParser:
             "PROPOSE_ALTERNATIVE",
             "DEFER",
             "REQUEST_CHANGES",
+            "CLARIFY",
             "REJECT",
             "HOLD",
         ],
@@ -179,6 +180,11 @@ def _status(store: Store, rid: str, config: Path) -> None:
                             '--by "<your name>"'
                         )
                 else:
+                    print(
+                        f"  {_prefix(config)} decide {rid} {decision.id} "
+                        f"--revision {decision.revision} --action CLARIFY "
+                        '--text "<your question>" --by "<your name>"'
+                    )
                     print(
                         f"  {_prefix(config)} approve {rid} --version {version.version} "
                         '--by "<your name>"'

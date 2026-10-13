@@ -386,3 +386,169 @@ def test_jev_receives_review_progress_and_bound_computation_limitations(tmp_path
     assert state["calculations"][0]["reasons"]
     assert "draft" in state["objective"].lower()
     store.close()
+
+
+def test_final_clarification_recovers_without_revision_or_approval(tmp_path, monkeypatch, capsys):
+    from experiment_design import cli
+    from experiment_design.contracts import Observation
+    from experiment_design.workflow import WorkflowError
+    from tests.support.providers import tool_call
+
+    store = Store(tmp_path / "clarify.db")
+    deps = Deps(
+        store,
+        ScriptedLLM(normal_responses()),
+        ScriptedJudge(
+            [
+                {"next_action": "REVIEW"},
+                {"next_action": "QUALIFY"},
+            ]
+        ),
+        RunConfig(),
+    )
+    run = start_run(source_snapshot(), deps, {})
+    assert advance(run, deps) == "REVIEWABLE"
+    final = store.decisions(run)[-1]
+    version = store.version(run)
+    assessment = store.assessment(run)
+    usage = store.usage(run).llm_tokens
+    config = tmp_path / "cli.yaml"
+    config.write_text(
+        "llm:\n  base_url: https://provider.example/v1\n  model: test\nstore: "
+        + str(tmp_path / "clarify.db")
+        + "\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["--config", str(config), "status", run]) == 0
+    assert "--action CLARIFY" in capsys.readouterr().out
+    assert (
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "decide",
+                run,
+                final.id,
+                "--revision",
+                str(final.revision),
+                "--action",
+                "CLARIFY",
+                "--text",
+                "Explain the recruitment assumptions",
+                "--by",
+                "PI",
+            ]
+        )
+        == 0
+    )
+    question = store.decision(run, final.id).responses[-1]
+    with pytest.raises(WorkflowError, match="final review"):
+        approve(store, run, version.version, "PI")
+
+    def inspect_plan(messages, tools):
+        assert "Explain the recruitment assumptions" in messages[1]["content"]
+        offered = {t["function"]["name"] for t in tools}
+        assert "submit_clarification" in offered and "submit_revision" not in offered
+        assert "compute_power" not in offered and "check_patch" not in offered
+        return tool_call("read_design", {}, call_id="clarification-inspection")
+
+    def explain(messages, tools):
+        ref = json.loads(messages[-1]["content"])["evidence_ref"]
+        return submit(
+            "submit_clarification",
+            {
+                "explanation": (
+                    "Recruitment follows the recorded class allocation; "
+                    "nuisance values remain assumptions."
+                ),
+                "evidence_refs": [ref],
+            },
+        )
+
+    deps.llm = ScriptedLLM([inspect_plan, explain])
+    original_save = store.save_decision
+
+    def interrupted(decision):
+        if question.response_id in decision.interpretation.get("clarifications", {}):
+            raise RuntimeError("answer persistence interrupted")
+        return original_save(decision)
+
+    monkeypatch.setattr(store, "save_decision", interrupted)
+    with pytest.raises(RuntimeError, match="answer persistence interrupted"):
+        advance(run, deps)
+    assert store.decision(run, final.id).status == "ANSWERED"
+    monkeypatch.setattr(store, "save_decision", original_save)
+    deps.llm = ScriptedLLM([])
+    assert advance(run, deps) == "REVIEWABLE"
+    assert deps.llm.calls == []
+    answered = store.decision(run, final.id)
+    answer = answered.interpretation["clarifications"][question.response_id]
+    assert "remain assumptions" in answer["explanation"]
+    ref = answer["evidence_refs"][0]
+    observation = next(
+        o for o in store._artifact_records(run, "observation", Observation) if o.evidence_ref == ref
+    )
+    assert observation.accepted and observation.binding.design_hash == version.design_hash
+    assert answered.status == "AWAITING_RESEARCHER" and answered.application == {}
+    assert store.version(run).version == version.version
+    assert store.version(run).design_hash == version.design_hash
+    assert store.assessment(run).id == assessment.id
+    assert store.issues(run) == [] and store.approvals(run) == []
+    assert store.run(run).stage_id == "S6" and store.run(run).revisions_done == 0
+    assert store.usage(run).llm_tokens > usage
+    before = store.events(run)
+    with pytest.raises(ValueError, match="question"):
+        respond(
+            store,
+            run,
+            final.id,
+            DecisionResponse(
+                revision=answered.revision,
+                action="CLARIFY",
+                text=" ",
+                researcher="PI",
+                response_id="empty",
+            ),
+        )
+    assert store.events(run) == before
+
+    respond(
+        store,
+        run,
+        final.id,
+        DecisionResponse(
+            revision=answered.revision,
+            action="CLARIFY",
+            text="Explain the stopping policy",
+            researcher="PI",
+            response_id="second-question",
+        ),
+    )
+    deps.llm = ScriptedLLM(
+        [
+            submit(
+                "submit_clarification",
+                {
+                    "explanation": "The analysis and consent stop condition remain unchanged.",
+                    "evidence_refs": ["S1"],
+                },
+            )
+        ]
+    )
+    assert advance(run, deps) == "REVIEWABLE"
+    answered = store.decision(run, final.id)
+    assert set(answered.interpretation["clarifications"]) == {
+        question.response_id,
+        "second-question",
+    }
+    paths = export(store, run, tmp_path / "clarified-draft")
+    text = paths["exp_plan.md"].read_text(encoding="utf-8")
+    assert answer["explanation"] in text and "Explain the stopping policy" in text
+    data = json.loads(paths["exp_plan.json"].read_bytes())
+    assert data["approval"] is None and data["approval_status"] == "pending"
+    assert any(o["evidence_ref"] == ref for o in data["observations"])
+    approve(store, run, version.version, "PI")
+    approved = export(store, run, tmp_path / "clarified-approved")
+    assert json.loads(approved["manifest.json"].read_bytes())["approval_status"] == "approved"
+    assert store.run(run).revisions_done == 0 and store.version(run).version == version.version
+    store.close()

@@ -454,6 +454,7 @@ class DecisionResponse(Record):
         "DEFER",
         "APPROVE_VERSION",
         "REQUEST_CHANGES",
+        "CLARIFY",
         "REJECT",
         "HOLD",
     ]

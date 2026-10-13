@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from experiment_design.agents import (
     decision_interpretation,
+    design,
 )
 from experiment_design.config import RunConfig
 from experiment_design.contracts import (
@@ -204,6 +205,29 @@ def _advance(run_id: str, deps: Deps) -> RunStatus:
             if decision.purpose == "final_review" and decision.status == "ANSWERED":
                 response = decision.responses[-1]
                 store.check_binding(run_id, decision.binding)
+                if response.action == "CLARIFY":
+                    snapshot = store.publication_snapshot(run_id)
+                    result = run_specialist(
+                        deps,
+                        run_id,
+                        design,
+                        mode="clarification",
+                        decision=decision.model_dump(mode="json"),
+                        assessment=snapshot.assessment.model_dump(mode="json")
+                        if snapshot.assessment
+                        else None,
+                        calculations=[c.model_dump(mode="json") for c in snapshot.calculations],
+                    )
+                    with store.transaction():
+                        store.check_binding(run_id, decision.binding)
+                        answers = dict(decision.interpretation.get("clarifications", {}))
+                        answers[response.response_id] = result.findings_or_changes
+                        decision.interpretation = {
+                            **decision.interpretation,
+                            "clarifications": answers,
+                        }
+                        decision.status = "AWAITING_RESEARCHER"
+                        store.save_decision(decision)
                 if response.action == "REJECT":
                     decision.status = "APPLIED"
                     decision.application = {

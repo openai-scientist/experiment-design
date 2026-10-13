@@ -175,7 +175,11 @@ def run_specialist(
             objective=module.SPEC.system_prompt,
             package_ref=ctx.package.id if ctx.package else ctx.binding.source_snapshot_id,
             design_version=ctx.binding.design_version,
-            allowed_tools=list(module.TOOLS),
+            allowed_tools=(
+                [t for t in module.TOOLS if t in {"read_package", "read_design", "read_issues"}]
+                if module is design and focus.get("mode") == "clarification"
+                else list(module.TOOLS)
+            ),
             issue_refs=[i.id for i in focus.get("issues", focus.get("batch", []))],
             budget=TaskBudget(
                 max_turns=deps.run.task_max_turns,

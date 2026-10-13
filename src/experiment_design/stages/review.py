@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from experiment_design.agents import methodologist, skeptic, verifier
+from experiment_design.agents import design, methodologist, skeptic, verifier
 from experiment_design.agents.tools import ToolContext, source_ids
 from experiment_design.contracts import ReviewCohort, ReviewIssue, StageResult
 from experiment_design.review import (
@@ -16,6 +16,7 @@ from experiment_design.review import (
     verification_options,
 )
 from experiment_design.runtime.jev import Question
+from experiment_design.runtime.store import TaskRecord
 from experiment_design.science.validators import validate_design
 from experiment_design.stages.common import (
     choose_next_action,
@@ -115,6 +116,43 @@ def _verify(deps: Deps, run_id: str):
                 "parent_version": version.parent if version else None,
             }
         )
+    # Reuse accepted submissions; do not copy a second rebuttal/evidence ledger into issues.
+    rebuttals = {}
+    arguments = {i.id: i.rebuttal for i in issues if i.status == "rebutted"}
+    if arguments:
+        records = deps.store._artifact_records(run_id, "task", TaskRecord)
+        designer_tasks = {
+            e.task_id
+            for e in deps.store.events(run_id)
+            if e.type == "task.started" and e.agent_id == design.SPEC.agent_id
+        }
+        for record in reversed(records):
+            if (
+                record.submission is None
+                or record.task.id not in designer_tasks
+                or record.task.binding is None
+            ):
+                continue
+            for defense in (record.submission.findings_or_changes or {}).get("rebuttals", []):
+                issue_id = defense["issue_id"]
+                if issue_id in rebuttals or arguments.get(issue_id) != defense["argument"]:
+                    continue
+                refs = defense["evidence_refs"]
+                rebuttals[issue_id] = {
+                    **defense,
+                    "task_id": record.task.id,
+                    "binding": record.task.binding.model_dump(mode="json"),
+                    "observations": [
+                        o.model_dump(mode="json")
+                        for o in deps.store.accepted_observations(record.task.id)
+                        if o.evidence_ref in refs and o.binding == record.task.binding
+                    ],
+                    "sources": [
+                        s.model_dump(mode="json")
+                        for s in deps.store.bound_sources(run_id, record.task.binding)
+                        if s.id in refs
+                    ],
+                }
     result = run_specialist(
         deps,
         run_id,
@@ -122,6 +160,7 @@ def _verify(deps: Deps, run_id: str):
         issues=issues,
         comparisons=comparisons,
         researcher_clarifications=clarifications,
+        rebuttals=list(rebuttals.values()),
     )
     live = validate_design(
         deps.store.version(run_id).design,

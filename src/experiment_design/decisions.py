@@ -124,7 +124,7 @@ def respond(
         if not response.researcher.strip() or not response.response_id.strip():
             raise ValueError("researcher identity and response ID are required")
         allowed = (
-            {"APPROVE_VERSION", "REQUEST_CHANGES", "REJECT", "HOLD"}
+            {"APPROVE_VERSION", "REQUEST_CHANGES", "CLARIFY", "REJECT", "HOLD"}
             if decision.purpose == "final_review"
             else {"SELECT_OPTION", "PROPOSE_ALTERNATIVE", "DEFER"}
         )
@@ -134,6 +134,8 @@ def respond(
             o.id for o in decision.options
         }:
             raise ValueError("unknown option ID")
+        if response.action == "CLARIFY" and not response.text.strip():
+            raise ValueError("clarification question is required")
         if (
             response.action in {"PROPOSE_ALTERNATIVE", "REQUEST_CHANGES"}
             and not response.text.strip()
@@ -148,7 +150,8 @@ def respond(
         decision.status = (
             "AWAITING_RESEARCHER" if response.action in {"DEFER", "HOLD"} else "ANSWERED"
         )
-        decision.interpretation = {}
+        if decision.purpose == "scientific":
+            decision.interpretation = {}
         decision.application = {}
         decision.reconciliation = {}
         return store.save_decision(decision)

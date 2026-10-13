@@ -226,6 +226,15 @@ def test_exp_plan_export_is_offline_consistent_and_frozen(tmp_path):
         inspected_review,
         skeptic_review,
     ]
+    context = source_context()
+    constraints = ["Use only local anonymized records; no external service access"]
+    budget = "Two engineer-days and four GPU-hours"
+    context.package.constraints = constraints
+    context.package.budget = budget
+    responses[0] = submit("submit_understanding", {"context": context.model_dump(mode="json")})
+    source = source_snapshot()
+    source.artifacts[0].text += "\n" + constraints[0] + "\n" + budget
+    source.artifacts[0].sha256 = hashlib.sha256(source.artifacts[0].text.encode()).hexdigest()
 
     store = Store(tmp_path / "publish.db")
     deps = Deps(
@@ -234,7 +243,7 @@ def test_exp_plan_export_is_offline_consistent_and_frozen(tmp_path):
         ScriptedJudge([{"next_action": "REVIEW"}, {"next_action": "QUALIFY"}]),
         RunConfig(),
     )
-    run = start_run(source_snapshot(), deps, {})
+    run = start_run(source, deps, {})
     assert advance(run, deps) == "REVIEWABLE"
     paths = export(store, run, tmp_path / "plan")
     assert set(paths) == {"exp_plan.md", "exp_plan.json", "manifest.json"}
@@ -259,6 +268,9 @@ def test_exp_plan_export_is_offline_consistent_and_frozen(tmp_path):
         "execution_ready" not in data["assessment"] and "handoff_complete" not in data["assessment"]
     )
     text = paths["exp_plan.md"].read_text(encoding="utf-8")
+    assert constraints == data["context"]["package"]["constraints"]
+    assert budget == data["context"]["package"]["budget"]
+    assert all(c in text for c in constraints) and budget in text
     assert (
         "Execution protocol" in text
         and "Expected outputs" in text
@@ -269,6 +281,8 @@ def test_exp_plan_export_is_offline_consistent_and_frozen(tmp_path):
     context = store.context(run)
     context.revision += 1
     context.unknowns.append("New evidence requires a new assessment")
+    context.package.constraints = ["Changed constraint must not overwrite the frozen plan"]
+    context.package.budget = "Changed budget"
     store.save_context(run, context)
     historical = export(store, run, tmp_path / "frozen", version=1)
     assert {name: path.read_bytes() for name, path in historical.items()} == before

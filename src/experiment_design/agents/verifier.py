@@ -48,7 +48,11 @@ def brief(ctx: ToolContext, **focus) -> str:
         "for regressions. A rebuttal may refer to an already-applied researcher patch: inspect "
         "its recorded response, application, reconciliation audit and actual comparison before "
         "judging the rebuttal. Only genuinely patch-free rebuttals have no design change; judge "
-        "their argument and cited evidence. Verify dependent sampling, measurement, analysis, "
+        "their argument and cited evidence. Supplied rebuttal observations retain their original "
+        "task/version binding and counterfactual scope. Inspect them as prior support; they are "
+        "not your own-task evidence or current canonical results. Independently recompute when "
+        "a quantitative conclusion needs checking, and cite your own accepted observation. "
+        "Verify dependent sampling, measurement, analysis, "
         "protocol and handoff without treating an unknown-resolution audit as verification. "
         "You are read-only; verdicts are recommendations to JEV, never approval.\n"
         + context_brief(ctx)

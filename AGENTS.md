@@ -33,6 +33,11 @@ authority. Internal selection is a proposal, never researcher confirmation.
 standalone exploration is read/export only. New runs do not have a separate
 exploration lifecycle or final candidate-only export. Empirical execution is out of scope.
 
+At final review, `decide --action CLARIFY --text <question>` records a question;
+`resume` obtains a bound explanation from the existing Design Agent. It leaves
+researcher approval pending and does not revise scientific choices. Answers remain
+in the decision history and publication; clarification questions are not confirmed intent.
+
 ## Code ownership
 
 Under `src/experiment_design/`:
@@ -112,6 +117,10 @@ Publish frozen supporting snapshots without recomputation. Schema-1, pre-cutover
 schema-2 and standalone exploration support historical reads/exports only through
 isolated compatibility code. Internal stage artifacts remain in SQLite, not extra
 active final files.
+Primary Markdown includes researcher constraints/budget from frozen context.
+Manifest publication/approval status is derived from the same snapshot as JSON.
+Verifier receives accepted rebuttal support with original task bindings; prior-task
+observations never become its own-task computation evidence.
 
 ## Verification and completion
 

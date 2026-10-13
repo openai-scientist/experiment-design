@@ -233,6 +233,7 @@ def test_verify_uncertain_remains_material_and_cannot_qualify(state):
 
 def test_resume_revision_commit_failure_reuses_submission(state, monkeypatch):
     run = saved_run(state, reviewed_version=1)
+    parent = state.version(run)
     saved_issue(state, run)
     original = state.save_issue
 
@@ -250,6 +251,12 @@ def test_resume_revision_commit_failure_reuses_submission(state, monkeypatch):
     advance(run, resumed)
     assert resumed.llm.calls == []
     assert state.version(run).version == 2 and state.issues(run)[0].status == "addressed"
+    assert state.version(run).parent == parent.version
+    assert state.version(run, parent.version).design_hash == parent.design_hash
+    assert state.version(run).design.claim == parent.design.claim
+    started = [e for e in state.events(run) if e.type == "task.started" and e.agent_id == "design"]
+    assert len(started) == 1
+    assert state.task(started[0].task_id).task.stage_id == "S4"
 
 
 def test_optional_review_preserves_independent_review_allowance(state):
