@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -119,6 +120,22 @@ class RunStore:
         config = self.config()
         config["run"] = {**(config.get("run") or {}), **limits}
         _json(self.path / "config.json", config)
+
+    def request_interrupt(self, kind: Literal["cancel", "pause"]) -> None:
+        if kind not in {"cancel", "pause"}:
+            raise WorkflowError("Unknown interrupt kind")
+        _json(self.path / "control.json", {"interrupt": kind})
+
+    def clear_interrupt(self) -> None:
+        (self.path / "control.json").unlink(missing_ok=True)
+
+    def interrupt(self) -> str | None:
+        try:
+            control = json.loads((self.path / "control.json").read_text(encoding="utf-8"))
+            kind = control["interrupt"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return kind if kind in {"cancel", "pause"} else None
 
     def _artifact(self, stage: int, name: str) -> Path:
         if not isinstance(stage, int) or isinstance(stage, bool) or not 1 <= stage <= 7:

@@ -26,7 +26,7 @@ from tests.integration.review.test_workspace_agent import (
 )
 from tests.support.providers import Judge, Provider, Scripted, ToolProvider
 
-HYPOTHESIS = "stage-01/hypothesis.md"
+HYPOTHESES_INPUT = "stage-01/hypothesis.md"
 
 
 def events(store, kind):
@@ -133,8 +133,8 @@ def test_no_route_offers_ask_for_a_whitespace_question(tmp_path, monkeypatch):
 
     real = engine._agent
 
-    def blank_question(*args):
-        return real(*args).model_copy(update={"question": "  "})
+    def blank_question(*args, **options):
+        return real(*args, **options).model_copy(update={"question": "  "})
 
     monkeypatch.setattr(engine, "_agent", blank_question)
     judge = Recording()
@@ -153,7 +153,7 @@ def test_revision_and_final_check_require_hypothesis_and_brief(tmp_path):
     provider = Provider(outputs)
     advance(store_for(tmp_path), provider, Judge(), RunConfig())
     for invocation in (4, 7):
-        assert {HYPOTHESIS, "research_brief"} <= set(provider.task(invocation)["required"])
+        assert {HYPOTHESES_INPUT, "research_brief"} <= set(provider.task(invocation)["required"])
         assert provider.documents(invocation)["research_brief"] == "Brief"
 
 

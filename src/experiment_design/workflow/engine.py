@@ -3,18 +3,21 @@
 import difflib
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from experiment_design.agents.prompts import snapshot
 from experiment_design.agents.tools import run_specialist
 from experiment_design.config import ExdConfig, RunConfig
-from experiment_design.contracts import AgentOutput, RunState, WorkflowError
+from experiment_design.contracts import AgentOutput, RunInterrupted, RunState, WorkflowError
 from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
+from experiment_design.vocabulary import REVIEW_ROLES
 
-HYPOTHESIS = "stage-01/hypothesis.md"
+# The input may hold several hypotheses; the path is unchanged so old runs resume.
+HYPOTHESES_INPUT = "stage-01/hypothesis.md"
 CRITICS = ("methodologist", "skeptic")
 
 
@@ -78,8 +81,15 @@ def _agent(
     name: str,
     workspace: dict[str, str],
     required: list[str],
+    *,
+    review_llm: LLMClient | None = None,
 ) -> AgentOutput:
-    output = run_specialist(role, store, llm, cfg, workspace, required)
+    kind = store.interrupt()
+    if kind:
+        raise RunInterrupted(kind)
+    store.event("agent.started", {"role": role, "stage": stage})
+    client = review_llm if role in REVIEW_ROLES and review_llm is not None else llm
+    output = run_specialist(role, store, client, cfg, workspace, required)
     store.write(stage, name + ".md", output.markdown)
     store.write(stage, name + ".json", _metadata(output))
     return output
@@ -361,7 +371,13 @@ def _revision_input_plan(store: RunStore) -> str:
     return old_plan
 
 
-def _revision(store: RunStore, llm: LLMClient, cfg: RunConfig, objections: dict[str, str]) -> None:
+def _revision(
+    store: RunStore,
+    llm: LLMClient,
+    cfg: RunConfig,
+    objections: dict[str, str],
+    review_llm: LLMClient | None = None,
+) -> None:
     old_plan = _revision_input_plan(store)
     store.event(
         "revision.pending",
@@ -369,7 +385,7 @@ def _revision(store: RunStore, llm: LLMClient, cfg: RunConfig, objections: dict[
     )
     store.update(refinements=store.state.refinements + 1)
     store.archive_from(4)
-    _run_revision(store, llm, cfg, old_plan, objections)
+    _run_revision(store, llm, cfg, old_plan, objections, review_llm)
 
 
 def _plan_diff(old_plan: str, revised_plan: str) -> str:
@@ -402,7 +418,13 @@ def _response(output: AgentOutput) -> str:
     )
 
 
-def _rejoinders(store: RunStore, llm: LLMClient, cfg: RunConfig, objections: dict[str, str]):
+def _rejoinders(
+    store: RunStore,
+    llm: LLMClient,
+    cfg: RunConfig,
+    objections: dict[str, str],
+    review_llm: LLMClient | None = None,
+):
     """Each critic answers the designer's response; an accepted rejoinder is never re-run."""
     for critic in CRITICS:
         name = critic + "_rejoinder"
@@ -422,12 +444,17 @@ def _rejoinders(store: RunStore, llm: LLMClient, cfg: RunConfig, objections: dic
             }
             | own
         )
-        required = [HYPOTHESIS, "plan", "plan_diff", "response", *own]
-        _agent(store, llm, cfg, name, 4, name, workspace, required)
+        required = [HYPOTHESES_INPUT, "plan", "plan_diff", "response", *own]
+        _agent(store, llm, cfg, name, 4, name, workspace, required, review_llm=review_llm)
 
 
 def _run_revision(
-    store: RunStore, llm: LLMClient, cfg: RunConfig, old_plan: str, objections: dict[str, str]
+    store: RunStore,
+    llm: LLMClient,
+    cfg: RunConfig,
+    old_plan: str,
+    objections: dict[str, str],
+    review_llm: LLMClient | None = None,
 ) -> None:
     store.update(stage=4)
     # route.json is written last, so a resumed run never replays an accepted revision.
@@ -445,7 +472,7 @@ def _run_revision(
             4,
             "revised_plan",
             workspace,
-            _with_replies(workspace, HYPOTHESIS, "research_brief", "plan", *objections),
+            _with_replies(workspace, HYPOTHESES_INPUT, "research_brief", "plan", *objections),
         )
         for name, text in objections.items():
             store.write(4, name + ".md", text)
@@ -464,7 +491,7 @@ def _run_revision(
     ] + [name + ".md" for name in objections]
     asking = json.loads(store.read(4, "route.json"))["choice"] == "ASK_RESEARCHER"
     if not asking:
-        _rejoinders(store, llm, cfg, objections)
+        _rejoinders(store, llm, cfg, objections, review_llm)
         outputs += [
             "methodologist_rejoinder.md",
             "methodologist_rejoinder.json",
@@ -478,16 +505,24 @@ def _run_revision(
         store.update(stage=5)
 
 
-def advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> RunState:
+def advance(
+    store: RunStore,
+    llm: LLMClient,
+    judge: Judge,
+    cfg: RunConfig,
+    *,
+    review_llm: LLMClient | None = None,
+    hold_at_review: bool = False,
+    integrations: Mapping[str, str] | None = None,
+) -> RunState:
     with store.execution():
-        if store.state.usage_unknown or store.state.status in {
-            "USAGE_UNKNOWN",
-            "REJECTED",
-            "AWAITING_RESEARCHER",
-        }:
+        stopped = {"USAGE_UNKNOWN", "REJECTED", "AWAITING_RESEARCHER", "CANCELLED"}
+        if hold_at_review and store.state.approval != "approved":
+            stopped.add("PENDING_REVIEW")
+        if store.state.usage_unknown or store.state.status in stopped:
             return store.state
         try:
-            return _advance(store, llm, judge, cfg)
+            return _advance(store, llm, judge, cfg, review_llm, hold_at_review, integrations)
         except WorkflowError as exc:
             if store.state.status != "USAGE_UNKNOWN":
                 store.update(status="STOPPED")
@@ -495,7 +530,15 @@ def advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> Ru
             raise
 
 
-def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> RunState:
+def _advance(
+    store: RunStore,
+    llm: LLMClient,
+    judge: Judge,
+    cfg: RunConfig,
+    review_llm: LLMClient | None = None,
+    hold_at_review: bool = False,
+    integrations: Mapping[str, str] | None = None,
+) -> RunState:
     from experiment_design.publication.plan import publish
 
     if store.state.question_kind == "CLARIFY":
@@ -527,7 +570,7 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
             workspace = _inputs(store) | _reframe_inputs(store)
             required = _with_replies(
                 workspace,
-                HYPOTHESIS,
+                HYPOTHESES_INPUT,
                 *(["reframe_objections"] if "reframe_objections" in workspace else []),
             )
             output = _agent(store, llm, cfg, "framing", 2, "research_brief", workspace, required)
@@ -564,7 +607,8 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
                 3,
                 "draft_plan",
                 workspace,
-                _with_replies(workspace, HYPOTHESIS, "research_brief"),
+                _with_replies(workspace, HYPOTHESES_INPUT, "research_brief"),
+                review_llm=review_llm,
             )
             store.complete(
                 3,
@@ -583,7 +627,7 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
             return store.state
         pending = None if store.valid(4) else _pending_revision(store)
         if pending:
-            _run_revision(store, llm, cfg, pending["plan"], pending["objections"])
+            _run_revision(store, llm, cfg, pending["plan"], pending["objections"], review_llm)
         redecide = False
         if store.valid(4) and _forced_stop(store, 4):
             method, skeptic = (
@@ -602,11 +646,29 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
                     "research_brief": store.read(2, "research_brief.md"),
                     "plan": draft,
                 }
-                needed = _with_replies(inputs, HYPOTHESIS, "plan")
+                needed = _with_replies(inputs, HYPOTHESES_INPUT, "plan")
                 method = _agent(
-                    store, llm, cfg, "methodologist", 4, "methodologist_review", inputs, needed
+                    store,
+                    llm,
+                    cfg,
+                    "methodologist",
+                    4,
+                    "methodologist_review",
+                    inputs,
+                    needed,
+                    review_llm=review_llm,
                 )
-                skeptic = _agent(store, llm, cfg, "skeptic", 4, "skeptic_review", inputs, needed)
+                skeptic = _agent(
+                    store,
+                    llm,
+                    cfg,
+                    "skeptic",
+                    4,
+                    "skeptic_review",
+                    inputs,
+                    needed,
+                    review_llm=review_llm,
+                )
             options, forced = _critic_options(store, cfg, method, skeptic, changes_requested)
             route = _route(store, judge, cfg, options, [method, skeptic])
             if route == "ASK_RESEARCHER":
@@ -636,6 +698,7 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
                     llm,
                     cfg,
                     {"methodologist_review": method.markdown, "skeptic_review": skeptic.markdown},
+                    review_llm,
                 )
                 changes_requested = False
             else:
@@ -697,12 +760,22 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
                     inputs[name] = store.read(4, name + ".md")
                 needed = _with_replies(
                     inputs,
-                    HYPOTHESIS,
+                    HYPOTHESES_INPUT,
                     "research_brief",
                     "plan",
                     *(n for n in review_names if n != "response"),
                 )
-                final = _agent(store, llm, cfg, "final_check", 5, "final_review", inputs, needed)
+                final = _agent(
+                    store,
+                    llm,
+                    cfg,
+                    "final_check",
+                    5,
+                    "final_review",
+                    inputs,
+                    needed,
+                    review_llm=review_llm,
+                )
             maintained = _maintained(store, review_names)
             options, forced = _final_options(store, cfg, final, maintained)
             route = _route(store, judge, cfg, options, [final, *maintained])
@@ -733,7 +806,7 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
                 if route == "REFRAME":
                     _reframe(store, objections)
                 else:
-                    _revision(store, llm, cfg, objections)
+                    _revision(store, llm, cfg, objections, review_llm)
                 continue
             if route == "STOP":
                 store.update(status="INCOMPLETE", review_complete=False)
@@ -754,6 +827,9 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
             store.complete(
                 6, [(4, "revised_plan.md"), (5, "final_review.md")], ["researcher_review.md"]
             )
+        if hold_at_review and store.state.approval != "approved":
+            store.update(stage=6, status="PENDING_REVIEW")
+            return store.state
         store.update(stage=7)
         if not store.valid(7):
             publish(store)

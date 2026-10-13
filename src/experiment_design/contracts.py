@@ -10,6 +10,14 @@ class WorkflowError(ValueError):
     pass
 
 
+class RunInterrupted(Exception):
+    """A cancel or pause request reached the workflow; not a workflow failure."""
+
+    def __init__(self, kind: Literal["cancel", "pause"]):
+        super().__init__(kind)
+        self.kind = kind
+
+
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 

@@ -198,10 +198,10 @@ def test_resume_does_not_rerun_an_accepted_rejoinder(tmp_path, monkeypatch):
     outputs[4:4] = revised("Revised plan")
     real = engine._agent
 
-    def crashing(store_, llm, cfg, role, *rest):
+    def crashing(store_, llm, cfg, role, *rest, **options):
         if role == "skeptic_rejoinder":
             raise SystemExit("simulated crash before the second rejoinder")
-        return real(store_, llm, cfg, role, *rest)
+        return real(store_, llm, cfg, role, *rest, **options)
 
     monkeypatch.setattr(engine, "_agent", crashing)
     with pytest.raises(SystemExit):
