@@ -34,9 +34,13 @@ _ROLES = {
         "Ground the research question. Set needs_input and ask only when core intent is "
         "missing or contradictory and cannot be proposed: the research question, "
         "population, intervention and comparator, primary outcome, or inferential claim. "
-        "Never ask about implementation details (instruments, covariates, platforms, "
-        "rubrics, governance, allocation or analysis procedures); list them as open items "
-        "for the designer to propose. Do not ask again what actual researcher_responses "
+        "The intervention and comparator include what each arm actually receives and who "
+        "produces, reviews or alters it; when the source leaves open a choice that would "
+        "change what the comparison means, ask it. "
+        "Never ask about implementation details that leave the comparison unchanged "
+        "(instruments, covariates, platforms, rubrics, governance, allocation or analysis "
+        "procedures); list them as open items for the designer to propose. Do not ask "
+        "again what actual researcher_responses "
         "already answer. In research_brief Markdown include a section that "
         "compares 2-3 plausible directions (or explains why the source fixes one) and "
         "states why the proposed one was chosen. "
@@ -46,6 +50,7 @@ _ROLES = {
     ),
     "design": (
         "Write a specific experiment plan: protocol, controls, measurement validity, "
+        "an explicit definition of what each arm receives and who produces or alters it, "
         "analysis, interpretation (negative/inconclusive/technical failure), feasibility "
         "and constraints. "
     ),
