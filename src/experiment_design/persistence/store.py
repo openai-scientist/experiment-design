@@ -5,6 +5,7 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -12,6 +13,7 @@ from pathlib import Path, PureWindowsPath
 from pydantic import ValidationError
 
 from experiment_design.contracts import RunState, WorkflowError
+from experiment_design.vocabulary import ACTIVITY_TYPES
 
 
 def _hash(path: Path) -> str:
@@ -276,6 +278,30 @@ class RunStore:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
+
+    def activity(
+        self,
+        type: str,
+        *,
+        actor: str,
+        summary: str,
+        step_key: str | None = None,
+        refs: Sequence[str] = (),
+        payload: Mapping | None = None,
+    ) -> None:
+        if type not in ACTIVITY_TYPES:
+            raise WorkflowError(f"Unknown activity type '{type}'")
+        self.event(
+            "activity",
+            {
+                "type": type,
+                "actor": actor,
+                "summary": summary,
+                "step_key": step_key,
+                "refs": list(refs),
+                "payload": dict(payload or {}),
+            },
+        )
 
     def events(self) -> list[dict]:
         path = self.path / "events.jsonl"
