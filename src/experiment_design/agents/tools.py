@@ -73,6 +73,49 @@ def _int_arg(args: dict, key: str, default: int) -> int:
     return value
 
 
+def _digest(read_result: dict) -> dict:
+    """Journal a read by identity; the model alone receives the text."""
+    text = read_result["text"]
+    return {k: v for k, v in read_result.items() if k != "text"} | {
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()
+    }
+
+
+def _list_arg(args: dict, key: str) -> list:
+    value = args[key]
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{key} must be a non-empty list")
+    return value
+
+
+def _quote(store: RunStore, workspace: dict[str, str], args: object, accepted: set[str]) -> dict:
+    """Supplied sources are evidence; other workspace documents are quoted locations
+    (plan text, actual replies) and never count as source values."""
+    if not isinstance(args, dict):
+        raise ValueError("Each quote must be an object with name and span")
+    name, span = args.get("name"), args.get("span")
+    if _exact_span(store.sources(), name, span):
+        kind = "source"
+    elif _exact_span(workspace, name, span):
+        kind = "document"
+    else:
+        raise ValueError(
+            f"Span is not an exact quote of at least 12 non-whitespace characters from {name!r}"
+        )
+    ref = f"{kind}:" + hashlib.sha256((name + span).encode()).hexdigest()
+    accepted.add(ref)
+    return {"evidence_ref": ref, "source": name, "kind": kind, "span": span}
+
+
+def _quote_or_error(
+    store: RunStore, workspace: dict[str, str], args: object, accepted: set[str]
+) -> dict:
+    try:
+        return _quote(store, workspace, args, accepted)
+    except ValueError as exc:
+        return {"accepted": False, "error": str(exc)}
+
+
 def _read(workspace: dict[str, str], covered: dict[str, set[int]], args: dict) -> dict:
     name = args.get("name")
     if name not in workspace:
@@ -132,8 +175,16 @@ def _problems(
             for e in exc.errors(include_url=False, include_context=False, include_input=False)
         ]
     problems = []
-    if any(ref not in accepted_refs for f in output.findings for ref in f.evidence_refs):
-        problems.append("Finding references evidence not accepted in this task")
+    unknown = sorted(
+        {ref for f in output.findings for ref in f.evidence_refs if ref not in accepted_refs}
+    )
+    if unknown:
+        problems.append(
+            "Finding references evidence not accepted in this task: "
+            + ", ".join(unknown[:5])
+            + ". Use only evidence_ref values returned by source or calculate, "
+            "or leave evidence_refs empty"
+        )
     if output.needs_input and not output.question.strip():
         problems.append("needs_input requires a concrete question")
     unread = _unread(workspace, required, covered)
@@ -177,15 +228,17 @@ def run_specialist(
         ),
         _tool(
             "read",
-            "Read numbered lines of one workspace document",
+            "Read numbered lines. Pass names to read several whole documents in one call "
+            "(preferred: turns are limited), or name with start_line/max_lines for a range",
             {
                 "type": "object",
                 "properties": {
+                    "names": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                     "name": {"type": "string"},
                     "start_line": {"type": "integer", "minimum": 1},
                     "max_lines": {"type": "integer", "minimum": 1},
                 },
-                "required": ["name"],
+                "required": [],
                 "additionalProperties": False,
             },
         ),
@@ -209,13 +262,23 @@ def run_specialist(
         ),
         _tool(
             "source",
-            "Quote an exact span from any workspace document to cite it in findings: a "
-            "verbatim quote (at least 12 non-whitespace characters), not line numbers. "
-            "Supplied sources give kind 'source' (evidence); other documents give kind "
-            "'document' (a quoted location, not evidence of a value)",
+            "Quote exact spans from workspace documents to cite them in findings: verbatim "
+            "quotes (at least 12 non-whitespace characters), not line numbers. Pass quotes to "
+            "obtain several refs in one call (preferred: turns are limited). Supplied sources "
+            "give kind 'source' (evidence); other documents give kind 'document' (a quoted "
+            "location, not evidence of a value)",
             {
                 "type": "object",
                 "properties": {
+                    "quotes": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}, "span": {"type": "string"}},
+                            "required": ["name", "span"],
+                        },
+                    },
                     "name": {"type": "string"},
                     "span": {
                         "type": "string",
@@ -223,7 +286,7 @@ def run_specialist(
                         "12 non-whitespace characters; never line numbers or a paraphrase",
                     },
                 },
-                "required": ["name", "span"],
+                "required": [],
                 "additionalProperties": False,
             },
         ),
@@ -356,25 +419,27 @@ def run_specialist(
                             submission = output
                             result = {"accepted": True}
                 elif call.name == "read":
-                    result = _read(workspace, covered, args)
+                    if "names" in args:
+                        result = {
+                            "documents": [
+                                _read(workspace, covered, {"name": name, "max_lines": _READ_CAP})
+                                for name in _list_arg(args, "names")
+                            ]
+                        }
+                    else:
+                        result = _read(workspace, covered, args)
                 elif call.name == "search":
                     result = _search(workspace, args)
                 elif call.name == "source":
-                    name, span = args["name"], args["span"]
-                    # Supplied sources are evidence; other workspace documents are quoted
-                    # locations (plan text, actual replies) and never count as source values.
-                    if _exact_span(store.sources(), name, span):
-                        kind = "source"
-                    elif _exact_span(workspace, name, span):
-                        kind = "document"
+                    if "quotes" in args:
+                        result = {
+                            "quotes": [
+                                _quote_or_error(store, workspace, q, accepted_refs)
+                                for q in _list_arg(args, "quotes")
+                            ]
+                        }
                     else:
-                        raise ValueError(
-                            "Span is not an exact quote of at least 12 non-whitespace "
-                            f"characters from document {name!r}"
-                        )
-                    ref = f"{kind}:" + hashlib.sha256((name + span).encode()).hexdigest()
-                    accepted_refs.add(ref)
-                    result = {"evidence_ref": ref, "source": name, "kind": kind, "span": span}
+                        result = _quote(store, workspace, args, accepted_refs)
                 elif call.name == "calculate":
                     request = CalculationRequest.model_validate(args)
                     if not request.calculator_id:
@@ -418,9 +483,9 @@ def run_specialist(
                 result = {"accepted": False, "error": str(exc)}
             logged = result
             if call.name == "read" and "text" in result:
-                logged = {k: v for k, v in result.items() if k != "text"} | {
-                    "sha256": hashlib.sha256(result["text"].encode("utf-8")).hexdigest()
-                }
+                logged = _digest(result)
+            elif call.name == "read" and "documents" in result:
+                logged = {"documents": [_digest(d) for d in result["documents"]]}
             store.event(
                 "tool.result",
                 {"task": task, "tool": call.name, "call_id": call.id, "result": logged},

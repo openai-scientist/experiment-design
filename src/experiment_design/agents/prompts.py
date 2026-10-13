@@ -2,10 +2,11 @@
 
 _COMMON = """You are a bounded workspace agent. Your first message gives a goal and an index of
 named documents (name, line count, first line), not their content. Work like this:
-inspect the index; in your first turn call read for every required document at once
-(one response may hold many tool calls; turns are limited); use search to find passages;
-use source to quote an exact span (verbatim text, not line numbers) from any document
-before citing it in findings; only supplied sources count as evidence of a value; use
+inspect the index; turns are limited, so in your first turn call read once with names
+listing every required document; use search to find passages; before citing spans in
+findings, call source once with quotes listing every verbatim span you will cite (not
+line numbers), and cite only the refs it returns; only supplied sources count as
+evidence of a value; use
 calculate when a
 supported computation helps; run check on your draft output; then submit. Submit is
 rejected until every required document is fully read. Evidence comes only from the

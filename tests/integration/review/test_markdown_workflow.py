@@ -8,7 +8,7 @@ from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.jev import Decision
 from experiment_design.runtime.llm import LLMResponse, ToolCall
 from experiment_design.workflow.engine import advance, respond
-from tests.support.providers import Judge, Provider, ToolProvider
+from tests.support.providers import Judge, Provider, Scripted, ToolProvider
 
 
 def store_for(tmp_path):
@@ -748,6 +748,35 @@ def test_workspace_document_quote_is_a_citable_location_not_evidence(tmp_path):
     )
     output = run_specialist("skeptic", store, cited, RunConfig(task_max_turns=3), workspace, [])
     assert output.findings[0].evidence_refs == [result["evidence_ref"]]
+
+
+def test_one_call_reads_several_documents_and_quotes_several_spans(tmp_path):
+    from experiment_design.agents.tools import run_specialist
+
+    store = store_for(tmp_path)
+    workspace = {
+        "plan": "Randomize classes after the baseline test is scored.\nSecond line.\n",
+        "response": "The designer kept the baseline test as planned.\n",
+    }
+    quotes = [
+        {"name": "plan", "span": "Randomize classes after the baseline"},
+        {"name": "response", "span": "kept the baseline test"},
+        {"name": "plan", "span": "Invented sentence absent"},
+    ]
+    turns = [
+        [("read", {"names": ["plan", "response"]})],
+        [("source", {"quotes": quotes})],
+        [("submit", {"markdown": "Review"})],
+    ]
+    provider = Scripted(turns)
+    run_specialist(
+        "skeptic", store, provider, RunConfig(task_max_turns=3), workspace, ["plan", "response"]
+    )
+    read, quoted = [e["data"]["result"] for e in store.events() if e["kind"] == "tool.result"][:2]
+    assert [d["name"] for d in read["documents"]] == ["plan", "response"]
+    assert all("text" not in d and d["sha256"] for d in read["documents"])
+    assert [q.get("kind") for q in quoted["quotes"]] == ["document", "document", None]
+    assert "exact quote" in quoted["quotes"][2]["error"]
 
 
 def test_calculation_value_cannot_come_from_a_workspace_document(tmp_path):
