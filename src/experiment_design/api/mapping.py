@@ -1,7 +1,17 @@
-"""Pure mapping from exd run state to contract phase, step and failure."""
+"""Pure mapping from exd run state to contract phase, step, failure and gate."""
 
-from experiment_design.api.contract_models import FailureInfo, Phase
+from collections.abc import Sequence
+from datetime import UTC, datetime
+
+from experiment_design.api.contract_models import (
+    FailureInfo,
+    Gate,
+    GateKind,
+    InteractionMode,
+    Phase,
+)
 from experiment_design.contracts import RunState
+from experiment_design.persistence.store import RunStore
 from experiment_design.vocabulary import STEPS
 
 _STATUS_PHASE = {
@@ -41,3 +51,20 @@ def failure_of(state: RunState, *, reason: str = "") -> FailureInfo | None:
         return None
     code, message = _FAILURES[state.status]
     return FailureInfo(code=code, message=reason or message)
+
+
+def open_gate(
+    store: RunStore, *, artifact_ids: Sequence[str], mode: InteractionMode
+) -> Gate | None:
+    """The gate a held run waits behind; S1 knows only the researcher review of the plan."""
+    state = store.state
+    if state.status == "PENDING_REVIEW" and state.stage == 6:
+        return Gate(
+            gate_id=f"g{state.attempt}-s6-review",
+            kind=GateKind.artifact_review,
+            step_key=step_key(6),
+            prompt="Review the experiment plan",
+            artifact_ids=list(artifact_ids),
+            opened_at=datetime.now(UTC),
+        )
+    return None
