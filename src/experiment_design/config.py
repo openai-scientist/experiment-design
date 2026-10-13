@@ -2,11 +2,15 @@
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import Field, ValidationError
 
-from experiment_design.contracts import Record
+from experiment_design.contracts import Profile, Record
+
+if TYPE_CHECKING:
+    from experiment_design.api.contract_models import ModelConfig
 
 
 class LLMConfig(Record):
@@ -35,13 +39,31 @@ class RunConfig(Record):
 
 class ExdConfig(Record):
     llm: LLMConfig
+    review_llm: LLMConfig | None = None
     jev: JevConfig = Field(default_factory=JevConfig)
     run: RunConfig = Field(default_factory=RunConfig)
+    profile: Profile = Field(default_factory=Profile)
     runs_root: Path = Path("runs")
 
 
 class ConfigError(ValueError):
     pass
+
+
+_MODEL_OVERRIDES = ("timeout_sec", "max_retries", "temperature", "max_tokens")
+
+
+def llm_config_from(model: "ModelConfig", base: LLMConfig) -> LLMConfig:
+    """Provider settings from a run request; the API key stays out of the returned config."""
+    if model.provider != "openai_compatible" or not model.base_url:
+        raise ConfigError("unsupported model provider")
+    values = base.model_dump() | {"base_url": model.base_url, "model": model.model}
+    values |= {name: model.extra[name] for name in _MODEL_OVERRIDES if name in model.extra}
+    try:
+        return LLMConfig.model_validate(values)
+    except ValidationError as exc:
+        fields = ", ".join(str(error["loc"][0]) for error in exc.errors())
+        raise ConfigError(f"invalid model settings: {fields}") from None
 
 
 def load_config(path: Path, *, require_provider_keys: bool = True) -> ExdConfig:
