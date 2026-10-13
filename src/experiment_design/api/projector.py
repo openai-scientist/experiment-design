@@ -50,11 +50,16 @@ class Projector:
         if phase is self.phase:
             return
         previous, self.phase = self.phase, phase
-        self._emit("run.phase_changed", phase, self.step, {"from": previous.value})
+        # A terminal phase travels only in its own event (run.failed, run.cancelled,
+        # run.published): Platform refuses artifacts once a phase_changed says published.
         if phase is Phase.failed:
             failure = self.failure or failure_of(state)
             if failure is not None:
                 self._emit("run.failed", phase, self.step, failure.model_dump())
+        elif phase is Phase.cancelled:
+            self._emit("run.cancelled", phase, self.step, {})
+        elif phase is not Phase.published:
+            self._emit("run.phase_changed", phase, self.step, {"from": previous.value})
 
     def __call__(self, change: StoreChange) -> None:
         with self._lock:

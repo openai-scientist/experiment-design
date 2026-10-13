@@ -43,6 +43,7 @@ class ExdConfig(Record):
     jev: JevConfig = Field(default_factory=JevConfig)
     run: RunConfig = Field(default_factory=RunConfig)
     profile: Profile = Field(default_factory=Profile)
+    interaction_mode: str = "copilot"
     runs_root: Path = Path("runs")
 
 

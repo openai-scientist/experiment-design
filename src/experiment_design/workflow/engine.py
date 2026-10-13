@@ -846,7 +846,7 @@ def respond(
     revision: int,
     option: int | None = None,
 ) -> RunState:
-    with store.execution():
+    with store.execution(), store.coalesced():
         if revision != store.state.attempt:
             raise WorkflowError("Stale response revision")
         if action not in {"ANSWER", "APPROVE", "REQUEST_CHANGES", "CLARIFY", "REJECT"}:

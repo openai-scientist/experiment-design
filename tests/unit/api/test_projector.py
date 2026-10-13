@@ -99,3 +99,39 @@ def test_open_gate_only_while_waiting_at_stage_six(tmp_path):
     gate = open_gate(store, artifact_ids=["a1"], mode=InteractionMode.light)
     assert gate.kind.value == "artifact_review" and gate.step_key == "s6_researcher_review"
     assert gate.gate_id == "g1-s6-review" and gate.artifact_ids == ["a1"]
+
+
+def test_cancelled_run_announces_run_cancelled_only(tmp_path):
+    store, _, out = _wired(tmp_path)
+    store.update(status="CANCELLED")
+    assert [e.type for e in out] == ["run.cancelled"] and out[0].phase is Phase.cancelled
+
+
+def test_published_run_never_announces_a_published_phase_change(tmp_path):
+    store, _, out = _wired(tmp_path)
+    store.update(stage=7, status="PUBLISHED")
+    assert out[-1].type == "run.step_changed"
+    assert not any(e.type == "run.phase_changed" and e.phase is Phase.published for e in out)
+
+
+def test_archive_state_change_reaches_the_projector(tmp_path):
+    store, _, out = _wired(tmp_path)
+    store.update(stage=6, status="PENDING_REVIEW")
+    before = len(out)
+    store.archive_from(4)  # writes the checkpoint itself, not through update()
+    assert [e.type for e in out[before:]] == ["run.step_changed", "run.phase_changed"]
+    assert out[-1].phase is Phase.reviewing and store.state.attempt == 2
+
+
+def test_coalesced_changes_are_reported_once(tmp_path):
+    store, _, out = _wired(tmp_path)
+    store.update(stage=4)
+    seen = []
+    store.subscribe(seen.append)
+    with store.coalesced():
+        store.update(stage=5)
+        store.update(stage=6, status="PENDING_REVIEW")
+    assert len([c for c in seen if c[0] == "state"]) == 1
+    change = next(c for c in seen if c[0] == "state")
+    assert change[1].stage == 4 and change[2].stage == 6 and change[2].status == "PENDING_REVIEW"
+    assert out[-1].phase is Phase.awaiting_researcher

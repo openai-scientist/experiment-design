@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -62,6 +63,9 @@ class RunStore:
         self.path = Path(run_dir).resolve()
         self._executing = False
         self._listeners: list[Callable[[StoreChange], None]] = []
+        self._control_lock = threading.Lock()
+        self._coalescing = 0
+        self._pending_state: tuple[RunState, RunState] | None = None
         if self.path.is_file():
             raise WorkflowError(
                 "Legacy SQLite runs are unsupported; supply a filesystem run directory"
@@ -118,8 +122,24 @@ class RunStore:
         self._listeners.append(listener)
 
     def _notify(self, change: StoreChange) -> None:
+        if change[0] == "state" and self._coalescing:
+            first = self._pending_state[0] if self._pending_state else change[1]
+            self._pending_state = (first, change[2])
+            return
         for listener in list(self._listeners):
             listener(change)
+
+    @contextmanager
+    def coalesced(self):
+        """Report the state changes of one logical step as a single change."""
+        self._coalescing += 1
+        try:
+            yield
+        finally:
+            self._coalescing -= 1
+            if not self._coalescing and self._pending_state:
+                (previous, current), self._pending_state = self._pending_state, None
+                self._notify(("state", previous, current))
 
     def update(self, **fields) -> RunState:
         state = RunState.model_validate({**self.state.model_dump(), **fields})
@@ -136,21 +156,37 @@ class RunStore:
         config["run"] = {**(config.get("run") or {}), **limits}
         _json(self.path / "config.json", config)
 
+    def _control(self) -> dict:
+        try:
+            control = json.loads((self.path / "control.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return control if isinstance(control, dict) else {}
+
+    def _set_control(self, **fields) -> None:
+        with self._control_lock:
+            control = {**self._control(), **fields}
+            _json(self.path / "control.json", {k: v for k, v in control.items() if v is not None})
+
     def request_interrupt(self, kind: Literal["cancel", "pause"]) -> None:
         if kind not in {"cancel", "pause"}:
             raise WorkflowError("Unknown interrupt kind")
-        _json(self.path / "control.json", {"interrupt": kind})
+        self._set_control(interrupt=kind)
 
     def clear_interrupt(self) -> None:
-        (self.path / "control.json").unlink(missing_ok=True)
+        self._set_control(interrupt=None)
 
     def interrupt(self) -> str | None:
-        try:
-            control = json.loads((self.path / "control.json").read_text(encoding="utf-8"))
-            kind = control["interrupt"]
-        except (OSError, ValueError, KeyError, TypeError):
-            return None
+        kind = self._control().get("interrupt")
         return kind if kind in {"cancel", "pause"} else None
+
+    def remember_status(self, status: str | None) -> None:
+        """The status a paused run returns to on resume."""
+        self._set_control(resume_status=status)
+
+    def remembered_status(self) -> str | None:
+        status = self._control().get("resume_status")
+        return status if isinstance(status, str) else None
 
     def _artifact(self, stage: int, name: str) -> Path:
         if not isinstance(stage, int) or isinstance(stage, bool) or not 1 <= stage <= 7:
@@ -289,8 +325,9 @@ class RunStore:
                 os.replace(source, target)
         state = RunState.model_validate(transaction["state"])
         _json(self.path / "checkpoint.json", state.model_dump(mode="json"))
-        self.state = state
+        previous, self.state = self.state, state
         marker.unlink()
+        self._notify(("state", previous, state))
 
     def event(self, kind: str, data: dict) -> None:
         path = self.path / "events.jsonl"

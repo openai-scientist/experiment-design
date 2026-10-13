@@ -19,6 +19,7 @@ _STATUS_PHASE = {
     "REJECTED": Phase.failed,
     "USAGE_UNKNOWN": Phase.failed,
     "STOPPED": Phase.failed,
+    "FAILED": Phase.failed,
     "INCOMPLETE": Phase.awaiting_researcher,
     "CANCELLED": Phase.cancelled,
     "PAUSED": Phase.paused,

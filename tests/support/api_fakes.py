@@ -8,7 +8,9 @@ from experiment_design.api.contract_models import (
     SELECTION_HYPOTHESIS_IDS,
     RunCreateRequest,
 )
+from experiment_design.runtime.llm import LLMResponse, ToolCall
 from tests.contract.fake_platform import FakePlatform
+from tests.support.providers import Reader
 
 SECRET = "sk-test"
 TYPESAFE_SECRET = "tsk-test"
@@ -75,3 +77,42 @@ def make_request(
             "callback_url": platform.callback_url("exd", stage_run_id),
         }
     )
+
+
+class EndlessProvider(Reader):
+    """Reads the required documents, then submits a new Markdown answer every time."""
+
+    def __init__(self, on_complete=lambda: None):
+        super().__init__()
+        self.answers = 0
+        self.on_complete = on_complete
+
+    def complete(self, messages, tools):
+        self.on_complete()
+        calls = self.reading_calls(messages)
+        if not calls:
+            self.answers += 1
+            body = json.dumps({"markdown": f"Output {self.answers}"})
+            calls = [ToolCall(id=f"submit-{self.answers}", name="submit", arguments=body)]
+        return LLMResponse(content=None, tool_calls=calls, tokens_in=2, tokens_out=3)
+
+    def close(self):
+        pass
+
+
+class RecordingFactory:
+    """Builds EndlessProviders and records (phase when called, model) for every model call."""
+
+    def __init__(self, probe=lambda: None):
+        self.probe = probe
+        self.calls: list[tuple[object, str]] = []
+        self.keys: list[str] = []
+
+    def __call__(self, cfg, key, role, on_call):
+        self.keys.append(key)
+
+        def record():
+            self.calls.append((self.probe(), cfg.model))
+            on_call({"role": role.value, "model": cfg.model, "outcome": "ok"})
+
+        return EndlessProvider(record)
