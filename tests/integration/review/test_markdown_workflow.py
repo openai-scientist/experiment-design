@@ -326,7 +326,7 @@ def test_manifest_survives_crash_before_checkpoint_without_provider_replay(
     assert store.read(7, "exp_plan.md") == "Draft"
 
 
-def test_native_retry_unknown_usage_fails_closed_despite_success(tmp_path):
+def test_retry_unknown_usage_fails_closed_without_output_allowance(tmp_path):
     from experiment_design.agents.tools import run_specialist
 
     class RetriedProvider(Provider):
@@ -354,6 +354,33 @@ def test_native_retry_unknown_usage_fails_closed_despite_success(tmp_path):
     assert store.state.usage_unknown
     assert store.state.llm_tokens == 5
     assert len([e for e in store.events() if e["kind"] == "provider.response"]) == 2
+
+
+def test_retry_success_charges_failed_attempt_its_ceiling_and_continues(tmp_path):
+    from types import SimpleNamespace
+
+    from experiment_design.agents.tools import run_specialist
+
+    class RetriedProvider(Provider):
+        cfg = SimpleNamespace(max_tokens=100)
+        last_attempts = []
+
+        def complete(self, messages, tools):
+            response = super().complete(messages, tools)
+            self.last_attempts = [
+                {"status": "error", "tokens_in": None, "tokens_out": None, "status_code": 524},
+                {"status": "success", "tokens_in": 2, "tokens_out": 3, "tokens_cached": 0},
+            ]
+            return response
+
+    store = store_for(tmp_path)
+    provider = RetriedProvider([{"markdown": "Brief"}])
+    output = run_specialist("framing", store, provider, RunConfig(), {}, [])
+    assert output.markdown == "Brief"
+    assert not store.state.usage_unknown
+    responses = [e["data"] for e in store.events() if e["kind"] == "provider.response"]
+    assert [(r["tokens"], r.get("usage_bound")) for r in responses] == [(102, "ceiling"), (5, None)]
+    assert store.state.llm_tokens == 107
 
 
 def test_calculation_cannot_claim_fabricated_source_value(tmp_path):

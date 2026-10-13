@@ -73,6 +73,22 @@ def _int_arg(args: dict, key: str, default: int) -> int:
     return value
 
 
+def _known(tokens: object) -> bool:
+    return isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0
+
+
+def _usage_ceiling(llm: object, attempts: list[dict]) -> int | None:
+    """Upper bound for a failed attempt whose identical retry succeeded: the retry's exact
+    input count plus the full output allowance. Counts over, never under."""
+    max_tokens = getattr(getattr(llm, "cfg", None), "max_tokens", None)
+    final = attempts[-1]
+    if not _known(max_tokens) or final.get("status") != "success":
+        return None
+    if not _known(final.get("tokens_in")):
+        return None
+    return final["tokens_in"] + max_tokens
+
+
 def _digest(read_result: dict) -> dict:
     """Journal a read by identity; the model alone receives the text."""
     text = read_result["text"]
@@ -350,21 +366,29 @@ def run_specialist(
                 }
             ]
         attempts_used += len(attempts)
+        ceiling = _usage_ceiling(llm, attempts) if response and not failure else None
         unknown = False
         for attempt in attempts:
             tokens_in, tokens_out = attempt.get("tokens_in"), attempt.get("tokens_out")
-            known = (
-                isinstance(tokens_in, int)
-                and isinstance(tokens_out, int)
-                and tokens_in >= 0
-                and tokens_out >= 0
-            )
-            usage = tokens_in + tokens_out if known else 0
-            unknown |= not known
+            known = _known(tokens_in) and _known(tokens_out)
+            bound = None
+            if known:
+                usage = tokens_in + tokens_out
+            elif ceiling is not None:
+                usage, bound = ceiling, "ceiling"
+            else:
+                usage = 0
+                unknown = True
             task_tokens += usage
             store.event(
                 "provider.response",
-                {"task": task, "turn": turn, **attempt, "tokens": usage if known else None},
+                {
+                    "task": task,
+                    "turn": turn,
+                    **attempt,
+                    "tokens": usage if known or bound else None,
+                    **({"usage_bound": bound} if bound else {}),
+                },
             )
             store.update(llm_tokens=store.state.llm_tokens + usage)
         if unknown:

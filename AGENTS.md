@@ -75,8 +75,10 @@ Manifest completion follows atomic artifact writes. Validate artifact and input
 checksums/dependencies before reuse; checkpoint alone cannot establish completion.
 Archive affected stages to attempts before revision while preserving cumulative
 usage and actual response events. Checksums prove identity, not scientific truth.
-LLM attempts with unknown usage (timeout, connection error, 408, 5xx, 2xx without usage)
-stop the run permanently; 4xx rejections count zero tokens. JEV usage may be unknown and
+An LLM attempt with unknown usage (timeout, connection error, 408, 5xx, 2xx without usage)
+whose identical retry succeeds is charged a ceiling: the retry's input tokens plus
+`max_tokens`. Unknown usage without such a bound stops the run permanently; 4xx
+rejections count zero tokens. JEV usage may be unknown and
 is bounded by the JEV call limit. Cached input counts; reserve fresh final-check allowance.
 Default limits: 1000000 LLM tokens, 24 JEV calls, two total refinements/reframes,
 12 turns and 120000 tokens per specialist. A specialist at its token or turn ceiling
