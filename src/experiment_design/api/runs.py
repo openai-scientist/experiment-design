@@ -44,6 +44,7 @@ from experiment_design.api.contract_models import (
 )
 from experiment_design.api.inputs import InputError, fetch_inputs
 from experiment_design.api.mapping import failure_of, open_gate, step_key
+from experiment_design.api.observability import SECRETS
 from experiment_design.api.projector import Projector
 from experiment_design.api.settings import ApiSettings
 from experiment_design.config import (
@@ -267,6 +268,12 @@ class RunManager:
                 phase = run.phase if run else Phase.failed
                 return RunCreateResponse(engine_run_id=known, phase=phase, created=False)
             self._validate(request)
+            for secret in (
+                request.models.stage.api_key,
+                request.models.review.api_key,
+                *request.integrations.values(),
+            ):
+                SECRETS.add(secret.get_secret_value())
             cfg = self._config_for(request)
             service_key = self.settings.service_key.get_secret_value()
             with (
