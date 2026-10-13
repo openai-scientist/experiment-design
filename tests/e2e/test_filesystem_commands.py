@@ -4,6 +4,7 @@ import json
 import pytest
 
 from experiment_design import cli
+from experiment_design.config import RunConfig
 from experiment_design.persistence.store import RunStore
 from tests.support.providers import Provider
 
@@ -252,3 +253,35 @@ def test_decide_help_lists_option(capsys):
     with pytest.raises(SystemExit):
         cli.main(["decide", "--help"])
     assert "--option" in capsys.readouterr().out
+
+
+def resume_with_config(tmp_path, monkeypatch, run_section):
+    store = RunStore.create(
+        tmp_path / "runs", [tmp_path / "hypothesis.md"], {"run": RunConfig().model_dump()}, {}
+    )
+    config = tmp_path / "exd.yaml"
+    config.write_text(
+        "llm:\n  base_url: https://example.invalid\n  model: fake\n" + run_section,
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EXD_LLM_API_KEY", "test-key")
+    seen = []
+    monkeypatch.setattr(cli, "_advance", lambda run, cfg: seen.append(run.config()["run"]))
+    assert cli.main(["--config", str(config), "resume", str(store.path)]) == 0
+    return store, seen
+
+
+def test_resume_persists_changed_run_limits_before_advancing(tmp_path, monkeypatch):
+    (tmp_path / "hypothesis.md").write_text("Hypothesis", encoding="utf-8")
+    store, seen = resume_with_config(tmp_path, monkeypatch, "run:\n  task_max_tokens: 777\n")
+    assert seen[0]["task_max_tokens"] == 777
+    (event,) = [e["data"] for e in store.events() if e["kind"] == "limits.changed"]
+    assert (event["old"]["task_max_tokens"], event["new"]["task_max_tokens"]) == (120_000, 777)
+
+
+def test_resume_with_unchanged_limits_changes_nothing(tmp_path, monkeypatch):
+    (tmp_path / "hypothesis.md").write_text("Hypothesis", encoding="utf-8")
+    store, seen = resume_with_config(tmp_path, monkeypatch, "")
+    assert seen[0] == RunConfig().model_dump()
+    assert not [e for e in store.events() if e["kind"] == "limits.changed"]

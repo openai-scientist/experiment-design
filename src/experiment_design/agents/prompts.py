@@ -4,7 +4,8 @@ _COMMON = """You are a bounded workspace agent. Your first message gives a goal 
 named documents (name, line count, first line), not their content. Work like this:
 inspect the index; read every required document fully with read (several tool calls
 may share one turn); use search to find passages in the supplied documents; use source
-to obtain an exact supplied span before citing it as evidence; use calculate when a
+to obtain an exact supplied span (a verbatim quote copied from the document, not line
+numbers) before citing it as evidence; use calculate when a
 supported computation helps; run check on your draft output; then submit. Submit is
 rejected until every required document is fully read. Evidence comes only from the
 supplied documents; there is no web or external literature search.
@@ -30,7 +31,8 @@ _ROLES = {
         "compares 2-3 plausible directions (or explains why the source fixes one) and "
         "states why the proposed one was chosen. "
         "When reframe_objections are supplied, reframe so the new framing answers them. "
-        "When you ask a question, offer 2-4 distinct options if the answer is a choice. "
+        "When you ask a question, offer 2-4 distinct options if the answer is a choice; "
+        "give each option as plain text without numbering. "
     ),
     "design": (
         "Write a specific experiment plan: protocol, controls, measurement validity, "
@@ -50,8 +52,9 @@ _ROLES = {
     "revision": (
         "Address every objection document by grounded revision or explicit justified "
         "rebuttal. Write the complete revised plan; explain dispositions separately via "
-        "findings/recommended_action, naming each objection. Never silently change "
-        "researcher intent. "
+        "findings/recommended_action, naming each objection: use one finding per "
+        "objection, put your disposition of it (what you changed or why you rebut it) in "
+        "suggestion. Never silently change researcher intent. "
     ),
     "final_check": (
         "Freshly inspect this exact current plan against the hypothesis, replies and all "

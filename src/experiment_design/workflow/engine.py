@@ -166,17 +166,103 @@ def _ask(store: RunStore, outputs: list[AgentOutput]) -> None:
     )
 
 
-def _refine_reserve(task_max_tokens: int) -> int:
-    """Tokens a refinement needs: revision, two rejoinders and the fresh final check."""
-    return 4 * task_max_tokens
+# Specialist runs a path still needs, so the fresh final check always keeps its allowance.
+_REFINE_TASKS = {
+    "REVISE": 4,  # revision, two rejoinders, final check
+    "REFRAME": 5,  # framing, design, two critics, final check
+    "REQUEST_CHANGES": 6,  # two critics, revision, two rejoinders, final check
+}
 
 
-def _can_refine(store: RunStore, cfg: RunConfig) -> bool:
+def _refine_reserve(path: str, task_max_tokens: int) -> int:
+    return _REFINE_TASKS[path] * task_max_tokens
+
+
+def _can_refine(store: RunStore, cfg: RunConfig, path: str) -> bool:
     return (
         store.state.refinements < cfg.max_refinements
         and store.state.llm_token_limit - store.state.llm_tokens
-        >= _refine_reserve(cfg.task_max_tokens)
+        >= _refine_reserve(path, cfg.task_max_tokens)
     )
+
+
+_LIMITS = ("jev_max_calls", "max_refinements", "task_max_turns", "task_max_tokens")
+
+
+def pin_limits(store: RunStore, run: RunConfig) -> None:
+    """Persist changed run limits, with a journal entry, before the run advances.
+
+    The token ceiling is not a pinned limit here: only an explicit budget increase changes it.
+    """
+    with store.execution():
+        persisted = (store.config().get("run")) or {}
+        new = {name: getattr(run, name) for name in _LIMITS}
+        old = {name: persisted.get(name) for name in _LIMITS}
+        if old != new:
+            store.event("limits.changed", {"old": old, "new": new})
+            store.set_run_limits(new)
+
+
+def _forced_stop(store: RunStore, stage: int) -> bool:
+    """True when a STOP was the only legal option because limits excluded every refinement."""
+    route = json.loads(store.read(stage, "route.json"))
+    return route["choice"] == "STOP" and route.get("forced") is True
+
+
+def _critic_options(
+    store: RunStore,
+    cfg: RunConfig,
+    method: AgentOutput,
+    skeptic: AgentOutput,
+    changes_requested: bool,
+) -> tuple[list[str], bool]:
+    """Legal routes after the critics, and whether STOP stands alone only because of limits."""
+    material = any(f.severity == "MAJOR" for o in [method, skeptic] for f in o.findings)
+    options = (
+        []
+        if material or changes_requested or method.needs_input or skeptic.needs_input
+        else ["CHECK"]
+    )
+    paths = ["REVISE"] if changes_requested else ["REVISE", "REFRAME"]
+    available = [path for path in paths if _can_refine(store, cfg, path)]
+    options += available
+    if method.question.strip() or skeptic.question.strip():
+        options.append("ASK_RESEARCHER")
+    options.append("STOP")
+    return options, options == ["STOP"] and available != paths
+
+
+def _final_review_names(store: RunStore) -> list[str]:
+    optional = ("final_objections", "plan_diff", "methodologist_rejoinder", "skeptic_rejoinder")
+    return ["methodologist_review", "skeptic_review", "response"] + [
+        name for name in optional if (store.path / "stage-04" / (name + ".md")).is_file()
+    ]
+
+
+def _maintained(store: RunStore, review_names: list[str]) -> list[AgentOutput]:
+    return [
+        _load(store, 4, name)
+        for name in ("methodologist_rejoinder", "skeptic_rejoinder")
+        if name in review_names
+    ]
+
+
+def _final_options(
+    store: RunStore, cfg: RunConfig, final: AgentOutput, maintained: list[AgentOutput]
+) -> tuple[list[str], bool]:
+    material = (
+        final.needs_input
+        or any(f.severity == "MAJOR" for f in final.findings)
+        or any(f.severity == "MAJOR" for o in maintained for f in o.findings)
+    )
+    options = [] if material else ["PRESENT"]
+    paths = ["REVISE", "REFRAME"]
+    available = [path for path in paths if _can_refine(store, cfg, path)]
+    options += available
+    if final.question.strip():
+        options.append("ASK_RESEARCHER")
+    options.append("STOP")
+    return options, options == ["STOP"] and available != paths
 
 
 def _plan(store: RunStore, stage: int, name: str) -> None:
@@ -270,6 +356,21 @@ def _plan_diff(old_plan: str, revised_plan: str) -> str:
     )
 
 
+def _response(output: AgentOutput) -> str:
+    """The designer's disposition of the objections: summary, then each finding."""
+    parts = [output.recommended_action] if output.recommended_action else []
+    if output.findings:
+        parts.append(
+            "\n".join(
+                f"- {f.id} ({f.severity}): {f.issue}\n  Disposition: {f.suggestion}"
+                for f in output.findings
+            )
+        )
+    return "\n\n".join(parts) or (
+        "No separate disposition supplied; the final checker must assess every objection."
+    )
+
+
 def _rejoinders(store: RunStore, llm: LLMClient, cfg: RunConfig, objections: dict[str, str]):
     """Each critic answers the designer's response; an accepted rejoinder is never re-run."""
     for critic in CRITICS:
@@ -313,38 +414,37 @@ def _run_revision(
             4,
             "revised_plan",
             workspace,
-            _with_replies(workspace, "plan", *objections),
+            _with_replies(workspace, HYPOTHESIS, "research_brief", "plan", *objections),
         )
         for name, text in objections.items():
             store.write(4, name + ".md", text)
-        store.write(
-            4,
-            "response.md",
-            output.recommended_action
-            or "No separate disposition supplied; the final checker must assess every objection.",
-        )
+        store.write(4, "response.md", _response(output))
         store.write(4, "plan_diff.md", _plan_diff(old_plan, output.markdown))
-        store.write(4, "route.json", json.dumps({"choice": "CHECK"}))
-    _rejoinders(store, llm, cfg, objections)
-    dependencies = [(1, "hypothesis.md"), (2, "research_brief.md"), (3, "draft_plan.md")]
-    store.complete(
-        4,
-        dependencies,
-        [
-            "revised_plan.md",
-            "revised_plan.json",
-            "response.md",
-            "plan_diff.md",
-            "route.json",
+        asking = output.needs_input and bool(output.question.strip())
+        store.write(
+            4, "route.json", json.dumps({"choice": "ASK_RESEARCHER" if asking else "CHECK"})
+        )
+    outputs = [
+        "revised_plan.md",
+        "revised_plan.json",
+        "response.md",
+        "plan_diff.md",
+        "route.json",
+    ] + [name + ".md" for name in objections]
+    asking = json.loads(store.read(4, "route.json"))["choice"] == "ASK_RESEARCHER"
+    if not asking:
+        _rejoinders(store, llm, cfg, objections)
+        outputs += [
             "methodologist_rejoinder.md",
             "methodologist_rejoinder.json",
             "skeptic_rejoinder.md",
             "skeptic_rejoinder.json",
         ]
-        + [name + ".md" for name in objections],
-    )
+    dependencies = [(1, "hypothesis.md"), (2, "research_brief.md"), (3, "draft_plan.md")]
+    store.complete(4, dependencies, outputs)
     _plan(store, 4, "revised_plan.md")
-    store.update(stage=5)
+    if not asking:
+        store.update(stage=5)
 
 
 def advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> RunState:
@@ -403,7 +503,7 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
             options = (
                 ["ASK_RESEARCHER", "STOP"]
                 if output.needs_input
-                else ["DESIGN", "STOP"] + (["ASK_RESEARCHER"] if output.question else [])
+                else ["DESIGN", "STOP"] + (["ASK_RESEARCHER"] if output.question.strip() else [])
             )
             route = _route(store, judge, cfg, options, [output])
             store.write(2, "route.json", json.dumps({"choice": route}))
@@ -453,31 +553,30 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
         pending = None if store.valid(4) else _pending_revision(store)
         if pending:
             _run_revision(store, llm, cfg, pending["plan"], pending["objections"])
-        if not store.valid(4):
+        redecide = False
+        if store.valid(4) and _forced_stop(store, 4):
+            method, skeptic = (
+                _load(store, 4, name) for name in ("methodologist_review", "skeptic_review")
+            )
+            redecide = _critic_options(store, cfg, method, skeptic, changes_requested)[0] != [
+                "STOP"
+            ]
+        if not store.valid(4) or redecide:
             store.update(stage=4)
             draft = (
                 _revision_input_plan(store) if changes_requested else store.read(3, "draft_plan.md")
             )
-            inputs = _inputs(store, critic_round=True) | {
-                "research_brief": store.read(2, "research_brief.md"),
-                "plan": draft,
-            }
-            needed = _with_replies(inputs, HYPOTHESIS, "plan")
-            method = _agent(
-                store, llm, cfg, "methodologist", 4, "methodologist_review", inputs, needed
-            )
-            skeptic = _agent(store, llm, cfg, "skeptic", 4, "skeptic_review", inputs, needed)
-            material = any(f.severity == "MAJOR" for o in [method, skeptic] for f in o.findings)
-            options = (
-                []
-                if material or changes_requested or method.needs_input or skeptic.needs_input
-                else ["CHECK"]
-            )
-            if _can_refine(store, cfg):
-                options += ["REVISE"] if changes_requested else ["REVISE", "REFRAME"]
-            if method.question or skeptic.question:
-                options += ["ASK_RESEARCHER"]
-            options += ["STOP"]
+            if not redecide:
+                inputs = _inputs(store, critic_round=True) | {
+                    "research_brief": store.read(2, "research_brief.md"),
+                    "plan": draft,
+                }
+                needed = _with_replies(inputs, HYPOTHESIS, "plan")
+                method = _agent(
+                    store, llm, cfg, "methodologist", 4, "methodologist_review", inputs, needed
+                )
+                skeptic = _agent(store, llm, cfg, "skeptic", 4, "skeptic_review", inputs, needed)
+            options, forced = _critic_options(store, cfg, method, skeptic, changes_requested)
             route = _route(store, judge, cfg, options, [method, skeptic])
             if route == "ASK_RESEARCHER":
                 store.write(4, "route.json", json.dumps({"choice": route}))
@@ -515,7 +614,7 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
                     "No revision requested; objections accompany the fresh final check.",
                 )
                 store.write(4, "revised_plan.md", draft)
-                store.write(4, "route.json", json.dumps({"choice": route}))
+                store.write(4, "route.json", json.dumps({"choice": route, "forced": forced}))
                 store.complete(
                     4,
                     [(1, "hypothesis.md"), (2, "research_brief.md"), (3, "draft_plan.md")],
@@ -535,54 +634,48 @@ def _advance(store: RunStore, llm: LLMClient, judge: Judge, cfg: RunConfig) -> R
                     return store.state
         fourth_route = json.loads(store.read(4, "route.json"))["choice"]
         if fourth_route == "ASK_RESEARCHER":
-            _ask(
-                store, [_load(store, 4, "methodologist_review"), _load(store, 4, "skeptic_review")]
-            )
+            if (store.path / "stage-04" / "methodologist_review.json").is_file():
+                asking = [
+                    _load(store, 4, "methodologist_review"),
+                    _load(store, 4, "skeptic_review"),
+                ]
+            else:
+                asking = [_load(store, 4, "revised_plan")]
+            _ask(store, asking)
             return store.state
         if store.state.plan_stage != 4 or store.state.plan_name != "revised_plan.md":
             _plan(store, 4, "revised_plan.md")
         if fourth_route == "STOP":
             store.update(status="INCOMPLETE", review_complete=False)
             return store.state
-        if not store.valid(5):
+        review_names = _final_review_names(store)
+        redecide = False
+        if store.valid(5) and _forced_stop(store, 5):
+            final = _load(store, 5, "final_review")
+            redecide = _final_options(store, cfg, final, _maintained(store, review_names))[0] != [
+                "STOP"
+            ]
+        if not store.valid(5) or redecide:
             store.update(stage=5)
-            inputs = _inputs(store) | {
-                "research_brief": store.read(2, "research_brief.md"),
-                "plan": store.read(store.state.plan_stage, store.state.plan_name),
-            }
-            review_names = ["methodologist_review", "skeptic_review", "response"]
-            review_names += [
-                name
-                for name in (
-                    "final_objections",
-                    "plan_diff",
-                    "methodologist_rejoinder",
-                    "skeptic_rejoinder",
+            if not redecide:
+                inputs = _inputs(store) | {
+                    "research_brief": store.read(2, "research_brief.md"),
+                    "plan": store.read(store.state.plan_stage, store.state.plan_name),
+                }
+                for name in review_names:
+                    inputs[name] = store.read(4, name + ".md")
+                needed = _with_replies(
+                    inputs,
+                    HYPOTHESIS,
+                    "research_brief",
+                    "plan",
+                    *(n for n in review_names if n != "response"),
                 )
-                if (store.path / "stage-04" / (name + ".md")).is_file()
-            ]
-            for name in review_names:
-                inputs[name] = store.read(4, name + ".md")
-            needed = _with_replies(inputs, "plan", *(n for n in review_names if n != "response"))
-            final = _agent(store, llm, cfg, "final_check", 5, "final_review", inputs, needed)
-            maintained = [
-                _load(store, 4, name)
-                for name in ("methodologist_rejoinder", "skeptic_rejoinder")
-                if name in review_names
-            ]
-            material = (
-                final.needs_input
-                or any(f.severity == "MAJOR" for f in final.findings)
-                or any(f.severity == "MAJOR" for o in maintained for f in o.findings)
-            )
-            options = [] if material else ["PRESENT"]
-            if _can_refine(store, cfg):
-                options += ["REVISE", "REFRAME"]
-            if final.question:
-                options += ["ASK_RESEARCHER"]
-            options += ["STOP"]
+                final = _agent(store, llm, cfg, "final_check", 5, "final_review", inputs, needed)
+            maintained = _maintained(store, review_names)
+            options, forced = _final_options(store, cfg, final, maintained)
             route = _route(store, judge, cfg, options, [final, *maintained])
-            store.write(5, "route.json", json.dumps({"choice": route}))
+            store.write(5, "route.json", json.dumps({"choice": route, "forced": forced}))
             store.complete(
                 5,
                 [
@@ -676,14 +769,13 @@ def respond(
             if hashlib.sha256(current.encode()).hexdigest() != store.state.plan_hash:
                 raise WorkflowError("Current plan identity is stale")
         if action == "REQUEST_CHANGES":
-            config = json.loads((store.path / "config.json").read_text(encoding="utf-8"))
-            settings = config.get("run") or {}
+            settings = store.config().get("run") or {}
             if "max_refinements" not in settings or "task_max_tokens" not in settings:
                 raise WorkflowError("Pinned run limits are missing from the run configuration")
             if store.state.refinements >= settings["max_refinements"]:
                 raise WorkflowError("Refinement allowance exhausted")
             if store.state.llm_token_limit - store.state.llm_tokens < _refine_reserve(
-                settings["task_max_tokens"]
+                "REQUEST_CHANGES", settings["task_max_tokens"]
             ):
                 raise WorkflowError("Revision must preserve final-check allowance")
         if action == "APPROVE" and (not store.state.review_complete or not store.valid(5)):
@@ -718,7 +810,6 @@ def respond(
                 question=text,
                 question_kind="CLARIFY",
                 question_options=[],
-                approval="pending",
             )
         elif action == "APPROVE":
             store.update(approval="approved")

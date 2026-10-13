@@ -1,5 +1,6 @@
 """Workspace agents, rejoinders, structured question options and the refinement reserve."""
 
+import hashlib
 import json
 
 import pytest
@@ -107,12 +108,13 @@ def test_read_and_search_results(tmp_path):
     ]
     specialist(store, turns)
     read, unknown, out_of_range, both, limited, blank, _ = tool_results(store)
+    text = "2: Second line with Alpha beta\n3: third"
     assert read == {
         "name": "doc",
         "start_line": 2,
         "end_line": 3,
         "total_lines": 5,
-        "text": "2: Second line with Alpha beta\n3: third",
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
     assert "Unknown document" in unknown["error"]
     assert "out of range" in out_of_range["error"]
@@ -217,9 +219,15 @@ def test_refinement_reserve_covers_revision_two_rejoinders_and_final_check(tmp_p
     store = store_for(tmp_path)
     cfg = RunConfig(task_max_tokens=100)
     store.update(llm_token_limit=399)
-    assert not engine._can_refine(store, cfg)
+    assert not engine._can_refine(store, cfg, "REVISE")
     store.update(llm_token_limit=400)
-    assert engine._can_refine(store, cfg)
+    assert engine._can_refine(store, cfg, "REVISE")
+    assert not engine._can_refine(store, cfg, "REFRAME")  # framing, design, two critics, check
+    store.update(llm_token_limit=500)
+    assert engine._can_refine(store, cfg, "REFRAME")
+    assert not engine._can_refine(store, cfg, "REQUEST_CHANGES")
+    store.update(llm_token_limit=600)
+    assert engine._can_refine(store, cfg, "REQUEST_CHANGES")
     outputs = happy_outputs()[:4]
     outputs[2]["findings"] = [MAJOR]
     (tmp_path / "second").mkdir()
@@ -233,9 +241,14 @@ def test_refinement_reserve_covers_revision_two_rejoinders_and_final_check(tmp_p
 def test_request_changes_checks_the_same_reserve(tmp_path):
     store = store_for(tmp_path)
     advance(store, Provider(happy_outputs()), Judge(), RunConfig())
-    store.update(llm_token_limit=400_000)  # above 2x, below 4x the pinned task allowance
+    # Two critics, revision, two rejoinders and the final check: 6x the pinned task allowance.
+    used = store.state.llm_tokens
+    store.update(llm_token_limit=used + 719_999)
     with pytest.raises(WorkflowError, match="final-check allowance"):
         respond(store, action="REQUEST_CHANGES", text="x", researcher="R", revision=1)
+    store.update(llm_token_limit=used + 720_000)
+    respond(store, action="REQUEST_CHANGES", text="x", researcher="R", revision=1)
+    assert store.state.status == "REQUESTED_CHANGES"
 
 
 @pytest.mark.parametrize(

@@ -110,6 +110,14 @@ class RunStore:
         self.state = state
         return state
 
+    def config(self) -> dict:
+        return json.loads((self.path / "config.json").read_text(encoding="utf-8"))
+
+    def set_run_limits(self, limits: dict) -> None:
+        config = self.config()
+        config["run"] = {**(config.get("run") or {}), **limits}
+        _json(self.path / "config.json", config)
+
     def _artifact(self, stage: int, name: str) -> Path:
         if not isinstance(stage, int) or isinstance(stage, bool) or not 1 <= stage <= 7:
             raise WorkflowError("Stage must be an integer from 1 to 7")

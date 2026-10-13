@@ -44,12 +44,32 @@ def question_text(state: RunState) -> str:
     return state.question + options
 
 
+def _disclosure(store: RunStore, complete: bool) -> dict:
+    """Status, approval and gaps shown beside the exact Markdown, never inside it."""
+    return {
+        "scientific_status": "reviewed_complete" if complete else "incomplete",
+        "approval": store.state.approval if complete else "pending",
+        "question": store.state.question,
+        "review_notes": store.read(5, "final_review.md") if not complete and store.valid(5) else "",
+        "gaps": []
+        if complete
+        else [
+            "Fresh complete review is absent or invalid; inspect the current stage reviews.",
+            *([store.state.question] if store.state.question else []),
+        ],
+    }
+
+
 def render_review(store: RunStore) -> str:
     document = current_plan(store)
     complete = _complete(store)
+    disclosure = _disclosure(store, complete)
     quality = "reviewed complete" if complete else "incomplete draft"
-    approval = store.state.approval if complete else "pending"
-    header = f"Scientific review: {quality}. Researcher acceptance: {approval}."
+    header = f"Scientific review: {quality}. Researcher acceptance: {disclosure['approval']}."
+    if disclosure["gaps"]:
+        header += "\nKnown gaps:" + "".join(f"\n- {gap}" for gap in disclosure["gaps"])
+    if disclosure["review_notes"]:
+        header += "\nReview notes:\n" + disclosure["review_notes"]
     if store.state.question:
         header += f"\nResearcher question: {question_text(store.state)}"
     for item in clarifications(store):
@@ -66,16 +86,7 @@ def _metadata(store: RunStore, *, allow_draft: bool) -> dict:
         "run_id": store.state.run_id,
         "attempt": store.state.attempt,
         "plan_hash": store.state.plan_hash,
-        "scientific_status": "reviewed_complete" if complete else "incomplete",
-        "approval": store.state.approval if complete else "pending",
-        "question": store.state.question,
-        "review_notes": store.read(5, "final_review.md") if not complete and store.valid(5) else "",
-        "gaps": []
-        if complete
-        else [
-            "Fresh complete review is absent or invalid; inspect the current stage reviews.",
-            *([store.state.question] if store.state.question else []),
-        ],
+        **_disclosure(store, complete),
     }
 
 

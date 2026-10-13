@@ -209,10 +209,18 @@ def run_specialist(
         ),
         _tool(
             "source",
-            "Retrieve an exact supplied source span",
+            "Retrieve an exact supplied source span: a verbatim quote copied from the document "
+            "(at least 12 non-whitespace characters), not line numbers",
             {
                 "type": "object",
-                "properties": {"name": {"type": "string"}, "span": {"type": "string"}},
+                "properties": {
+                    "name": {"type": "string"},
+                    "span": {
+                        "type": "string",
+                        "description": "Exact verbatim quote copied from the document, at least "
+                        "12 non-whitespace characters; never line numbers or a paraphrase",
+                    },
+                },
                 "required": ["name", "span"],
                 "additionalProperties": False,
             },
@@ -305,24 +313,30 @@ def run_specialist(
             or attempts_used > cfg.task_max_turns
         ):
             raise WorkflowError("LLM token or turn budget exceeded")
-        messages.append(
-            {
-                "role": "assistant",
-                "content": response.content,
-                "tool_calls": [
-                    {
-                        "id": t.id,
-                        "type": "function",
-                        "function": {"name": t.name, "arguments": t.arguments},
-                    }
-                    for t in response.tool_calls
-                ],
-            }
-        )
+        assistant: dict = {"role": "assistant", "content": response.content}
+        if response.tool_calls:
+            assistant["tool_calls"] = [
+                {
+                    "id": t.id,
+                    "type": "function",
+                    "function": {"name": t.name, "arguments": t.arguments},
+                }
+                for t in response.tool_calls
+            ]
+        messages.append(assistant)
+        if not response.tool_calls:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Reply with a tool call: use read, search, check or submit.",
+                }
+            )
         submission = None
         for call in response.tool_calls:
             try:
                 args = json.loads(call.arguments)
+                if not isinstance(args, dict):
+                    raise ValueError("Tool arguments must be a JSON object")
                 if call.name in {"submit", "check"}:
                     output, problems = _problems(args, workspace, required, covered, accepted_refs)
                     if call.name == "check":
@@ -392,9 +406,14 @@ def run_specialist(
                     raise ValueError("Unknown tool")
             except (ValueError, TypeError, KeyError, ValidationError) as exc:
                 result = {"accepted": False, "error": str(exc)}
+            logged = result
+            if call.name == "read" and "text" in result:
+                logged = {k: v for k, v in result.items() if k != "text"} | {
+                    "sha256": hashlib.sha256(result["text"].encode("utf-8")).hexdigest()
+                }
             store.event(
                 "tool.result",
-                {"task": task, "tool": call.name, "call_id": call.id, "result": result},
+                {"task": task, "tool": call.name, "call_id": call.id, "result": logged},
             )
             messages.append(
                 {

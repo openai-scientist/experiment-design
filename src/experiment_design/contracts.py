@@ -1,5 +1,6 @@
 """Small records shared by the seven-stage Markdown workflow."""
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -11,6 +12,9 @@ class WorkflowError(ValueError):
 
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+
+_ENUMERATOR = re.compile(r"^\s*(?:\(\d+\)|\d+[.)]|-)\s+")
 
 
 class Finding(Record):
@@ -36,6 +40,18 @@ class AgentOutput(Record):
         if not value.strip():
             raise ValueError("markdown must not be blank")
         return value
+
+    @field_validator("question")
+    @classmethod
+    def question_not_whitespace(cls, value: str) -> str:
+        if value and not value.strip():
+            raise ValueError("question must be empty or contain text")
+        return value
+
+    @field_validator("options")
+    @classmethod
+    def unnumbered_options(cls, value: list[str]) -> list[str]:
+        return [_ENUMERATOR.sub("", option, count=1) for option in value]
 
     @model_validator(mode="after")
     def valid_options(self) -> "AgentOutput":

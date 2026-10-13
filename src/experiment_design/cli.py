@@ -184,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
             cfg = load_config(args.config)
             if args.llm_token_limit is not None:
                 raise_budget(store, args.llm_token_limit, args.reason)
+            from experiment_design.workflow.engine import pin_limits
+
+            pin_limits(store, cfg.run)
             _advance(store, cfg)
             _status(store)
         return 0
