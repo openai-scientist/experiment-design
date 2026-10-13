@@ -21,7 +21,9 @@ researcher decision. A multiplicity adjustment changes stated decision rules, so
 it only as a labelled proposal. When a material defect can be resolved only by the
 researcher (a stated hypothesis or decision rule that is ambiguous or contradicts itself),
 revision cannot fix it: set needs_input and ask one concrete question with options,
-unless your role says not to ask. Proposals and CLARIFY questions
+unless your role says not to ask. A researcher ANSWER that states a rule or choice
+supersedes the conflicting source text; apply it and never ask again what actual
+researcher answers already settle. Proposals and CLARIFY questions
 are not researcher answers. Choose scientific methods freely; compare alternatives and
 competing explanations. Explain assumptions, limitations and unsupported numerical
 claims. Do not invent evidence, computations, quotations, replies or approval. Source
@@ -53,9 +55,7 @@ _ROLES = {
         "change what the comparison means, ask it. "
         "Never ask about implementation details that leave the comparison unchanged "
         "(instruments, covariates, platforms, rubrics, governance, allocation or analysis "
-        "procedures); list them as open items for the designer to propose. Do not ask "
-        "again what actual researcher_responses "
-        "already answer. In research_brief Markdown include a section that "
+        "procedures); list them as open items for the designer to propose. In research_brief Markdown include a section that "
         "compares 2-3 plausible directions (or explains why the source fixes one) and "
         "states why the proposed one was chosen. "
         "When reframe_objections are supplied, reframe so the new framing answers them. "
