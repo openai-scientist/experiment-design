@@ -59,7 +59,9 @@ Keep TypeSafe/JEV provider dependency and public configuration.
 
 Supplied hypotheses/constraints and actual confirmed replies are authoritative. One input
 may state several hypotheses; the single plan covers each with its own claim and decision
-rule, and only the researcher excludes or defers one.
+rule, and only the researcher excludes or defers one. An ANSWER to a question raised
+at S4/S5 resumes at revision with that stage's objections, followed by fresh rejoinders and
+final check; questions from S2/S3 restart at framing.
 Agent proposals and clarification questions are not confirmed researcher intent.
 Record exact replies, identity, UTC time, current attempt and relevant document or
 source/question bindings. Stale replies/reviews cannot bless a revised document.

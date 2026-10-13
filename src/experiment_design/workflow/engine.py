@@ -308,6 +308,37 @@ def _pending_revision(store: RunStore) -> dict | None:
     return None
 
 
+def _answer_revision(store: RunStore) -> dict | None:
+    """The revision an ANSWER to an S4/S5 question resumes, so the reply reaches the plan
+    without re-running framing, design and the critics; None means restart from framing."""
+    stage = store.state.stage
+    if stage == 5 and store.valid(5) and store.state.plan_stage is not None:
+        return {
+            "plan": store.read(store.state.plan_stage, store.state.plan_name),
+            "objections": {
+                "methodologist_review": store.read(4, "methodologist_review.md"),
+                "skeptic_review": store.read(4, "skeptic_review.md"),
+                "final_objections": store.read(5, "final_review.md"),
+            },
+        }
+    if stage != 4 or not store.valid(4):
+        return None
+    if (store.path / "stage-04" / "methodologist_review.json").is_file():
+        if store.state.plan_stage is None:
+            return None
+        return {
+            "plan": store.read(store.state.plan_stage, store.state.plan_name),
+            "objections": {
+                name: store.read(4, name + ".md")
+                for name in ("methodologist_review", "skeptic_review")
+            },
+        }
+    recorded = [e["data"] for e in store.events() if e["kind"] == "revision.pending"]
+    if recorded and recorded[-1]["attempt"] + 1 == store.state.attempt:
+        return {"plan": recorded[-1]["plan"], "objections": recorded[-1]["objections"]}
+    return None
+
+
 def _revision_input_plan(store: RunStore) -> str:
     if store.state.plan_stage is not None:
         old_plan = store.read(store.state.plan_stage, store.state.plan_name)
@@ -780,6 +811,7 @@ def respond(
                 raise WorkflowError("Revision must preserve final-check allowance")
         if action == "APPROVE" and (not store.state.review_complete or not store.valid(5)):
             raise WorkflowError("Approval requires current complete independent review")
+        resumed = _answer_revision(store) if action == "ANSWER" else None
         sources = json.dumps(store.sources(), ensure_ascii=False, sort_keys=True)
         brief = store.read(2, "research_brief.md") if store.valid(2) else ""
         record = {
@@ -798,7 +830,13 @@ def respond(
         path = store.path / "stage-06" / "decisions.jsonl"
         history = path.read_text(encoding="utf-8") if path.is_file() else ""
         store.write(6, "decisions.jsonl", history + json.dumps(record, ensure_ascii=False) + "\n")
-        if action == "ANSWER":
+        if action == "ANSWER" and resumed:
+            # A reply to a review-stage question goes straight to revision, then the
+            # rejoinders and a fresh final check judge the revised plan.
+            store.event("revision.pending", {"attempt": store.state.attempt, **resumed})
+            store.archive_from(4)
+            store.update(stage=4, status="RUNNING", question="", question_kind="")
+        elif action == "ANSWER":
             store.archive_from(2)
             store.update(stage=2, status="RUNNING", question="", question_kind="")
         elif action == "REQUEST_CHANGES":

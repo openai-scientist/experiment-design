@@ -186,6 +186,61 @@ def test_revision_question_goes_to_the_researcher_before_any_rejoinder(tmp_path)
     assert advance(store, Provider([]), Judge(), RunConfig()).status == "AWAITING_RESEARCHER"
     respond(store, action="ANSWER", text="Sham", researcher="R", revision=state.attempt)
     assert store.state.status == "RUNNING"
+    provider = Provider([*revised("Revised plan"), {"markdown": "Final review"}])
+    assert advance(store, provider, Judge(), RunConfig()).status == "PUBLISHED"
+    assert len(provider.starts) == 4  # the revision resumes with the answer
+    assert provider.documents(0)["plan"] == "Draft"
+    assert "Sham" in provider.documents(0)["researcher_responses"]
+
+
+class AskJudge:
+    """Asks the researcher whenever that route is legal, otherwise takes the first option."""
+
+    def decide(self, state, questions):
+        return {
+            key: Decision(
+                "ASK_RESEARCHER" if "ASK_RESEARCHER" in q.options else next(iter(q.options)),
+                {},
+                1.0,
+                tokens=1,
+            )
+            for key, q in questions.items()
+        }
+
+
+def test_answer_to_a_critic_question_resumes_at_revision(tmp_path):
+    store = store_for(tmp_path)
+    outputs = happy_outputs()[:4]
+    outputs[2] |= {"findings": [MAJOR], "question": "Which control?"}
+    state = advance(store, Provider(outputs), AskJudge(), RunConfig())
+    assert (state.status, state.stage) == ("AWAITING_RESEARCHER", 4)
+    respond(store, action="ANSWER", text="Sham", researcher="R", revision=state.attempt)
+    provider = Provider([*revised("Revised plan"), {"markdown": "Final review"}])
+    state = advance(store, provider, Judge(), RunConfig())
+    assert len(provider.starts) == 4  # revision, two rejoinders, final check
+    revision = provider.documents(0)
+    assert revision["plan"] == "Draft"
+    assert "Method review" in revision["methodologist_review"]
+    assert "Sham" in revision["researcher_responses"]
+    assert state.status == "PUBLISHED"
+    assert store.read(7, "exp_plan.md") == "Revised plan"
+
+
+def test_answer_to_a_final_check_question_revises_with_its_objections(tmp_path):
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[4] |= {"question": "Which margin?"}
+    state = advance(store, Provider(outputs), AskJudge(), RunConfig())
+    assert (state.status, state.stage) == ("AWAITING_RESEARCHER", 5)
+    respond(store, action="ANSWER", text="Three points", researcher="R", revision=state.attempt)
+    provider = Provider([*revised("Revised plan"), {"markdown": "Final review"}])
+    state = advance(store, provider, Judge(), RunConfig())
+    assert len(provider.starts) == 4
+    revision = provider.documents(0)
+    assert revision["plan"] == "Draft"
+    assert "Final review" in revision["final_objections"]
+    assert "Three points" in revision["researcher_responses"]
+    assert state.status == "PUBLISHED"
 
 
 # Agent tool loop
