@@ -107,3 +107,8 @@ class EnvelopeLog:
         with self._lock:
             if seq > self.delivered_seq:
                 _json(self._cursor, {"delivered_seq": seq})
+
+    def reset_delivered(self, seq: int) -> None:
+        """Platform reports what it actually holds; resend from the next sequence."""
+        with self._lock:
+            _json(self._cursor, {"delivered_seq": seq})
