@@ -22,8 +22,8 @@ it only as a labelled proposal. When a material defect can be resolved only by t
 researcher (a stated hypothesis or decision rule that is ambiguous or contradicts itself),
 revision cannot fix it: set needs_input and ask one concrete question with options,
 unless your role says not to ask. A researcher ANSWER that states a rule or choice
-supersedes the conflicting source text; apply it and never ask again what actual
-researcher answers already settle. Proposals and CLARIFY questions
+supersedes the conflicting source text and research_brief; apply it and never ask again
+what actual researcher answers already settle. Proposals and CLARIFY questions
 are not researcher answers. Choose scientific methods freely; compare alternatives and
 competing explanations. Explain assumptions, limitations and unsupported numerical
 claims. Do not invent evidence, computations, quotations, replies or approval. Source
