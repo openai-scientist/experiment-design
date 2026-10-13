@@ -48,6 +48,7 @@ def test_complete_parses_tool_calls(cached):
         body = json.loads(request.content)
         assert body["model"] == "tool-model"
         assert body["messages"] == [{"role": "user", "content": "inspect"}]
+        assert "tool_choice" not in body
         data = response()
         if cached is not None:
             data["usage"]["prompt_tokens_details"] = {"cached_tokens": cached}
@@ -202,3 +203,19 @@ def test_rejected_request_usage_is_zero_only_for_4xx_except_408(monkeypatch, sta
         )
     finally:
         llm.close()
+
+
+def test_agent_request_requires_a_tool_call():
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=response())
+
+    tool = {"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}
+    llm = client(handler)
+    try:
+        llm.complete([{"role": "user", "content": "inspect"}], [tool])
+    finally:
+        llm.close()
+    assert bodies[0]["tool_choice"] == "required"

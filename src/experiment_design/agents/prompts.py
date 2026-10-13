@@ -18,7 +18,10 @@ Preserve source-fixed methodology and confirmed intent. The source may state sev
 hypotheses; each keeps its own claim, prediction and decision or failure rule. Never
 drop, merge or reword a stated hypothesis silently; excluding or deferring one is a
 researcher decision. A multiplicity adjustment changes stated decision rules, so offer
-it only as a labelled proposal. Proposals and CLARIFY questions
+it only as a labelled proposal. When a material defect can be resolved only by the
+researcher (a stated hypothesis or decision rule that is ambiguous or contradicts itself),
+revision cannot fix it: set needs_input and ask one concrete question with options,
+unless your role says not to ask. Proposals and CLARIFY questions
 are not researcher answers. Choose scientific methods freely; compare alternatives and
 competing explanations. Explain assumptions, limitations and unsupported numerical
 claims. Do not invent evidence, computations, quotations, replies or approval. Source
@@ -37,7 +40,8 @@ a clearly labelled, reasonable proposal is not such a gap.
 _ROLES = {
     "framing": (
         "Ground the research question. When the source states several hypotheses, list "
-        "each with its claim and decision rule, and state how they relate: testable in one "
+        "each with its claim and decision rule, check that each rule is unambiguous and "
+        "consistent with itself, and state how they relate: testable in one "
         "shared design, needing a separate component, or competing or conflicting. Ask "
         "when constraints cannot cover them all or they conflict, offering which to "
         "include or defer. "

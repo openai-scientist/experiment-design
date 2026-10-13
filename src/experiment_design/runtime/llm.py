@@ -67,6 +67,8 @@ class LLMClient:
                         "tools": tools,
                         "temperature": self.cfg.temperature,
                         "max_tokens": self.cfg.max_tokens,
+                        # Workspace agents act only through tools; a plain reply wastes a turn.
+                        **({"tool_choice": "required"} if tools else {}),
                     },
                 )
                 response.raise_for_status()
