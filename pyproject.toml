@@ -14,6 +14,13 @@ dependencies = [
 
 [project.scripts]
 exd = "experiment_design.cli:main"
+exd-api = "experiment_design.api.__main__:main"
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.110,<1",
+    "uvicorn>=0.30,<1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -23,7 +30,14 @@ build-backend = "hatchling.build"
 packages = ["src/experiment_design"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.5"]
+dev = [
+    "fastapi>=0.110,<1",
+    "jsonschema>=4",
+    "pytest>=8",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.5",
+    "uvicorn>=0.30,<1",
+]
 
 [tool.ruff]
 line-length = 100
@@ -39,4 +53,5 @@ known-first-party = ["experiment_design"]
 testpaths = ["tests"]
 addopts = "-ra -m 'not live'"
 markers = ["live: calls a real LLM or JEV; needs keys; opt-in"]
+asyncio_mode = "auto"
 xfail_strict = true
