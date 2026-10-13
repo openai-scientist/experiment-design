@@ -72,7 +72,8 @@ class LLMClient:
                     },
                 )
                 response.raise_for_status()
-            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+            except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                # Timeouts and dropped connections are transient; usage stays unknown.
                 code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                 # A 4xx other than 408 was rejected before processing: usage is known zero.
                 usage = 0 if code is not None and 400 <= code < 500 and code != 408 else None
@@ -88,27 +89,13 @@ class LLMClient:
                         "status_code": code,
                     }
                 )
-                retryable = isinstance(exc, httpx.TimeoutException) or (
+                retryable = isinstance(exc, httpx.RequestError) or (
                     exc.response.status_code == 429 or exc.response.status_code >= 500
                 )
                 if not retryable or attempt == self.max_attempts - 1:
                     raise LLMError(f"LLM request failed: {exc}") from exc
                 time.sleep(self.cfg.retry_base_delay * 2**attempt)
                 continue
-            except httpx.RequestError as exc:
-                self.last_attempts.append(
-                    {
-                        "status": "error",
-                        "tokens_in": None,
-                        "tokens_out": None,
-                        "tokens_cached": None,
-                        "content": None,
-                        "tool_calls": [],
-                        "error_type": type(exc).__name__,
-                        "status_code": None,
-                    }
-                )
-                raise LLMError(f"LLM connection failed: {exc}") from exc
             try:
                 body = response.json()
                 message = body["choices"][0]["message"]

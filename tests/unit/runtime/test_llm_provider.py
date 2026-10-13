@@ -219,3 +219,23 @@ def test_agent_request_requires_a_tool_call():
     finally:
         llm.close()
     assert bodies[0]["tool_choice"] == "required"
+
+
+def test_dropped_connection_is_retried_with_unknown_usage(monkeypatch):
+    monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", lambda _: None)
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.RemoteProtocolError("peer closed connection", request=request)
+        return httpx.Response(200, json=response())
+
+    llm = client(handler)
+    try:
+        assert llm.complete([], []).tokens_out == 7
+    finally:
+        llm.close()
+    assert [a["status"] for a in llm.last_attempts] == ["error", "success"]
+    assert llm.last_attempts[0]["tokens_in"] is None
+    assert llm.last_attempts[0]["error_type"] == "RemoteProtocolError"
