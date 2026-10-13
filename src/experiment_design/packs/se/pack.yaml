@@ -1,0 +1,12 @@
+validators: [flaky_tests, project_diversity]
+role_addenda:
+  design: >-
+    Specify diverse projects, flaky-test detection and controls for contamination by
+    LLM training data. Consider nonparametric inference and identify the independent
+    unit; repeated tests on one project are not independent projects.
+  methodologist: >-
+    Check project diversity, flaky-test handling, LLM training contamination and
+    applicability of nonparametric statistics.
+  skeptic: >-
+    Challenge project-specific conclusions, flaky tests, benchmark contamination
+    and unsupported assumptions about independent observations.

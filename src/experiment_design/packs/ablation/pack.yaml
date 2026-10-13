@@ -1,0 +1,1 @@
+calculators: [paired_t, wilcoxon_signed_rank, holm, bootstrap_ci]

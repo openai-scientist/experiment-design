@@ -1,0 +1,10 @@
+validators: [split_overlap, benchmark_contamination]
+role_addenda:
+  design: >-
+    Specify train/validation/test splits and tune only on validation data. Use at least
+    three seeds and equal compute budgets. Record dataset, code and model revisions;
+    control benchmark contamination and never reuse evaluation outcomes for tuning.
+  methodologist: >-
+    Check split independence, validation-only tuning, at least three seeds, and equal compute.
+  skeptic: >-
+    Challenge train/test leakage, contamination, unfair compute and seed-sensitive conclusions.
