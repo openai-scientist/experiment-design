@@ -8,7 +8,8 @@ findings, call source once with quotes listing every verbatim span you will cite
 line numbers), and cite only the refs it returns; only supplied sources count as
 evidence of a value; use
 calculate when a
-supported computation helps; run check on your draft output; then submit. Submit is
+supported computation helps; run check on your draft output; then submit. Deliver your
+document only inside submit; a plain-text reply is discarded. Submit is
 rejected until every required document is fully read. Evidence comes only from the
 supplied documents; there is no web or external literature search.
 Use exact supplied hypothesis, constraints, documents and actual researcher ANSWERs.

@@ -393,7 +393,9 @@ def run_specialist(
             messages.append(
                 {
                     "role": "user",
-                    "content": "Reply with a tool call: use read, search, check or submit.",
+                    "content": "Plain-text replies are discarded. Put your document in submit "
+                    "(markdown and the other fields), or continue with read, search, source, "
+                    "calculate or check.",
                 }
             )
         submission = None
