@@ -26,6 +26,7 @@ _READ_LINES = 400
 _READ_CAP = 1000
 # Counted contract rejections before the task fails: two corrections after the first.
 _CONTRACT_REJECTIONS = 3
+_UNKNOWN_REFS = "Finding references evidence not accepted in this task: "
 _INTERNAL_REF = re.compile(r"(?:source|document|calculation):[0-9a-f]{16,}")
 
 
@@ -211,11 +212,14 @@ def _problems(
         {ref for f in output.findings for ref in f.evidence_refs if ref not in accepted_refs}
     )
     if unknown:
+        known = sorted(accepted_refs)
         problems.append(
-            "Finding references evidence not accepted in this task: "
+            _UNKNOWN_REFS
             + ", ".join(unknown[:5])
             + ". Use only evidence_ref values returned by source or calculate, "
-            "or leave evidence_refs empty"
+            "or leave evidence_refs empty. A document name or a read sha256 is not a ref; "
+            "call source with the exact quote to get one. Refs accepted so far: "
+            + (", ".join(known[:8]) if known else "none")
         )
     if output.needs_input and not output.question.strip():
         problems.append("needs_input requires a concrete question")
@@ -354,6 +358,7 @@ def run_specialist(
     task_tokens = sum(e["tokens"] or 0 for e in prior)
     attempts_used = len(prior)
     contract_rejections = 0
+    ref_rejections = 0
     for turn in range(len(prior), cfg.task_max_turns):
         if (
             task_tokens >= cfg.task_max_tokens
@@ -464,6 +469,20 @@ def run_specialist(
                     raise ValueError("Tool arguments must be a JSON object")
                 if call.name == "submit":
                     output, problems = _problems(args, workspace, required, covered, accepted_refs)
+                    if (
+                        output is not None
+                        and problems
+                        and all(p.startswith(_UNKNOWN_REFS) for p in problems)
+                    ):
+                        # Unknown refs alone get one correction; then they are dropped, as
+                        # empty evidence_refs are allowed, so citations never fail a task.
+                        ref_rejections += 1
+                        if ref_rejections > 1:
+                            for finding in output.findings:
+                                finding.evidence_refs = [
+                                    r for r in finding.evidence_refs if r in accepted_refs
+                                ]
+                            problems = []
                     expected = (
                         [f["finding_id"] for f in json.loads(workspace["revision_findings"])]
                         if role == "revision" and "revision_findings" in workspace
@@ -492,7 +511,10 @@ def run_specialist(
                         )
                         or missing_responses
                         or any("revision responses" in p for p in problems)
-                        or (role in REVIEW_ROLES and problems)
+                        or (
+                            role in REVIEW_ROLES
+                            and any(not p.startswith(_UNKNOWN_REFS) for p in problems)
+                        )
                     )
                     if contract_problem:
                         contract_rejections += 1

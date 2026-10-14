@@ -351,3 +351,15 @@ def test_several_questions_drop_options(tmp_path):
     engine._ask(store, [one, two])
     assert store.state.question == "Q1?\nQ2?"
     assert store.state.question_options == []
+
+
+def test_unknown_refs_get_one_correction_then_are_dropped_without_failing(tmp_path):
+    store = store_for(tmp_path)
+    cited = {"markdown": "x", "findings": [MAJOR | {"evidence_refs": ["document:plan"]}]}
+    provider = Scripted([[("submit", cited)], [("submit", cited)]])
+    output = run_specialist("skeptic", store, provider, RunConfig(), {"doc": DOC}, [])
+    first, second = tool_results(store)
+    assert first["accepted"] is False
+    assert "Refs accepted so far: none" in first["error"]
+    assert second == {"accepted": True}
+    assert output.findings[0].evidence_refs == []
