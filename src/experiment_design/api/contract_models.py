@@ -188,10 +188,20 @@ class ModelConfig(Strict):
     api_key: SecretStr | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
+    @property
+    def identity(self) -> tuple[str, str]:
+        return (self.provider, self.model)
+
 
 class Models(Strict):
     stage: ModelConfig
     review: ModelConfig
+
+    @model_validator(mode="after")
+    def review_differs_from_stage(self) -> "Models":
+        if self.stage.identity == self.review.identity:
+            raise ValueError("review model must differ from stage model")
+        return self
 
 
 class ArtifactRef(Wire):

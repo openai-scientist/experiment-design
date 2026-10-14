@@ -84,6 +84,13 @@ def test_secret_and_telemetry_models_reject_unknown_fields(name):
         cm.MODELS[name].model_validate(example)
 
 
+def test_review_model_must_differ_from_stage_model():
+    stage = {"provider": "openai_compatible", "model": "m"}
+    with pytest.raises(ValidationError, match="review model must differ"):
+        cm.Models.model_validate({"stage": stage, "review": dict(stage)})
+    cm.Models.model_validate({"stage": stage, "review": {"provider": "bedrock", "model": "m"}})
+
+
 def test_secret_values_are_not_dumped():
     request = cm.RunCreateRequest.model_validate(
         load_json(VENDOR / "examples" / "RunCreateRequest.json")
