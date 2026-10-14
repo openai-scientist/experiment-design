@@ -33,9 +33,14 @@ from tests.integration.review.test_markdown_workflow import store_for
         ),
         (
             "researcher.response",
-            {"researcher": "r", "action": "ANSWER", "option": 2, "text": "private text"},
+            {
+                "researcher": "f573eb2c-7344-4207-b2f2-b06c7de97fd2",
+                "action": "ANSWER",
+                "option": 2,
+                "text": "private text",
+            },
             "exd.researcher.responded",
-            "r",
+            "researcher",
         ),
     ],
 )

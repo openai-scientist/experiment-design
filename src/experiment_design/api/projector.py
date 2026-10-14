@@ -117,7 +117,8 @@ def _activity(kind: str, data: dict) -> dict | None:
         type, actor, summary = "exd.revision.started", "revision", "Revising the plan"
         payload = {"attempt": data["attempt"]}
     elif kind == "researcher.response":
-        type, actor = "exd.researcher.responded", data["researcher"]
+        # A role like the other activities; the researcher's id is not an actor name.
+        type, actor = "exd.researcher.responded", "researcher"
         summary = f"Researcher action: {data['action']}"
         payload = {"action": data["action"], "option": data.get("option")}
     else:
