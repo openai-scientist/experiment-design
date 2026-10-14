@@ -71,7 +71,13 @@ from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.jev import Judge, JudgeError, TypeSafeJudge
 from experiment_design.runtime.llm import LLMClient, LLMError
 from experiment_design.vocabulary import INTEGRATIONS
-from experiment_design.workflow.engine import advance, respond, start_run
+from experiment_design.workflow.engine import (
+    _refine_reserve,
+    advance,
+    pin_limits,
+    respond,
+    start_run,
+)
 
 logger = logging.getLogger("experiment_design.api")
 
@@ -813,6 +819,17 @@ class RunManager:
                         raise RequestRejected(
                             GATE_ACTION_INVALID, "a comment needs text or findings"
                         )
+                    if run.store.state.question_kind != "REVIEW":
+                        remaining = state.llm_token_limit - state.llm_tokens
+                        if remaining < _refine_reserve(
+                            "REQUEST_CHANGES", run.cfg.run.task_max_tokens
+                        ):
+                            raise RequestRejected(VALIDATION_ERROR, "token_allowance_exhausted")
+                        limits = run.cfg.run.model_copy(
+                            update={"max_refinements": run.cfg.run.max_refinements + 1}
+                        )
+                        pin_limits(run.store, limits)
+                        run.cfg.run = limits
                     respond(
                         run.store,
                         action="REQUEST_CHANGES",
