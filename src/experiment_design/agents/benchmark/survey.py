@@ -121,7 +121,9 @@ def survey(
             name=mention.name,
             origin="evidence_card",
             # A URL is trusted only when it is quoted in the supplied text.
-            source_url=mention.source_url if mention.source_url in visible else None,
+            source_url=mention.source_url
+            if mention.source_url and mention.source_url in visible
+            else None,
         )
         for mention in plan.mentions
         if mention.name.strip()

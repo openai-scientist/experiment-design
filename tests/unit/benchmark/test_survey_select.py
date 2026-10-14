@@ -87,6 +87,22 @@ def test_survey_collects_every_origin_and_quotes_only_visible_urls(tmp_path):
     assert len({r.resource_id for r in found}) == len(found)
 
 
+def test_mention_without_url_is_kept_without_url(tmp_path):
+    store = _store(tmp_path)
+    plan = PLAN | {"mentions": [{"name": "NoLink", "kind": "baseline"}]}
+    found = survey(
+        store,
+        ToolProvider([("submit", plan)]),
+        RunConfig(),
+        load_pack(Profile(domain="ml")),
+        _hf(_hub),
+        "brief",
+        "## H1: a claim",
+        [],
+    )
+    assert {r.name: r.source_url for r in found}["NoLink"] is None
+
+
 def test_hub_failure_still_returns_registry_and_researcher(tmp_path):
     store = _store(tmp_path)
     found = survey(
