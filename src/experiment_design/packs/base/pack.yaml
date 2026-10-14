@@ -9,6 +9,8 @@ role_addenda:
     State interpretations for positive, negative and inconclusive outcomes without
     inventing results. Prefer datasets with identifiable provenance; explain when
     no dataset is appropriate. Disclose unknown quantities and resource shortfalls.
+    Use the approved resources document: take datasets, benchmarks and baselines from
+    it and list each shortfall under Limitations.
 rubric:
   - category: leakage
     check: Check separation of training, tuning and evaluation data and possible contamination.

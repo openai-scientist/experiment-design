@@ -85,8 +85,8 @@ def test_light_run_reaches_review_gate(tmp_path):
     types = _types(platform)
     assert types[:2] == ["run.phase_changed", "run.step_changed"]
     assert types.index("artifact.delivered") < types.index("run.gate_opened")
-    draft = platform.artifacts["sr1"][0]
-    assert draft.meta.schema_id == EXD_EXP_PLAN and draft.meta.primary is False
+    (draft,) = [a for a in platform.artifacts["sr1"] if a.meta.schema_id == EXD_EXP_PLAN]
+    assert draft.meta.primary is False
     assert state.open_gate.artifact_ids == [draft.artifact_id]
     assert [e.source_seq for e in platform.events["sr1"]] == list(
         range(1, len(platform.events["sr1"]) + 1)
@@ -392,7 +392,7 @@ def test_questions_are_answered_for_the_system_in_light_mode(tmp_path):
                     "options": ["Standard care", "Placebo"],
                 }
             else:
-                body = {"markdown": f"Output {self.answers}"}
+                body = {"markdown": f"Output {self.answers}\n## Experiment E1: Scripted design\n"}
             from experiment_design.runtime.llm import LLMResponse, ToolCall
 
             return LLMResponse(

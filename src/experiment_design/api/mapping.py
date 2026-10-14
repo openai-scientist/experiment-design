@@ -36,7 +36,8 @@ _FAILURES = {
 
 
 def step_key(stage: int) -> str:
-    return STEPS[stage - 1][0]
+    # Stages 1-7 map to the steps in order; the resources step lives inside stage 3.
+    return [key for key, _ in STEPS if key != "s2b_resources"][stage - 1]
 
 
 def phase_of(state: RunState, *, role: str | None) -> Phase:

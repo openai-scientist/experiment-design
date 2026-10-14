@@ -2,12 +2,15 @@
 
 from experiment_design.api.contract_models import (
     EXD_EXP_PLAN,
+    EXD_EXPERIMENT_INDEX,
+    EXD_RESOURCES,
     I2H_HYPOTHESES,
 )
 
 STEPS: tuple[tuple[str, str], ...] = (
     ("s1_snapshot", "Hypothesis snapshot"),
     ("s2_framing", "Framing"),
+    ("s2b_resources", "Resources"),
     ("s3_design", "Design"),
     ("s4_review", "Critic review"),
     ("s5_final_check", "Final check"),
@@ -39,8 +42,19 @@ REVIEW_ROLES = frozenset(
 )
 
 INTEGRATIONS: tuple[str, ...] = ("typesafe",)
-OPTIONAL_INTEGRATIONS: tuple[str, ...] = ()
+OPTIONAL_INTEGRATIONS: tuple[str, ...] = ("huggingface",)
 INPUT_SCHEMAS: tuple[str, ...] = (I2H_HYPOTHESES,)
-OUTPUT_SCHEMAS: tuple[tuple[str, bool], ...] = ((EXD_EXP_PLAN, True),)
-PROFILES: tuple[dict[str, str | None], ...] = ({},)
-PUBLISH_EXTRAS: tuple[tuple[str, str], ...] = ()
+OUTPUT_SCHEMAS: tuple[tuple[str, bool], ...] = (
+    (EXD_EXP_PLAN, True),
+    (EXD_RESOURCES, False),
+    (EXD_EXPERIMENT_INDEX, False),
+)
+PROFILES: tuple[dict[str, str | None], ...] = (
+    {},
+    {"domain": "ml"},
+    {"domain": "se"},
+    {"research_type": "comparative_benchmark"},
+    {"research_type": "controlled_experiment"},
+    {"research_type": "ablation"},
+)
+PUBLISH_EXTRAS: tuple[tuple[str, str], ...] = (("experiment_index.json", EXD_EXPERIMENT_INDEX),)

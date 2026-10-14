@@ -38,7 +38,7 @@ def test_capabilities_valid_and_keyed(served):
         client.get("/capabilities", headers=_headers(platform)).json()
     )
     assert caps.engine_key == "exd" and caps.stage_keys == ["experiment_plan"]
-    assert [o.primary for o in caps.output_schemas] == [True]
+    assert [o.primary for o in caps.output_schemas] == [True, False, False]
     assert [s.order for s in caps.steps] == list(range(1, len(caps.steps) + 1))
     assert caps.integrations == ["typesafe"] and caps.profiles
 

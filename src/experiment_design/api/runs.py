@@ -70,7 +70,7 @@ from experiment_design.persistence.envelope import EnvelopeLog
 from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.jev import Judge, JudgeError, TypeSafeJudge
 from experiment_design.runtime.llm import LLMClient, LLMError
-from experiment_design.vocabulary import INTEGRATIONS
+from experiment_design.vocabulary import INTEGRATIONS, PUBLISH_EXTRAS
 from experiment_design.workflow.engine import (
     _refine_reserve,
     advance,
@@ -695,6 +695,9 @@ class RunManager:
         data = store.read(7, "exp_plan.md").encode("utf-8")
         publication = json.loads(store.read(7, "publication.json"))
         artifact_id = self._upload_plan(run, data, primary=True, metadata=publication)
+        for filename, schema_id in PUBLISH_EXTRAS:
+            if (store.path / "stage-07" / filename).is_file():
+                self._upload_artifact(run, schema_id, filename, store.read(7, filename).encode())
         run.gate = None
         update_run_meta(store.path, gate=None)
         self._emit(
@@ -844,7 +847,9 @@ class RunManager:
                     if run.store.state.question_kind != "REVIEW":
                         remaining = state.llm_token_limit - state.llm_tokens
                         if remaining < _refine_reserve(
-                            "REQUEST_CHANGES", run.cfg.run.task_max_tokens
+                            "REQUEST_CHANGES",
+                            run.cfg.run.task_max_tokens,
+                            profiled=state.profile is not None,
                         ):
                             raise RequestRejected(VALIDATION_ERROR, "token_allowance_exhausted")
                         limits = run.cfg.run.model_copy(

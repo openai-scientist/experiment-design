@@ -6,6 +6,7 @@ from pathlib import Path
 
 from experiment_design.contracts import RunState, WorkflowError
 from experiment_design.persistence.store import RunStore
+from experiment_design.publication.experiment_index import ExperimentIndex
 
 
 def current_plan(store: RunStore) -> str:
@@ -93,12 +94,22 @@ def _metadata(store: RunStore, *, allow_draft: bool) -> dict:
 def publish(store: RunStore, *, allow_draft: bool = False) -> Path:
     metadata = _metadata(store, allow_draft=allow_draft)
     document = current_plan(store)
+    outputs = ["exp_plan.md", "publication.json"]
+    if store.state.profile is not None:
+        index_text = store.read(store.state.plan_stage, "index.json")
+        index = ExperimentIndex.model_validate_json(index_text)
+        if index.plan_sha256 != hashlib.sha256(document.encode()).hexdigest():
+            raise WorkflowError("Experiment index does not match the exact reviewed plan")
+        store.write(7, "experiment_index.json", index_text)
+        outputs.append("experiment_index.json")
     target = store.write(7, "exp_plan.md", document)
     store.write(7, "publication.json", json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     inputs = [(store.state.plan_stage, store.state.plan_name)]
     if metadata["scientific_status"] == "reviewed_complete":
         inputs.extend([(5, "final_review.md"), (6, "researcher_review.md")])
-    store.complete(7, inputs=inputs, outputs=["exp_plan.md", "publication.json"])
+    if store.state.profile is not None:
+        inputs.append((store.state.plan_stage, "index.json"))
+    store.complete(7, inputs=inputs, outputs=outputs)
     return target
 
 

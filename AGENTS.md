@@ -38,16 +38,16 @@ Agents are bounded workspace agents: each gets a goal and an index of role-scope
 documents, then uses read, search, source, calculate and check before submit.
 They own bounded scientific reasoning and specialist tools. Science owns the
 existing supported statistical algorithms. Workflow owns stages and legal routes.
-Publication copies exact reviewed Markdown bytes without rendering. Today it makes no model
-calls; `publication/experiment_index.py` will extract an index with a model call once
-Task B8 wires it, while the plan bytes stay exact.
+Publication copies exact reviewed Markdown bytes without model calls or rendering.
+Profiled runs extract a separate experiment index after design and revision, check it
+before final review and copy the matching index at publication; the reviewed plan bytes stay exact.
 CLI/config own researcher commands and configuration.
 
 | Stage | Responsibility |
 |---|---|
 | S1 | Snapshot exact immutable source text and provenance. |
 | S2 | Frame the question (one or several hypotheses), compare directions and expose actual researcher questions. |
-| S3 | Write a grounded scientific plan with protocol, measurements and analysis. |
+| S3 | Write a grounded scientific plan with protocol, measurements and analysis. Profiled runs first build `resources.json` (step `s2b_resources`) and wait for the researcher to review it. |
 | S4 | Independent Methodologist/Skeptic reviews; bounded revision or reframe. |
 | S5 | Fresh check of the current plan, source/replies and objection handling. |
 | S6 | Present the exact current Markdown and record real researcher decisions. |

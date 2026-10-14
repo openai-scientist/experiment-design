@@ -39,4 +39,7 @@ def test_insufficient_token_reserve_preserves_gate_and_allowance(tmp_path):
         )
     assert manager.state(run_id).open_gate.gate_id == gate.gate_id
     assert run.cfg.run.max_refinements == before
-    assert not any(e["kind"] == "researcher.response" for e in run.store.events())
+    assert not any(
+        e["kind"] == "researcher.response" and "review_of" not in e["data"]
+        for e in run.store.events()
+    )

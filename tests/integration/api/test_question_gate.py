@@ -64,6 +64,11 @@ def test_copilot_question_gate_and_exact_answer_resume(tmp_path):
         action="answer", actor="user", decided_by="r", option_id="o2", text=" exact text "
     )
     manager.answer(run_id, gate.gate_id, answer)
+    resources = _wait(manager, run_id, Phase.drafting, gate=True).open_gate
+    assert resources.kind is GateKind.artifact_review and resources.step_key == "s2b_resources"
+    manager.answer(
+        run_id, resources.gate_id, GateAnswer(action="approve", actor="user", decided_by="r")
+    )
     state = _wait(manager, run_id, Phase.awaiting_researcher, gate=True)
     assert state.open_gate.kind is GateKind.artifact_review
     assert manager.answer(run_id, gate.gate_id, answer).phase is Phase.awaiting_researcher

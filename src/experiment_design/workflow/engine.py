@@ -3,24 +3,35 @@
 import difflib
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+from experiment_design.agents.benchmark.hf import HFClient
+from experiment_design.agents.benchmark.step import STEP_KEY as RESOURCES_STEP
+from experiment_design.agents.benchmark.step import run_resources
 from experiment_design.agents.prompts import snapshot
 from experiment_design.agents.tools import run_specialist
+from experiment_design.api.contract_models import EXD_RESOURCES
 from experiment_design.config import ExdConfig, RunConfig
 from experiment_design.contracts import (
     AgentOutput,
+    Finding,
     ReviewerError,
     RunInterrupted,
     RunState,
     WorkflowError,
 )
-from experiment_design.packs import load_pack
+from experiment_design.packs import load_pack, validators
 from experiment_design.packs.infer import infer_research_type
 from experiment_design.persistence.api_state import read_run_meta
 from experiment_design.persistence.store import RunStore
+from experiment_design.publication.experiment_index import (
+    ExperimentIndex,
+    check_index,
+    extract_index,
+)
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.vocabulary import REVIEW_ROLES
@@ -238,17 +249,104 @@ _REFINE_TASKS = {
     "REFRAME": 5,  # framing, design, two critics, final check
     "REQUEST_CHANGES": 6,  # two critics, revision, two rejoinders, final check
 }
+# Profiled runs also call the indexer, and a reframe reruns the surveyor and selector.
+_PROFILED_EXTRA_TASKS = {"REVISE": 1, "REFRAME": 3, "REQUEST_CHANGES": 1}
 
 
-def _refine_reserve(path: str, task_max_tokens: int) -> int:
-    return _REFINE_TASKS[path] * task_max_tokens
+def _refine_reserve(path: str, task_max_tokens: int, *, profiled: bool = False) -> int:
+    return (_REFINE_TASKS[path] + profiled * _PROFILED_EXTRA_TASKS[path]) * task_max_tokens
+
+
+def _resources_gate(
+    store: RunStore, llm: LLMClient, cfg: RunConfig, integrations: Mapping[str, str] | None
+) -> bool:
+    """Run the resources step and its researcher review; True while the gate is open."""
+    decision = secondary_review(store, RESOURCES_STEP)
+    exists = (store.path / "stage-03" / "resources.json").is_file()
+    if exists and decision is not None and decision["action"] == "APPROVE":
+        return False
+    if not exists or decision is not None:
+        store.event("step.entered", {"step_key": RESOURCES_STEP})
+        hf = HFClient(token=(integrations or {}).get("huggingface"))
+        try:
+            run_resources(
+                store,
+                llm,
+                cfg,
+                load_pack(store.state.profile),
+                hf,
+                comments=decision["text"] if decision is not None else "",
+            )
+        finally:
+            hf.close()
+    _ask_review(
+        store,
+        step_key=RESOURCES_STEP,
+        stage=3,
+        name="resources.json",
+        schema_id=EXD_RESOURCES,
+        prompt="Review the proposed datasets, benchmarks and baselines before the design starts.",
+    )
+    return True
+
+
+def _index_plan(store: RunStore, llm: LLMClient, cfg: RunConfig, stage: int, document: str) -> None:
+    index = extract_index(store, llm, cfg, document, store.read(1, "hypothesis.md"))
+    if store.state.profile and store.state.profile.research_type:
+        for experiment in index.experiments:
+            if experiment.type == "base":
+                experiment.type = store.state.profile.research_type
+    store.write(stage, "index.json", index.model_dump_json(by_alias=True, indent=2))
+
+
+def _resource_notes(store: RunStore, document: str) -> str:
+    try:
+        resources = json.loads(store.read(3, "resources.json"))
+    except FileNotFoundError:
+        return document
+    missing = [s for s in resources.get("shortfalls", []) if s not in document]
+    return document + (
+        "\n\n## Limitations\n" + "\n".join(f"- {s}" for s in missing) + "\n" if missing else ""
+    )
+
+
+def _deterministic_findings(store: RunStore) -> list[Finding]:
+    index = ExperimentIndex.model_validate_json(store.read(store.state.plan_stage, "index.json"))
+    try:
+        resources = json.loads(store.read(3, "resources.json"))
+    except FileNotFoundError:
+        resources = {}
+    plan = store.read(store.state.plan_stage, store.state.plan_name)
+    ids = re.findall(r"^## (H\d+)\b", store.read(1, "hypothesis.md"), re.M)
+    findings = check_index(index, plan, ids) + validators.run(
+        load_pack(store.state.profile), index, resources
+    )
+    for i, shortfall in enumerate(resources.get("shortfalls", [])):
+        findings.append(
+            Finding(
+                id=f"shortfall-{i}",
+                severity="MINOR",
+                category="baseline",
+                anchor="Limitations",
+                issue=shortfall,
+                consequence="Resource minimum is not established",
+                suggestion="Disclose the shortfall",
+            )
+        )
+    store.activity(
+        "exd.index.checked",
+        actor="validator",
+        summary=f"Index checked: {len(findings)} findings",
+        payload={"count": len(findings)},
+    )
+    return findings
 
 
 def _can_refine(store: RunStore, cfg: RunConfig, path: str) -> bool:
     return (
         store.state.refinements < cfg.max_refinements
         and store.state.llm_token_limit - store.state.llm_tokens
-        >= _refine_reserve(path, cfg.task_max_tokens)
+        >= _refine_reserve(path, cfg.task_max_tokens, profiled=store.state.profile is not None)
     )
 
 
@@ -552,6 +650,10 @@ def _run_revision(
             workspace,
             _with_replies(workspace, HYPOTHESES_INPUT, "research_brief", "plan", *objections),
         )
+        if store.state.profile is not None:
+            output.markdown = _resource_notes(store, output.markdown)
+            store.write(4, "revised_plan.md", output.markdown)
+            _index_plan(store, llm, cfg, 4, output.markdown)
         for name, text in objections.items():
             store.write(4, name + ".md", text)
         store.write(4, "response.md", _response(output))
@@ -573,6 +675,8 @@ def _run_revision(
         "plan_diff.md",
         "route.json",
     ] + [name + ".md" for name in objections]
+    if store.state.profile is not None:
+        outputs.append("index.json")
     asking = json.loads(store.read(4, "route.json"))["choice"] == "ASK_RESEARCHER"
     if not asking:
         _rejoinders(store, llm, cfg, objections, review_llm)
@@ -717,8 +821,13 @@ def _advance(
             if route == "STOP":
                 store.update(status="STOPPED")
                 return store.state
+            profiled = store.state.profile is not None
+            if profiled and _resources_gate(store, llm, cfg, integrations):
+                return store.state
             store.update(stage=3)
             workspace = _inputs(store) | {"research_brief": output.markdown}
+            if profiled:
+                workspace["resources"] = store.read(3, "resources.md")
             designed = _agent(
                 store,
                 llm,
@@ -727,13 +836,22 @@ def _advance(
                 3,
                 "draft_plan",
                 workspace,
-                _with_replies(workspace, HYPOTHESES_INPUT, "research_brief"),
+                _with_replies(
+                    workspace, HYPOTHESES_INPUT, "research_brief", *(["resources"] * profiled)
+                ),
                 review_llm=review_llm,
             )
+            extras = []
+            if profiled:
+                extras += ["resources.json", "resources.md"]
+                designed.markdown = _resource_notes(store, designed.markdown)
+                store.write(3, "draft_plan.md", designed.markdown)
+                _index_plan(store, llm, cfg, 3, designed.markdown)
+                extras.append("index.json")
             store.complete(
                 3,
                 [(1, "hypothesis.md"), (2, "research_brief.md")],
-                ["draft_plan.md", "draft_plan.json"],
+                ["draft_plan.md", "draft_plan.json", *extras],
             )
             _plan(store, 3, "draft_plan.md")
             if designed.needs_input:
@@ -828,6 +946,10 @@ def _advance(
                     "No revision requested; objections accompany the fresh final check.",
                 )
                 store.write(4, "revised_plan.md", draft)
+                extras = []
+                if store.state.profile is not None:
+                    store.write(4, "index.json", store.read(3, "index.json"))
+                    extras.append("index.json")
                 store.write(4, "route.json", json.dumps({"choice": route, "forced": forced}))
                 store.complete(
                     4,
@@ -840,6 +962,7 @@ def _advance(
                         "response.md",
                         "revised_plan.md",
                         "route.json",
+                        *extras,
                     ],
                 )
                 _plan(store, 4, "revised_plan.md")
@@ -876,6 +999,12 @@ def _advance(
                     "research_brief": store.read(2, "research_brief.md"),
                     "plan": store.read(store.state.plan_stage, store.state.plan_name),
                 }
+                deterministic = []
+                if store.state.profile is not None:
+                    deterministic = _deterministic_findings(store)
+                    text = json.dumps([f.model_dump() for f in deterministic], ensure_ascii=False)
+                    store.write(5, "deterministic_findings.json", text)
+                    inputs["deterministic_findings"] = text
                 for name in review_names:
                     inputs[name] = store.read(4, name + ".md")
                 needed = _with_replies(
@@ -884,6 +1013,7 @@ def _advance(
                     "research_brief",
                     "plan",
                     *(n for n in review_names if n != "response"),
+                    *(["deterministic_findings"] if store.state.profile is not None else []),
                 )
                 final = _agent(
                     store,
@@ -896,6 +1026,9 @@ def _advance(
                     needed,
                     review_llm=review_llm,
                 )
+                seen = {(f.id, f.issue) for f in final.findings}
+                final.findings.extend(f for f in deterministic if (f.id, f.issue) not in seen)
+                store.write(5, "final_review.json", _metadata(final))
             maintained = _maintained(store, review_names)
             options, forced = _final_options(store, cfg, final, maintained)
             route = _route(store, judge, cfg, options, [final, *maintained])
@@ -908,7 +1041,8 @@ def _advance(
                     (4, "revised_plan.md"),
                 ]
                 + [(4, name + ".md") for name in review_names],
-                ["final_review.md", "final_review.json", "route.json"],
+                ["final_review.md", "final_review.json", "route.json"]
+                + (["deterministic_findings.json"] if store.state.profile is not None else []),
             )
         else:
             final = _load(store, 5, "final_review")
@@ -1016,7 +1150,9 @@ def respond(
             if store.state.refinements >= settings["max_refinements"]:
                 raise WorkflowError("Refinement allowance exhausted")
             if store.state.llm_token_limit - store.state.llm_tokens < _refine_reserve(
-                "REQUEST_CHANGES", settings["task_max_tokens"]
+                "REQUEST_CHANGES",
+                settings["task_max_tokens"],
+                profiled=store.state.profile is not None,
             ):
                 raise WorkflowError("Revision must preserve final-check allowance")
         if (

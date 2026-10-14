@@ -1,6 +1,7 @@
 """Builders for API tests: run requests against the local FakePlatform."""
 
 import json
+import re
 
 from experiment_design.api.contract_models import (
     CONTRACT_VERSION,
@@ -105,15 +106,58 @@ class EndlessProvider(Reader):
                         )
                     ],
                 )
+            if "experiments" in properties:
+                payload = task["input"]
+                heading = next(
+                    line
+                    for line in payload["plan"].splitlines()
+                    if line.startswith("## Experiment")
+                )
+                body = {
+                    "plan_sha256": payload["plan_sha256"],
+                    "experiments": [
+                        {
+                            "experiment_id": "E1",
+                            "type": "base",
+                            "hypothesis_ids": re.findall(
+                                r"^## (H\d+)\b", payload["hypotheses"], re.M
+                            )
+                            or ["H1"],
+                            "datasets": [],
+                            "baselines": [],
+                            "metrics": [],
+                            "controls": [],
+                            "seeds": 3,
+                            "compute_budget": "equal",
+                            "plan_section": heading,
+                        }
+                    ],
+                }
+            elif "queries" in properties:
+                body = {"queries": [], "tasks": [], "mentions": []}
+            elif "choices" in properties:
+                body = {"choices": [], "additions": []}
+            else:
+                raise AssertionError("Unexpected structured model")
+            return LLMResponse(
+                content=None,
+                tokens_in=2,
+                tokens_out=3,
+                tool_calls=[ToolCall(id="structured", name="submit", arguments=json.dumps(body))],
+            )
         calls = self.reading_calls(messages)
         if not calls:
             self.answers += 1
-            body = json.dumps({"markdown": f"Output {self.answers}"})
+            markdown = (
+                f"# Output {self.answers}\n## Experiment E1: Scripted design\n"
+                "Use 3 seeds and equal compute.\n"
+            )
+            body = json.dumps({"markdown": markdown})
             if task.get("task", "").startswith("Role: revision."):
                 records = json.loads(read_documents(messages).get("revision_findings", "[]"))
                 body = json.dumps(
                     {
-                        "markdown": f"Output {self.answers}",
+                        "markdown": markdown,
                         "responses": [
                             {
                                 "finding_id": f["finding_id"],
