@@ -34,8 +34,9 @@ Small components with direct control flow; reuse existing utilities. Contracts
 hold small typed runtime/review/calculation records, not a structured scientific
 plan body. Persistence owns atomic filesystem artifacts, manifests, checkpoints,
 source snapshots and append-only events; it imports no providers or workflow.
-Agents are bounded workspace agents: each gets a goal and an index of role-scoped
-documents, then uses read, search, source, calculate and check before submit.
+Agents are bounded workspace agents: each gets a goal, the full text of its
+required documents and an index of the other role-scoped documents, then uses read,
+search, source and (design, methodologist, revision only) calculate before submit.
 They own bounded scientific reasoning and specialist tools. Science owns the
 existing supported statistical algorithms. Workflow owns stages and legal routes.
 Publication copies exact reviewed Markdown bytes without model calls or rendering.
