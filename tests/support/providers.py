@@ -6,23 +6,32 @@ from experiment_design.runtime.jev import Decision
 from experiment_design.runtime.llm import LLMResponse, ToolCall
 
 
+def totals_of(task: dict, name: str) -> int:
+    return next(d["lines"] for d in task["documents"] if d["name"] == name)
+
+
 def read_documents(messages) -> dict[str, str]:
     """The workspace text an agent actually read, rebuilt from its read tool results."""
     lines: dict[str, dict[int, str]] = {}
+
+    def add(name: str, text: str) -> None:
+        for row in text.splitlines():
+            number, _, line = row.partition(": ")
+            lines.setdefault(name, {})[int(number)] = line
+
+    for name, text in json.loads(messages[1]["content"]).get("required_documents", {}).items():
+        add(name, text)
     for message in messages:
         if message["role"] != "tool":
             continue
         result = json.loads(message["content"])
-        if "total_lines" not in result:
-            continue
-        for row in result["text"].splitlines():
-            number, _, text = row.partition(": ")
-            lines.setdefault(result["name"], {})[int(number)] = text
+        if "total_lines" in result:
+            add(result["name"], result["text"])
     return {name: "\n".join(rows[n] for n in sorted(rows)) for name, rows in lines.items()}
 
 
 class Reader:
-    """Reads every required document completely before the scripted answer, as an agent would."""
+    """Reads any document still not covered before the scripted answer; required ones come given."""
 
     def __init__(self):
         self.inputs = []
@@ -33,7 +42,9 @@ class Reader:
         if len(messages) == 2:
             self.starts.append(len(self.inputs) - 1)
         task = json.loads(messages[1]["content"])
-        covered: dict[str, set[int]] = {}
+        covered: dict[str, set[int]] = {
+            name: set(range(1, totals_of(task, name) + 1)) for name in task["required"]
+        }
         for message in messages:
             if message["role"] == "tool":
                 result = json.loads(message["content"])
@@ -136,9 +147,11 @@ class Scripted:
     def __init__(self, turns):
         self.turns = iter(turns)
         self.inputs = []
+        self.tools = []
 
     def complete(self, messages, tools):
         self.inputs.append(messages.copy())
+        self.tools.append(tools)
         calls = [
             ToolCall(id=f"{len(self.inputs)}-{i}-{name}", name=name, arguments=json.dumps(args))
             for i, (name, args) in enumerate(next(self.turns))

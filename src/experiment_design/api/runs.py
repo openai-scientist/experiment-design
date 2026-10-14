@@ -645,7 +645,7 @@ class RunManager:
         store = run.store
         error = None
         if store.state.status == "REVIEW_ERROR":
-            error = "Reviewer failed after one retry"
+            error = "Reviewer failed after two retries"
         elif store.state.status == "INCOMPLETE" and not store.valid(5):
             error = "The run stopped before a final review existed"
         if error:

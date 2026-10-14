@@ -75,21 +75,15 @@ def test_unknown_required_document_is_a_workflow_error(tmp_path):
         specialist(store_for(tmp_path), [], required=["absent"])
 
 
-def test_submit_is_rejected_until_required_documents_are_fully_read(tmp_path):
+def test_required_documents_come_in_the_first_message_and_need_no_read(tmp_path):
     store = store_for(tmp_path)
-    turns = [
-        [("submit", {"markdown": "x"})],
-        [("read", {"name": "doc", "max_lines": 2})],
-        [("submit", {"markdown": "x"})],
-        [("read", {"name": "doc", "start_line": 3}), ("submit", {"markdown": "done"})],
-    ]
-    output, _ = specialist(store, turns, required=["doc"])
-    results = tool_results(store)
-    assert results[0]["accepted"] is False
-    assert "doc (lines 1-5)" in results[0]["error"]
-    assert "doc (lines 3-5)" in results[2]["error"] and "other" not in results[2]["error"]
-    assert results[3]["end_line"] == 5
-    assert results[4] == {"accepted": True}
+    output, provider = specialist(store, [[("submit", {"markdown": "done"})]], required=["doc"])
+    task = json.loads(provider.inputs[0][1]["content"])
+    assert task["required_documents"] == {
+        "doc": "\n".join(f"{n}: {line}" for n, line in enumerate(DOC.splitlines(), 1))
+    }
+    assert {d["name"] for d in task["documents"]} == {"doc", "other"}
+    assert tool_results(store) == [{"accepted": True}]
     assert output.markdown == "done"
 
 
@@ -127,26 +121,36 @@ def test_read_and_search_results(tmp_path):
     assert "query" in blank["error"]
 
 
-def test_check_reports_the_problems_a_submit_would_reject(tmp_path):
+def test_no_check_tool_and_calculate_only_for_computing_roles(tmp_path):
+    names = {}
+    for role in ("framing", "design"):
+        provider = Scripted([[("submit", {"markdown": "ok"})]])
+        run_specialist(role, store_for(tmp_path), provider, RunConfig(), {"doc": DOC}, [])
+        names[role] = {t["function"]["name"] for t in provider.tools[0]}
+    assert "check" not in names["framing"] | names["design"]
+    assert "calculate" not in names["framing"]
+    assert "calculate" in names["design"]
+
+
+def test_calculate_from_a_role_without_it_gets_the_unknown_tool_reply(tmp_path):
+    store = store_for(tmp_path)
+    provider = Scripted([[("calculate", {"calculator_id": "x"})], [("submit", {"markdown": "ok"})]])
+    run_specialist("framing", store, provider, RunConfig(), {"doc": DOC}, [])
+    assert "Unknown tool" in tool_results(store)[0]["error"]
+
+
+def test_review_role_succeeds_on_the_third_submit(tmp_path):
     store = store_for(tmp_path)
     bad = {
         "markdown": "x",
         "needs_input": True,
         "findings": [MAJOR | {"evidence_refs": ["calculation:invented"]}],
     }
-    turns = [
-        [("check", bad), ("submit", bad)],
-        [("read", {"name": "doc"}), ("check", {"markdown": "fine"})],
-        [("submit", {"markdown": "fine"})],
-    ]
-    output, _ = specialist(store, turns, required=["doc"])
-    checked, rejected, _, valid, accepted = tool_results(store)
-    assert checked["ok"] is False
-    assert checked["problems"] == rejected["problems"]
-    assert len(checked["problems"]) == 3
-    assert valid == {"ok": True, "problems": []}
-    assert accepted == {"accepted": True}
-    assert len([e for e in store.events() if e["kind"] == "agent.accepted"]) == 1
+    provider = Scripted([[("submit", bad)], [("submit", bad)], [("submit", {"markdown": "fine"})]])
+    output = run_specialist("skeptic", store, provider, RunConfig(), {"doc": DOC}, [])
+    first, second, third = tool_results(store)
+    assert first["accepted"] is False and second["accepted"] is False
+    assert third == {"accepted": True}
     assert output.markdown == "fine"
 
 

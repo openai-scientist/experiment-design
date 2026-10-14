@@ -158,7 +158,7 @@ def test_cli_incomplete_guard_unchanged(tmp_path):
 
 
 class BadFinalCheck(EndlessProvider):
-    """final_check always submits a malformed finding, so the reviewer fails after one retry."""
+    """final_check always submits a malformed finding, so the reviewer fails after two retries."""
 
     def complete(self, messages, tools):
         response = super().complete(messages, tools)

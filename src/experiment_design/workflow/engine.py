@@ -736,7 +736,7 @@ def advance(
                 raise
             store.event(
                 "review.error",
-                {"attempt": store.state.attempt, "error": "Reviewer failed after one retry"},
+                {"attempt": store.state.attempt, "error": "Reviewer failed after two retries"},
             )
             return store.update(status="REVIEW_ERROR", review_complete=False)
         except WorkflowError as exc:

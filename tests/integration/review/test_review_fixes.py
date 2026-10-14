@@ -277,7 +277,7 @@ def test_reply_without_tool_calls_gets_a_plain_message_and_a_nudge(tmp_path):
     assistant, nudge = provider.inputs[1][-2:]
     assert assistant == {"role": "assistant", "content": "I will think"}
     assert nudge["role"] == "user"
-    assert all(word in nudge["content"] for word in ("read", "search", "check", "submit"))
+    assert all(word in nudge["content"] for word in ("read", "search", "submit"))
 
 
 def test_non_object_tool_arguments_are_an_error_result(tmp_path):
@@ -404,7 +404,6 @@ def test_rejoinder_never_sees_the_peers_accepted_calculation(tmp_path):
             submit(markdown="Method", findings=[MAJOR]),
             submit(markdown="Skeptic"),
             submit(markdown="Revised plan"),
-            ("calculate", CALC),
             submit(markdown="Method rejoinder"),
             submit(markdown="Skeptic rejoinder"),
             submit(markdown="Final"),
@@ -412,12 +411,12 @@ def test_rejoinder_never_sees_the_peers_accepted_calculation(tmp_path):
     )
     state = advance(store, provider, Judge(), RunConfig())
     assert state.review_complete
-    assert len(events(store, "calculation")) == 2
+    assert len(events(store, "calculation")) == 1
     assert provider.task(5)["task"].startswith("Role: methodologist_rejoinder")
     assert provider.task(6)["task"].startswith("Role: skeptic_rejoinder")
     assert prior_calculation_lines(provider, 6) == 1  # "[]": neither methodologist calculation
     assert prior_calculation_lines(provider, 5) > 1  # its own earlier calculation stays visible
-    assert prior_calculation_lines(provider, 7) > 1  # the fresh final check sees both
+    assert prior_calculation_lines(provider, 7) > 1  # the fresh final check sees it
 
 
 def test_reviser_sees_only_persistent_finding_ids(tmp_path):

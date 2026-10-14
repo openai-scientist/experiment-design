@@ -511,7 +511,7 @@ def test_judge_invalid_usage_never_decreases_run_usage(tmp_path, tokens):
     store = store_for(tmp_path)
     with pytest.raises(WorkflowError, match="invalid token usage"):
         advance(store, Provider([{"markdown": "Brief"}]), InvalidUsageJudge(), RunConfig())
-    assert store.state.llm_tokens == 10
+    assert store.state.llm_tokens == 5
     assert store.state.jev_calls == 1
     assert not store.state.review_complete
 
@@ -626,7 +626,7 @@ def test_failed_clarification_keeps_review_and_resumes_explanation(tmp_path):
     respond(store, action="CLARIFY", text="Why this?", researcher="R", revision=store.state.attempt)
     bad = Provider([{"markdown": "x", "findings": [MAJOR | {"evidence_refs": ["fake"]}]}])
     with pytest.raises(WorkflowError):
-        advance(store, bad, Judge(), RunConfig(task_max_turns=2))
+        advance(store, bad, Judge(), RunConfig(task_max_turns=1))
     assert store.state.status == "STOPPED"
     assert store.state.review_complete
     state = advance(store, Provider([{"markdown": "Because"}]), Judge(), RunConfig())
@@ -706,7 +706,7 @@ def test_reframe_objections_reach_framing_and_survive_crash(tmp_path):
     first = [{"markdown": t} for t in ["Brief1", "Draft1", "Method1", "Skeptic1"]]
     first.append({"markdown": "Brief2", "findings": [MAJOR | {"evidence_refs": ["fake"]}]})
     with pytest.raises(WorkflowError, match="allowance"):
-        advance(store, Provider(first), ReframeJudge(), RunConfig(task_max_turns=2))
+        advance(store, Provider(first), ReframeJudge(), RunConfig(task_max_turns=1))
     resumed = Provider(
         [{"markdown": t} for t in ["Brief2", "Draft2", "Method2", "Skeptic2", "Final2"]]
     )

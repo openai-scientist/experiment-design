@@ -9,13 +9,13 @@ from tests.integration.review.test_markdown_workflow import store_for
 from tests.support.providers import Provider
 
 
-def test_question_without_choices_retries_once_then_stops(tmp_path):
+def test_question_without_choices_retries_twice_then_stops(tmp_path):
     bad = {"markdown": "Brief", "needs_input": True, "question": "Which population?"}
-    provider = Provider([bad, bad])
+    provider = Provider([bad, bad, bad])
     store = store_for(tmp_path)
     with pytest.raises(WorkflowError, match="question"):
         run_specialist("framing", store, provider, RunConfig(), {}, [])
-    assert store.state.llm_tokens == 10
+    assert store.state.llm_tokens == 15
     assert not store.state.usage_unknown
 
 
@@ -35,14 +35,14 @@ def test_question_preserves_explicit_default(tmp_path):
     assert output.default == 3
 
 
-def test_missing_revision_response_is_honest_after_one_retry(tmp_path):
+def test_missing_revision_response_is_honest_after_two_retries(tmp_path):
     body = {
         "markdown": "Revised",
         "responses": [
             {"finding_id": "F1-1", "outcome": "rebutted", "note": "Source fixes the comparison"}
         ],
     }
-    provider = Provider([body, body])
+    provider = Provider([body, body, body])
     output = run_specialist(
         "revision",
         store_for(tmp_path),

@@ -1,4 +1,4 @@
-"""Bounded workspace agents: read, search, source, calculate, check, then submit."""
+"""Bounded workspace agents: required documents given, read, search, source, calculate, submit."""
 
 import hashlib
 import json
@@ -6,7 +6,7 @@ import re
 
 from pydantic import ValidationError
 
-from experiment_design.agents.prompts import prompt
+from experiment_design.agents.prompts import CALCULATING_ROLES, prompt
 from experiment_design.config import RunConfig
 from experiment_design.contracts import (
     AgentOutput,
@@ -24,6 +24,8 @@ from experiment_design.vocabulary import REVIEW_ROLES
 
 _READ_LINES = 400
 _READ_CAP = 1000
+# Counted contract rejections before the task fails: two corrections after the first.
+_CONTRACT_REJECTIONS = 3
 _INTERNAL_REF = re.compile(r"(?:source|document|calculation):[0-9a-f]{16,}")
 
 
@@ -191,7 +193,7 @@ def _problems(
     covered: dict[str, set[int]],
     accepted_refs: set[str],
 ) -> tuple[AgentOutput | None, list[str]]:
-    """Every reason a submission would be rejected; shared by check and submit."""
+    """Every reason a submission would be rejected."""
     try:
         output = AgentOutput.model_validate(args)
     except ValidationError as exc:
@@ -237,27 +239,34 @@ def run_specialist(
     if missing:
         raise WorkflowError(f"Required documents missing from workspace: {', '.join(missing)}")
     task_text = (
-        f"Role: {role}. Inspect the document index, read every required document fully, "
-        "then check and submit."
+        f"Role: {role}. The full text of every required document is in required_documents. "
+        "Use the document index for the other documents, then submit."
     )
+    covered: dict[str, set[int]] = {
+        name: set(range(1, len(workspace[name].splitlines()) + 1)) for name in required
+    }
     messages = [
         {"role": "system", "content": prompt(role, pack)},
         {
             "role": "user",
             "content": json.dumps(
-                {"task": task_text, "required": required, "documents": _index(workspace)},
+                {
+                    "task": task_text,
+                    "required": required,
+                    "required_documents": {
+                        name: "\n".join(
+                            f"{n}: {line}" for n, line in enumerate(workspace[name].splitlines(), 1)
+                        )
+                        for name in required
+                    },
+                    "documents": _index(workspace),
+                },
                 ensure_ascii=False,
             ),
         },
     ]
-    covered: dict[str, set[int]] = {}
     tools = [
         _tool("submit", "Submit the final scientific output", AgentOutput.model_json_schema()),
-        _tool(
-            "check",
-            "Advisory: report every problem submit would reject, without submitting",
-            AgentOutput.model_json_schema(),
-        ),
         _tool(
             "read",
             "Read numbered lines. Pass names to read several whole documents in one call "
@@ -286,11 +295,6 @@ def run_specialist(
                 "required": ["query"],
                 "additionalProperties": False,
             },
-        ),
-        _tool(
-            "calculate",
-            "Optional supported computation; explicit calculator_id required",
-            CalculationRequest.model_json_schema(),
         ),
         _tool(
             "source",
@@ -323,6 +327,14 @@ def run_specialist(
             },
         ),
     ]
+    if role in CALCULATING_ROLES:
+        tools.append(
+            _tool(
+                "calculate",
+                "Optional supported computation; explicit calculator_id required",
+                CalculationRequest.model_json_schema(),
+            )
+        )
     if store.state.usage_unknown:
         raise WorkflowError("Provider usage is unknown")
     accepted_refs: set[str] = set()
@@ -439,8 +451,8 @@ def run_specialist(
                 {
                     "role": "user",
                     "content": "Plain-text replies are discarded. Put your document in submit "
-                    "(markdown and the other fields), or continue with read, search, source, "
-                    "calculate or check.",
+                    "(markdown and the other fields), or continue with read, search, source"
+                    + (" or calculate." if role in CALCULATING_ROLES else "."),
                 }
             )
         submission = None
@@ -450,7 +462,7 @@ def run_specialist(
                 args = json.loads(call.arguments)
                 if not isinstance(args, dict):
                     raise ValueError("Tool arguments must be a JSON object")
-                if call.name in {"submit", "check"}:
+                if call.name == "submit":
                     output, problems = _problems(args, workspace, required, covered, accepted_refs)
                     expected = (
                         [f["finding_id"] for f in json.loads(workspace["revision_findings"])]
@@ -482,9 +494,13 @@ def run_specialist(
                         or any("revision responses" in p for p in problems)
                         or (role in REVIEW_ROLES and problems)
                     )
-                    if call.name == "submit" and contract_problem:
+                    if contract_problem:
                         contract_rejections += 1
-                        if contract_rejections >= 2 and missing_responses and not problems:
+                        if (
+                            contract_rejections >= _CONTRACT_REJECTIONS
+                            and missing_responses
+                            and not problems
+                        ):
                             output.responses.extend(
                                 RevisionDisposition(
                                     finding_id=f,
@@ -497,22 +513,19 @@ def run_specialist(
                             problems.append(
                                 "Missing revision responses: " + ", ".join(missing_responses)
                             )
-                        if contract_rejections >= 2 and problems:
+                        if contract_rejections >= _CONTRACT_REJECTIONS and problems:
                             contract_failure = True
-                    if call.name == "check":
-                        result = {"ok": not problems, "problems": problems}
+                    if submission is not None:
+                        problems.append("Only one submit per response is allowed")
+                    if problems:
+                        result = {
+                            "accepted": False,
+                            "error": "; ".join(problems),
+                            "problems": problems,
+                        }
                     else:
-                        if submission is not None:
-                            problems.append("Only one submit per response is allowed")
-                        if problems:
-                            result = {
-                                "accepted": False,
-                                "error": "; ".join(problems),
-                                "problems": problems,
-                            }
-                        else:
-                            submission = output
-                            result = {"accepted": True}
+                        submission = output
+                        result = {"accepted": True}
                 elif call.name == "read":
                     if "names" in args:
                         result = {
@@ -535,7 +548,7 @@ def run_specialist(
                         }
                     else:
                         result = _quote(store, workspace, args, accepted_refs)
-                elif call.name == "calculate":
+                elif call.name == "calculate" and role in CALCULATING_ROLES:
                     request = CalculationRequest.model_validate(args)
                     if not request.calculator_id:
                         raise ValueError("Explicit calculator_id required")
@@ -602,8 +615,8 @@ def run_specialist(
             )
         if contract_failure:
             if role in REVIEW_ROLES:
-                raise ReviewerError("Invalid reviewer submission after one retry")
-            raise WorkflowError("Invalid question or revision response after one retry")
+                raise ReviewerError("Invalid reviewer submission after two retries")
+            raise WorkflowError("Invalid question or revision response after two retries")
         if submission is not None:
             store.event("agent.accepted", {"task": task})
             return submission

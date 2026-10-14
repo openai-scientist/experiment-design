@@ -3,17 +3,18 @@
 from experiment_design.packs import Pack
 
 _COMMON = """You are a bounded workspace agent. Your first message gives a goal and an index of
-named documents (name, line count, first line), not their content. Work like this:
-inspect the index; turns are limited, so in your first turn call read once with names
-listing every required document; use search to find passages; before citing spans in
+named documents (name, line count, first line) and the full numbered text of every
+required document in required_documents, so do not read those again. Work like this:
+inspect the index; turns are limited, so use read once with names for other documents you
+need; use search to find passages; before citing spans in
 findings, call source once with quotes listing every verbatim span you will cite (not
 line numbers), and cite only the refs it returns, in findings evidence_refs and never in
 the Markdown (there, name the document or quote it); only supplied sources count as
-evidence of a value; use
-calculate when a
-supported computation helps; run check on your draft output; then submit. Deliver your
+evidence of a value;
+{calculate}then submit. Deliver your
 document only inside submit; a plain-text reply is discarded. Submit is
-rejected until every required document is fully read. Evidence comes only from the
+rejected unless every required document is fully read; the required documents are
+already given in full. Evidence comes only from the
 supplied documents; there is no web or external literature search.
 Use exact supplied hypothesis, constraints, documents and actual researcher ANSWERs.
 Preserve source-fixed methodology and confirmed intent. The source may state several
@@ -151,11 +152,19 @@ _ROLES = {
 }
 
 
+CALCULATING_ROLES = frozenset({"design", "methodologist", "revision"})
 _SUBMIT_ONLY = frozenset({"indexer", "surveyor", "selector", "profile_inference"})
 
 
 def prompt(role: str, pack: Pack | None = None) -> str:
-    text = _ROLES[role] if role in _SUBMIT_ONLY else _COMMON + _ROLES[role]
+    calculate = (
+        "use calculate when a supported computation helps; " if role in CALCULATING_ROLES else ""
+    )
+    text = (
+        _ROLES[role]
+        if role in _SUBMIT_ONLY
+        else _COMMON.replace("{calculate}", calculate) + _ROLES[role]
+    )
     if role not in _SUBMIT_ONLY:
         text += (
             " Every researcher question must have 2-4 distinct plain-text options and "
