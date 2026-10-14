@@ -85,6 +85,7 @@ class AgentOutput(Record):
 
 class RunState(Record):
     run_id: str
+    profile: Profile | None = None
     stage: int = Field(default=1, ge=1, le=7)
     status: str = "RUNNING"
     attempt: int = Field(default=1, ge=1)

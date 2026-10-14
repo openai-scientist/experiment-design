@@ -71,3 +71,23 @@ def test_invalid_pack_is_workflow_error(tmp_path, text):
 def test_overlay_name_cannot_escape_pack_root(tmp_path):
     layer(tmp_path, "base", "{}")
     assert load_pack(Profile(domain="../outside"), root=tmp_path).layers == ("base",)
+
+
+def test_start_run_persists_selected_profile_and_old_runs_default_to_none(tmp_path):
+    from experiment_design.config import ExdConfig, LLMConfig
+    from experiment_design.contracts import RunState
+    from experiment_design.persistence.store import RunStore
+    from experiment_design.workflow.engine import start_run
+
+    source = tmp_path / "hypotheses.md"
+    source.write_text("## H1: Claim\n", encoding="utf-8")
+    cfg = ExdConfig(
+        llm=LLMConfig(base_url="http://fake", model="fake"),
+        runs_root=tmp_path / "runs",
+        profile=Profile(domain="ml"),
+    )
+    store = start_run([source], cfg)
+    assert RunStore(store.path).state.profile == Profile(domain="ml")
+    assert RunState(run_id="old").profile is None
+    legacy = start_run([source], ExdConfig(llm=cfg.llm, runs_root=cfg.runs_root))
+    assert legacy.state.profile is None

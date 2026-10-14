@@ -24,7 +24,10 @@ CRITICS = ("methodologist", "skeptic")
 def start_run(inputs: list[Path], config: ExdConfig) -> RunStore:
     settings = config.model_dump(mode="json")
     store = RunStore.create(config.runs_root, inputs, settings, snapshot())
-    store.update(llm_token_limit=config.run.llm_tokens)
+    store.update(
+        llm_token_limit=config.run.llm_tokens,
+        profile=config.profile if "profile" in config.model_fields_set else None,
+    )
     return store
 
 
