@@ -61,6 +61,17 @@ def open_gate(
 ) -> Gate | None:
     """The gate a held run waits behind; S1 knows only the researcher review of the plan."""
     state = store.state
+    if state.status == "AWAITING_RESEARCHER" and state.question_kind == "REVIEW":
+        requests = [e["data"] for e in store.events() if e["kind"] == "review.requested"]
+        request = requests[-1]
+        return Gate(
+            gate_id=f"g{state.attempt}-{request['step_key']}-r{len(requests)}",
+            kind=GateKind.artifact_review,
+            step_key=request["step_key"],
+            prompt=state.question,
+            artifact_ids=list(artifact_ids),
+            opened_at=datetime.now(UTC),
+        )
     if (
         state.status == "AWAITING_RESEARCHER"
         and state.question_kind == "ANSWER"

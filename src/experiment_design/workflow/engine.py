@@ -198,6 +198,40 @@ def _ask(store: RunStore, outputs: list[AgentOutput]) -> None:
     )
 
 
+def _ask_review(
+    store: RunStore, *, step_key: str, stage: int, name: str, schema_id: str, prompt: str
+) -> None:
+    store.event(
+        "review.requested",
+        {
+            "step_key": step_key,
+            "stage": stage,
+            "name": name,
+            "schema_id": schema_id,
+            "prompt": prompt,
+            "attempt": store.state.attempt,
+        },
+    )
+    store.update(
+        status="AWAITING_RESEARCHER", question=prompt, question_kind="REVIEW", question_options=[]
+    )
+
+
+def secondary_review(store: RunStore, step_key: str) -> dict | None:
+    result = None
+    for event in store.events():
+        data = event["data"]
+        if event["kind"] == "review.requested" and data["step_key"] == step_key:
+            result = None
+        elif (
+            event["kind"] == "researcher.response"
+            and data.get("review_of") == step_key
+            and data["revision"] == store.state.attempt
+        ):
+            result = data
+    return result
+
+
 # Specialist runs a path still needs, so the fresh final check always keeps its allowance.
 _REFINE_TASKS = {
     "REVISE": 4,  # revision, two rejoinders, final check
@@ -944,6 +978,12 @@ def respond(
         if not researcher.strip():
             raise WorkflowError("Response and researcher identity must be nonblank")
         options = store.state.question_options
+        secondary = store.state.question_kind == "REVIEW"
+        if secondary and (
+            store.state.status != "AWAITING_RESEARCHER"
+            or action not in {"APPROVE", "REQUEST_CHANGES"}
+        ):
+            raise WorkflowError("A secondary REVIEW takes APPROVE or REQUEST_CHANGES")
         if option is not None and (
             action != "ANSWER"
             or isinstance(option, bool)
@@ -951,17 +991,25 @@ def respond(
             or not 1 <= option <= len(options)
         ):
             raise WorkflowError("Option must be a listed number for a pending ANSWER question")
-        if action == "ANSWER" and (
-            store.state.question_kind != "ANSWER" or store.state.status != "AWAITING_RESEARCHER"
+        if (
+            not secondary
+            and action == "ANSWER"
+            and (
+                store.state.question_kind != "ANSWER" or store.state.status != "AWAITING_RESEARCHER"
+            )
         ):
             raise WorkflowError("No pending question for ANSWER")
-        if action != "ANSWER" and (store.state.plan_hash is None or not store.valid(6)):
+        if (
+            not secondary
+            and action != "ANSWER"
+            and (store.state.plan_hash is None or not store.valid(6))
+        ):
             raise WorkflowError("No current presented plan")
         if store.state.plan_hash is not None:
             current = store.read(store.state.plan_stage, store.state.plan_name)
             if hashlib.sha256(current.encode()).hexdigest() != store.state.plan_hash:
                 raise WorkflowError("Current plan identity is stale")
-        if action == "REQUEST_CHANGES":
+        if not secondary and action == "REQUEST_CHANGES":
             settings = store.config().get("run") or {}
             if "max_refinements" not in settings or "task_max_tokens" not in settings:
                 raise WorkflowError("Pinned run limits are missing from the run configuration")
@@ -971,7 +1019,11 @@ def respond(
                 "REQUEST_CHANGES", settings["task_max_tokens"]
             ):
                 raise WorkflowError("Revision must preserve final-check allowance")
-        if action == "APPROVE" and (not store.state.review_complete or not store.valid(5)):
+        if (
+            not secondary
+            and action == "APPROVE"
+            and (not store.state.review_complete or not store.valid(5))
+        ):
             raise WorkflowError("Approval requires current complete independent review")
         resumed = _answer_revision(store) if action == "ANSWER" else None
         if resumed is not None:
@@ -990,11 +1042,18 @@ def respond(
             "option_text": options[option - 1] if option is not None else None,
             "source_brief_hash": hashlib.sha256((sources + brief).encode()).hexdigest(),
         }
+        if secondary:
+            request = next(
+                e["data"] for e in reversed(store.events()) if e["kind"] == "review.requested"
+            )
+            record["review_of"] = request["step_key"]
         store.event("researcher.response", record)
         path = store.path / "stage-06" / "decisions.jsonl"
         history = path.read_text(encoding="utf-8") if path.is_file() else ""
         store.write(6, "decisions.jsonl", history + json.dumps(record, ensure_ascii=False) + "\n")
-        if action == "ANSWER" and resumed:
+        if secondary:
+            store.update(status="RUNNING", question="", question_kind="", question_options=[])
+        elif action == "ANSWER" and resumed:
             # A reply to a review-stage question goes straight to revision, then the
             # rejoinders and a fresh final check judge the revised plan.
             store.event("revision.pending", {"attempt": store.state.attempt, **resumed})
@@ -1017,7 +1076,11 @@ def respond(
             store.update(approval="approved")
         else:
             store.update(approval="rejected", status="REJECTED")
-        if action in {"APPROVE", "REJECT", "CLARIFY"} and store.state.review_complete:
+        if (
+            not secondary
+            and action in {"APPROVE", "REJECT", "CLARIFY"}
+            and store.state.review_complete
+        ):
             from experiment_design.publication.plan import publish
 
             publish(store)

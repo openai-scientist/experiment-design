@@ -539,6 +539,28 @@ class RunManager:
             elif state.status in {"PENDING_REVIEW", "REVIEW_ERROR"}:
                 self._open_review_gate(run)
             elif state.status == "AWAITING_RESEARCHER":
+                if state.question_kind == "REVIEW":
+                    requests = [
+                        e["data"] for e in run.store.events() if e["kind"] == "review.requested"
+                    ]
+                    request = requests[-1]
+                    body = run.store.read(request["stage"], request["name"]).encode()
+                    artifact_id = self._upload_artifact(
+                        run, request["schema_id"], request["name"], body
+                    )
+                    if run.mode in {InteractionMode.auto, InteractionMode.light}:
+                        respond(
+                            run.store,
+                            action="APPROVE",
+                            text="Optional review approved by system",
+                            researcher="system",
+                            revision=state.attempt,
+                        )
+                        return True
+                    self._set_gate(
+                        run, open_gate(run.store, artifact_ids=[artifact_id], mode=run.mode)
+                    )
+                    return False
                 if run.mode in {InteractionMode.copilot, InteractionMode.full}:
                     gate = open_gate(run.store, artifact_ids=[], mode=run.mode)
                     self._set_gate(run, gate)
