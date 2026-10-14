@@ -234,7 +234,7 @@ def run_specialist(
         "then check and submit."
     )
     messages = [
-        {"role": "system", "content": prompt(role)},
+        {"role": "system", "content": prompt(role, pack)},
         {
             "role": "user",
             "content": json.dumps(

@@ -1,5 +1,7 @@
 """Scientific responsibilities without a prescribed methodology or template."""
 
+from experiment_design.packs import Pack
+
 _COMMON = """You are a bounded workspace agent. Your first message gives a goal and an index of
 named documents (name, line count, first line), not their content. Work like this:
 inspect the index; turns are limited, so in your first turn call read once with names
@@ -147,11 +149,23 @@ _ROLES = {
 _SUBMIT_ONLY = frozenset({"indexer", "surveyor", "selector"})
 
 
-def prompt(role: str) -> str:
-    if role in _SUBMIT_ONLY:
-        return _ROLES[role]
-    return _COMMON + _ROLES[role]
+def prompt(role: str, pack: Pack | None = None) -> str:
+    text = _ROLES[role] if role in _SUBMIT_ONLY else _COMMON + _ROLES[role]
+    if pack is None:
+        return text
+    additions = [pack.role_addenda.get(role, "")]
+    if role in {"methodologist", "skeptic", "final_check"}:
+        additions += [
+            "\n".join(f"- [{item.category}] {item.check}" for item in pack.rubric),
+            "Set category for every finding according to this rubric.",
+        ]
+    if role == "design" and pack.template:
+        additions.append(pack.template)
+    return text + "\n\n" + "\n\n".join(part for part in additions if part)
 
 
-def snapshot() -> dict[str, str]:
-    return {role: prompt(role) for role in _ROLES}
+def snapshot(pack: Pack | None = None) -> dict[str, str]:
+    result = {role: prompt(role, pack) for role in _ROLES}
+    if pack is not None:
+        result["pack_layers"] = ",".join(pack.layers)
+    return result

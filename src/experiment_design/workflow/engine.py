@@ -11,6 +11,7 @@ from experiment_design.agents.prompts import snapshot
 from experiment_design.agents.tools import run_specialist
 from experiment_design.config import ExdConfig, RunConfig
 from experiment_design.contracts import AgentOutput, RunInterrupted, RunState, WorkflowError
+from experiment_design.packs import load_pack
 from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
@@ -92,7 +93,15 @@ def _agent(
         raise RunInterrupted(kind)
     store.event("agent.started", {"role": role, "stage": stage})
     client = review_llm if role in REVIEW_ROLES and review_llm is not None else llm
-    output = run_specialist(role, store, client, cfg, workspace, required)
+    output = run_specialist(
+        role,
+        store,
+        client,
+        cfg,
+        workspace,
+        required,
+        pack=load_pack(store.state.profile) if store.state.profile is not None else None,
+    )
     store.write(stage, name + ".md", output.markdown)
     store.write(stage, name + ".json", _metadata(output))
     return output

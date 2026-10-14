@@ -77,8 +77,8 @@ resolved, rebuttal accepted or maintained with grounds; maintained ones go to th
 check. Evidence search covers supplied documents only.
 
 Never invent evidence, numerical computations, answers, acceptance or superiority.
-Statistics are computed only by calculators in `science/registry.py` (enabled by the active
-pack; wired by Task B3, until then the legacy calculators apply).
+Statistics are computed only by calculators in `science/registry.py` enabled by the active
+pack. Runs without a selected profile retain the legacy calculators.
 Each calculator needs a test against independent reference values. Do not add mixed-model power.
 Computation findings cite accepted own-task tool evidence; prior-task support does
 not become a reviewer's own computation. Source spans must exist in supplied text.

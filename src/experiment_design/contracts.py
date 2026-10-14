@@ -28,6 +28,16 @@ class Profile(Record):
 
 
 _ENUMERATOR = re.compile(r"^\s*(?:\(\d+\)|\d+[.)]|-)\s+")
+FINDING_CATEGORIES = (
+    "leakage",
+    "baseline",
+    "control",
+    "statistics",
+    "reproducibility",
+    "evidence",
+    "other",
+    "framing",
+)
 
 
 class Finding(Record):
@@ -37,7 +47,7 @@ class Finding(Record):
     consequence: str
     suggestion: str
     anchor: str = ""
-    category: str = "other"
+    category: Literal[*FINDING_CATEGORIES] = "other"
     evidence_refs: list[str] = Field(default_factory=list)
 
 
