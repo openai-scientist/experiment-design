@@ -18,6 +18,13 @@ STEPS: tuple[tuple[str, str], ...] = (
 # Part A (S2.5) adds its own agent/route/revision types; part B owns the profile, resources
 # and index types below.
 ACTIVITY_TYPES: tuple[str, ...] = (
+    "exd.agent.started",
+    "exd.agent.accepted",
+    "exd.calculation.computed",
+    "exd.route.decided",
+    "exd.review.reframed",
+    "exd.revision.started",
+    "exd.researcher.responded",
     "exd.profile.inferred",
     "exd.resources.surveyed",
     "exd.resources.selected",

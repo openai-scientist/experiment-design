@@ -76,3 +76,50 @@ class Projector:
                 self._settle(self.store.state)
             elif kind == "step.entered":
                 self._enter_step(data["step_key"])
+            activity = _activity(kind, data)
+            if activity:
+                self.on_append(
+                    self.log.append(
+                        activity["type"],
+                        EventClass.activity,
+                        phase=self.phase,
+                        step_key=activity.get("step_key") or self.step,
+                        actor=activity["actor"],
+                        summary=activity["summary"],
+                        refs=activity.get("refs", []),
+                        payload=activity.get("payload", {}),
+                    )
+                )
+
+
+def _activity(kind: str, data: dict) -> dict | None:
+    if kind == "activity":
+        return data
+    payload = {}
+    if kind == "agent.started":
+        type, actor, summary = "exd.agent.started", data["role"], f"{data['role']} started"
+    elif kind == "agent.accepted":
+        actor = data["task"].split(":")[0]
+        type, summary = "exd.agent.accepted", f"{actor} submitted accepted output"
+    elif kind == "calculation" and data["result"].get("status") == "computed":
+        type, actor = "exd.calculation.computed", "calculator"
+        summary = f"Computed {data['result'].get('method_id', 'statistic')}"
+        payload = {"result": data["result"]}
+    elif kind == "route":
+        type = "exd.route.decided"
+        actor = "system" if data.get("automatic") else "jev"
+        summary = f"Next action: {data['choice']}"
+        payload = {"choice": data["choice"], "automatic": bool(data.get("automatic"))}
+    elif kind == "reframe.objections":
+        type, actor, summary = "exd.review.reframed", "workflow", "Reframing from objections"
+        payload = {"count": len(data.get("objections", {}))}
+    elif kind == "revision.pending":
+        type, actor, summary = "exd.revision.started", "revision", "Revising the plan"
+        payload = {"attempt": data["attempt"]}
+    elif kind == "researcher.response":
+        type, actor = "exd.researcher.responded", data["researcher"]
+        summary = f"Researcher action: {data['action']}"
+        payload = {"action": data["action"], "option": data.get("option")}
+    else:
+        return None
+    return {"type": type, "actor": actor, "summary": summary, "payload": payload}
