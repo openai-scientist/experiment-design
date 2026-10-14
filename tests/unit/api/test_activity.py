@@ -19,7 +19,7 @@ from tests.integration.review.test_markdown_workflow import store_for
             "system",
         ),
         ("route", {"choice": "DESIGN", "automatic": True}, "exd.route.decided", "system"),
-        ("route", {"choice": "REVISE", "automatic": False}, "exd.route.decided", "pi"),
+        ("route", {"choice": "REVISE", "automatic": False}, "exd.route.decided", "coordinator"),
         (
             "reframe.objections",
             {"objections": {"critic": "private text"}},

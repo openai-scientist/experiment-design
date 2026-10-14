@@ -44,6 +44,17 @@ def _render(hypotheses: list[dict]) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+def _brief(request: RunCreateRequest) -> str:
+    guidance = request.inputs.params.get("guidance", [])
+    if not isinstance(guidance, list) or not all(isinstance(item, str) for item in guidance):
+        raise InputError("params.guidance must be a list of strings")
+    decisions = request.inputs.decisions
+    lines = ([decisions.note] if decisions and decisions.note else []) + guidance
+    if not lines:
+        return ""
+    return "\n## Research lead brief\n\n" + "".join(f"- {line}\n" for line in lines)
+
+
 def fetch_inputs(request: RunCreateRequest, http: httpx.Client, workdir: Path) -> list[Path]:
     """``http`` already sends the X-Service-Key header; download URLs are opaque."""
     refs = [ref for ref in request.inputs.artifacts if ref.schema_id == I2H_HYPOTHESES]
@@ -73,6 +84,7 @@ def fetch_inputs(request: RunCreateRequest, http: httpx.Client, workdir: Path) -
         raise InputError("unknown hypothesis id")
     kept = [h for h in hypotheses if h["id"] in set(chosen)]
     workdir.mkdir(parents=True, exist_ok=True)
+    brief = _brief(request)
     path = workdir / "hypotheses.md"
-    path.write_text(_render(kept), encoding="utf-8")
+    path.write_text(_render(kept) + brief, encoding="utf-8")
     return [path]

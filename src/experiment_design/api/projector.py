@@ -105,7 +105,7 @@ _PERSONAS = {
     "indexer": "reporter",
     "surveyor": "librarian",
     "selector": "librarian",
-    "jev": "pi",
+    "jev": "coordinator",
     "acquirer": "system",
     "validator": "system",
     "calculator": "system",

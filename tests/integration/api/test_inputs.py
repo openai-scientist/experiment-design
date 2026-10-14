@@ -3,7 +3,7 @@ import hashlib
 import httpx
 import pytest
 
-from experiment_design.api.contract_models import SERVICE_KEY_HEADER
+from experiment_design.api.contract_models import SERVICE_KEY_HEADER, Decisions
 from experiment_design.api.inputs import InputError, fetch_inputs
 from tests.contract.fake_platform import FakePlatform
 from tests.support.api_fakes import make_request
@@ -78,3 +78,47 @@ def test_malformed_hypotheses_rejected(tmp_path, body):
     request.inputs.artifacts[0].sha256 = hashlib.sha256(body).hexdigest()
     with pytest.raises(InputError, match="malformed"):
         fetch_inputs(request, _http(platform), tmp_path)
+
+
+def _plain(tmp_path):
+    platform = FakePlatform()
+    request = make_request(platform, stage_run_id="sr1")
+    return platform, request, fetch_inputs(request, _http(platform), tmp_path / "plain")[0]
+
+
+def test_brief_lists_note_and_guidance_after_hypotheses(tmp_path):
+    platform, request, plain = _plain(tmp_path)
+    request.inputs.decisions = Decisions(actor="system", note="Focus on H1")
+    request.inputs.params["guidance"] = ["Use a paired design", "Keep n small"]
+    path = fetch_inputs(request, _http(platform), tmp_path / "brief")[0]
+    text = path.read_text(encoding="utf-8")
+    base = plain.read_text(encoding="utf-8")
+    assert text.startswith(base)
+    brief = text[len(base) :]
+    assert "## Research lead brief" in brief
+    assert "- Focus on H1" in brief and "- Use a paired design" in brief
+    assert "- Keep n small" in brief
+
+
+def test_guidance_alone_adds_the_brief(tmp_path):
+    platform, request, _ = _plain(tmp_path)
+    request.inputs.params["guidance"] = ["Only this"]
+    text = fetch_inputs(request, _http(platform), tmp_path / "g")[0].read_text(encoding="utf-8")
+    assert text.endswith("## Research lead brief\n\n- Only this\n")
+
+
+def test_no_note_or_guidance_leaves_the_file_unchanged(tmp_path):
+    platform, request, plain = _plain(tmp_path)
+    request.inputs.decisions = Decisions(actor="user", note=None)
+    request.inputs.params["guidance"] = []
+    path = fetch_inputs(request, _http(platform), tmp_path / "same")[0]
+    assert path.read_bytes() == plain.read_bytes()
+    assert "Research lead brief" not in plain.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("guidance", ["a string", [1, 2], ["ok", 3], {"a": "b"}])
+def test_malformed_guidance_rejected(tmp_path, guidance):
+    platform, request, _ = _plain(tmp_path)
+    request.inputs.params["guidance"] = guidance
+    with pytest.raises(InputError, match="guidance"):
+        fetch_inputs(request, _http(platform), tmp_path / "bad")
