@@ -377,6 +377,8 @@ def test_questions_are_answered_for_the_system_in_light_mode(tmp_path):
 
     class Asking(EndlessProvider):
         def complete(self, messages, tools):
+            if "input" in json.loads(messages[1]["content"]):
+                return super().complete(messages, tools)
             calls = self.reading_calls(messages)
             if calls:
                 return super().complete(messages, tools)

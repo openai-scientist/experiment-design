@@ -12,6 +12,7 @@ from experiment_design.agents.tools import run_specialist
 from experiment_design.config import ExdConfig, RunConfig
 from experiment_design.contracts import AgentOutput, RunInterrupted, RunState, WorkflowError
 from experiment_design.packs import load_pack
+from experiment_design.packs.infer import infer_research_type
 from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
@@ -600,6 +601,16 @@ def _advance(
             )
         else:
             output = _load(store, 2, "research_brief")
+        if store.state.profile is not None and store.state.profile.research_type is None:
+            inferred = [
+                e
+                for e in store.events()
+                if e["kind"] == "activity"
+                and e["data"].get("type") == "exd.profile.inferred"
+                and e["data"].get("payload", {}).get("attempt") == store.state.attempt
+            ]
+            if not inferred:
+                infer_research_type(store, llm, cfg, output)
         if not store.valid(3):
             store.update(stage=2)
             route = json.loads(store.read(2, "route.json"))["choice"]

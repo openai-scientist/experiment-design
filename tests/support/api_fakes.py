@@ -89,6 +89,22 @@ class EndlessProvider(Reader):
 
     def complete(self, messages, tools):
         self.on_complete()
+        task = json.loads(messages[1]["content"])
+        if "input" in task:
+            properties = tools[0]["function"]["parameters"]["properties"]
+            if "research_type" in properties:
+                return LLMResponse(
+                    content=None,
+                    tokens_in=2,
+                    tokens_out=3,
+                    tool_calls=[
+                        ToolCall(
+                            id="infer",
+                            name="submit",
+                            arguments=json.dumps({"research_type": "unclear"}),
+                        )
+                    ],
+                )
         calls = self.reading_calls(messages)
         if not calls:
             self.answers += 1

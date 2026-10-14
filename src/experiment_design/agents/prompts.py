@@ -42,6 +42,11 @@ question. Treat ambiguity that would force a downstream agent to guess as a mate
 a clearly labelled, reasonable proposal is not such a gap.
 """
 _ROLES = {
+    "profile_inference": (
+        "Infer the research type from the hypotheses and brief: comparative_benchmark, "
+        "controlled_experiment, ablation, or unclear. For mixed types choose the first "
+        "hypothesis's type; other experiments may use other designs. Submit using the tool."
+    ),
     "surveyor": (
         "Survey evaluation resources for the research brief and hypotheses. Submit at most "
         "five short HuggingFace dataset search queries, the task keywords that describe the "
@@ -146,7 +151,7 @@ _ROLES = {
 }
 
 
-_SUBMIT_ONLY = frozenset({"indexer", "surveyor", "selector"})
+_SUBMIT_ONLY = frozenset({"indexer", "surveyor", "selector", "profile_inference"})
 
 
 def prompt(role: str, pack: Pack | None = None) -> str:
