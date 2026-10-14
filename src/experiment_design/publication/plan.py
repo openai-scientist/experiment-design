@@ -6,6 +6,7 @@ from pathlib import Path
 
 from experiment_design.contracts import RunState, WorkflowError
 from experiment_design.persistence.store import RunStore
+from experiment_design.publication.experiment_index import ExperimentIndex
 
 
 def current_plan(store: RunStore) -> str:
@@ -77,6 +78,41 @@ def render_review(store: RunStore) -> str:
     return header + "\n\n" + document
 
 
+def _open_findings(store: RunStore) -> list[dict]:
+    """Findings of the final review, with the IDs the Platform saw; empty when it never ran."""
+    if not store.valid(5) or not (store.path / "stage-05" / "final_review.json").is_file():
+        return []
+    return [
+        {
+            "finding_id": record["finding_id"],
+            "severity": record.get("severity", ""),
+            "issue": record.get("issue", ""),
+            "consequence": record.get("consequence", ""),
+            "suggestion": record.get("suggestion", ""),
+        }
+        for record in store.bound_findings(5, "final_review.json", store.state.attempt)
+    ]
+
+
+def _open_findings_section(findings: list[dict]) -> str:
+    lines = [
+        "",
+        "",
+        "## Finding còn mở",
+        "",
+        "Review độc lập chưa đạt khi researcher chấp nhận plan này.",
+    ]
+    if not findings:
+        lines.append("Không có finding cụ thể nào được ghi nhận.")
+    for finding in findings:
+        lines.append(
+            f"- {finding['finding_id']} ({finding['severity']}): {finding['issue']}"
+            + (f" Hệ quả: {finding['consequence']}" if finding["consequence"] else "")
+            + (f" Đề xuất: {finding['suggestion']}" if finding["suggestion"] else "")
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _metadata(store: RunStore, *, allow_draft: bool) -> dict:
     current_plan(store)
     complete = _complete(store)
@@ -90,15 +126,40 @@ def _metadata(store: RunStore, *, allow_draft: bool) -> dict:
     }
 
 
-def publish(store: RunStore, *, allow_draft: bool = False) -> Path:
-    metadata = _metadata(store, allow_draft=allow_draft)
+def publish(store: RunStore, *, allow_draft: bool = False, allow_incomplete: bool = False) -> Path:
+    """Publish the plan; ``allow_incomplete`` is the researcher accepting an unpassed review."""
+    metadata = _metadata(store, allow_draft=allow_draft or allow_incomplete)
     document = current_plan(store)
-    target = store.write(7, "exp_plan.md", document)
+    published = document
+    if allow_incomplete:
+        findings = _open_findings(store)
+        metadata |= {
+            "approval": store.state.approval,
+            "review_passed": False,
+            "open_findings": findings,
+        }
+        published = document.rstrip("\n") + _open_findings_section(findings)
+    outputs = ["exp_plan.md", "publication.json"]
+    if store.state.profile is not None:
+        index_text = store.read(store.state.plan_stage, "index.json")
+        index = ExperimentIndex.model_validate_json(index_text)
+        if index.plan_sha256 != hashlib.sha256(document.encode()).hexdigest():
+            raise WorkflowError("Experiment index does not match the exact reviewed plan")
+        if allow_incomplete:
+            index = index.model_copy(
+                update={"plan_sha256": hashlib.sha256(published.encode()).hexdigest()}
+            )
+            index_text = index.model_dump_json(by_alias=True, indent=2) + "\n"
+        store.write(7, "experiment_index.json", index_text)
+        outputs.append("experiment_index.json")
+    target = store.write(7, "exp_plan.md", published)
     store.write(7, "publication.json", json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     inputs = [(store.state.plan_stage, store.state.plan_name)]
     if metadata["scientific_status"] == "reviewed_complete":
         inputs.extend([(5, "final_review.md"), (6, "researcher_review.md")])
-    store.complete(7, inputs=inputs, outputs=["exp_plan.md", "publication.json"])
+    if store.state.profile is not None:
+        inputs.append((store.state.plan_stage, "index.json"))
+    store.complete(7, inputs=inputs, outputs=outputs)
     return target
 
 

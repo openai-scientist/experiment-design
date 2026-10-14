@@ -26,7 +26,7 @@ from tests.integration.review.test_workspace_agent import (
 )
 from tests.support.providers import Judge, Provider, Scripted, ToolProvider
 
-HYPOTHESIS = "stage-01/hypothesis.md"
+HYPOTHESES_INPUT = "stage-01/hypothesis.md"
 
 
 def events(store, kind):
@@ -133,8 +133,8 @@ def test_no_route_offers_ask_for_a_whitespace_question(tmp_path, monkeypatch):
 
     real = engine._agent
 
-    def blank_question(*args):
-        return real(*args).model_copy(update={"question": "  "})
+    def blank_question(*args, **options):
+        return real(*args, **options).model_copy(update={"question": "  "})
 
     monkeypatch.setattr(engine, "_agent", blank_question)
     judge = Recording()
@@ -153,7 +153,7 @@ def test_revision_and_final_check_require_hypothesis_and_brief(tmp_path):
     provider = Provider(outputs)
     advance(store_for(tmp_path), provider, Judge(), RunConfig())
     for invocation in (4, 7):
-        assert {HYPOTHESIS, "research_brief"} <= set(provider.task(invocation)["required"])
+        assert {HYPOTHESES_INPUT, "research_brief"} <= set(provider.task(invocation)["required"])
         assert provider.documents(invocation)["research_brief"] == "Brief"
 
 
@@ -177,7 +177,12 @@ def test_revision_question_goes_to_the_researcher_before_any_rejoinder(tmp_path)
     store = store_for(tmp_path)
     outputs = happy_outputs()[:4]
     outputs[2]["findings"] = [MAJOR]
-    ask = {"markdown": "Revised plan", "needs_input": True, "question": "Which control?"}
+    ask = {
+        "markdown": "Revised plan",
+        "needs_input": True,
+        "question": "Which control?",
+        "options": ["Sham", "Usual care"],
+    }
     provider = Provider([*outputs, ask])
     state = advance(store, provider, Judge(), RunConfig())
     assert state.status == "AWAITING_RESEARCHER"
@@ -211,7 +216,11 @@ class AskJudge:
 def test_answer_to_a_critic_question_resumes_at_revision(tmp_path):
     store = store_for(tmp_path)
     outputs = happy_outputs()[:4]
-    outputs[2] |= {"findings": [MAJOR], "question": "Which control?"}
+    outputs[2] |= {
+        "findings": [MAJOR],
+        "question": "Which control?",
+        "options": ["Sham", "Usual care"],
+    }
     state = advance(store, Provider(outputs), AskJudge(), RunConfig())
     assert (state.status, state.stage) == ("AWAITING_RESEARCHER", 4)
     respond(store, action="ANSWER", text="Sham", researcher="R", revision=state.attempt)
@@ -229,7 +238,7 @@ def test_answer_to_a_critic_question_resumes_at_revision(tmp_path):
 def test_answer_to_a_final_check_question_revises_with_its_objections(tmp_path):
     store = store_for(tmp_path)
     outputs = happy_outputs()
-    outputs[4] |= {"question": "Which margin?"}
+    outputs[4] |= {"question": "Which margin?", "options": ["Three points", "Five points"]}
     state = advance(store, Provider(outputs), AskJudge(), RunConfig())
     assert (state.status, state.stage) == ("AWAITING_RESEARCHER", 5)
     respond(store, action="ANSWER", text="Three points", researcher="R", revision=state.attempt)
@@ -409,3 +418,14 @@ def test_rejoinder_never_sees_the_peers_accepted_calculation(tmp_path):
     assert prior_calculation_lines(provider, 6) == 1  # "[]": neither methodologist calculation
     assert prior_calculation_lines(provider, 5) > 1  # its own earlier calculation stays visible
     assert prior_calculation_lines(provider, 7) > 1  # the fresh final check sees both
+
+
+def test_reviser_sees_only_persistent_finding_ids(tmp_path):
+    outputs = happy_outputs()
+    outputs[2]["findings"] = [MAJOR | {"id": "F1"}]
+    outputs[4:4] = revised("Revised plan")
+    provider = Provider(outputs)
+    advance(store_for(tmp_path), provider, Judge(), RunConfig())
+    records = json.loads(provider.documents(4)["revision_findings"])
+    assert [r["finding_id"] for r in records] == ["F1-1"]
+    assert all("id" not in r for r in records)

@@ -1,5 +1,7 @@
 """Scientific responsibilities without a prescribed methodology or template."""
 
+from experiment_design.packs import Pack
+
 _COMMON = """You are a bounded workspace agent. Your first message gives a goal and an index of
 named documents (name, line count, first line), not their content. Work like this:
 inspect the index; turns are limited, so in your first turn call read once with names
@@ -40,6 +42,33 @@ question. Treat ambiguity that would force a downstream agent to guess as a mate
 a clearly labelled, reasonable proposal is not such a gap.
 """
 _ROLES = {
+    "profile_inference": (
+        "Infer the research type from the hypotheses and brief: comparative_benchmark, "
+        "controlled_experiment, ablation, or unclear. For mixed types choose the first "
+        "hypothesis's type; other experiments may use other designs. Submit using the tool."
+    ),
+    "surveyor": (
+        "Survey evaluation resources for the research brief and hypotheses. Submit at most "
+        "five short HuggingFace dataset search queries, the task keywords that describe the "
+        "research, and the datasets, benchmarks, baselines and metrics named in the supplied "
+        "sources or brief. Give a source_url only when it appears verbatim in the supplied "
+        "text. Do not invent resources, sizes, licenses or URLs. Submit using the schema tool."
+    ),
+    "selector": (
+        "Rank and select evaluation resources for the research brief from the supplied "
+        "candidates only. Use the exact resource_id of each candidate; never add a candidate. "
+        "For each selected resource give rank (1 is best), a one-sentence rationale, the "
+        "hypothesis IDs it serves and its benchmark contamination risk (low, medium, high or "
+        "unknown when you cannot tell). When researcher comments ask for a resource that is "
+        "not a candidate, list it in additions with its kind. Do not claim a resource is "
+        "verified. Submit using the schema tool."
+    ),
+    "indexer": (
+        "Extract an experiment index from the supplied plan and hypotheses. Do not evaluate, "
+        "rewrite or invent plan content. Preserve experiment and hypothesis IDs, list only "
+        "documented datasets, baselines, metrics and controls, and copy each plan heading "
+        "exactly as plan_section. Use the supplied plan_sha256. Submit using the schema tool."
+    ),
     "framing": (
         "Ground the research question. When the source states several hypotheses, list "
         "each with its claim and decision rule, check that each rule is unambiguous and "
@@ -62,6 +91,8 @@ _ROLES = {
         "When reframe_objections are supplied, reframe so the new framing answers them. "
         "When you ask a question, offer 2-4 distinct options if the answer is a choice; "
         "give each option as plain text without numbering. "
+        "The source may hold several hypotheses, each under a heading '## <id>'. Write one "
+        "brief for one plan that tests every hypothesis, and name each by its hypothesis_id. "
     ),
     "design": (
         "Write a specific experiment plan: protocol, controls, measurement validity, "
@@ -69,7 +100,9 @@ _ROLES = {
         "analysis, interpretation (negative/inconclusive/technical failure), feasibility "
         "and constraints. For several hypotheses, write one plan: shared protocol first, "
         "then one section per hypothesis with its claim, design elements, measurements, "
-        "prespecified analysis and decision rule. "
+        "prespecified analysis and decision rule. The source may hold several hypotheses, "
+        "each under a heading '## <id>'. Write one plan that tests every hypothesis and name "
+        "each one by its hypothesis_id in the plan. "
     ),
     "methodologist": (
         "Independently critique the draft plan against source, confirmed intent, "
@@ -118,9 +151,33 @@ _ROLES = {
 }
 
 
-def prompt(role: str) -> str:
-    return _COMMON + _ROLES[role]
+_SUBMIT_ONLY = frozenset({"indexer", "surveyor", "selector", "profile_inference"})
 
 
-def snapshot() -> dict[str, str]:
-    return {role: prompt(role) for role in _ROLES}
+def prompt(role: str, pack: Pack | None = None) -> str:
+    text = _ROLES[role] if role in _SUBMIT_ONLY else _COMMON + _ROLES[role]
+    if role not in _SUBMIT_ONLY:
+        text += (
+            " Every researcher question must have 2-4 distinct plain-text options and "
+            "default (a 1-based option number). Revision responses must contain exactly one "
+            "{finding_id, outcome: fixed|rebutted|not_fixed, note} for every revision_findings "
+            "entry. Rebutted and not_fixed require grounds in note. Never infer resolution."
+        )
+    if pack is None:
+        return text
+    additions = [pack.role_addenda.get(role, "")]
+    if role in {"methodologist", "skeptic", "final_check"}:
+        additions += [
+            "\n".join(f"- [{item.category}] {item.check}" for item in pack.rubric),
+            "Set category for every finding according to this rubric.",
+        ]
+    if role == "design" and pack.template:
+        additions.append(pack.template)
+    return text + "\n\n" + "\n\n".join(part for part in additions if part)
+
+
+def snapshot(pack: Pack | None = None) -> dict[str, str]:
+    result = {role: prompt(role, pack) for role in _ROLES}
+    if pack is not None:
+        result["pack_layers"] = ",".join(pack.layers)
+    return result

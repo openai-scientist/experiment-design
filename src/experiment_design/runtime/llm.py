@@ -1,6 +1,7 @@
 """OpenAI-compatible synchronous tool-calling client with bounded retries."""
 
 import time
+from collections.abc import Callable
 from typing import Self
 
 import httpx
@@ -40,8 +41,13 @@ class LLMClient:
         cfg: LLMConfig,
         api_key: str,
         transport: httpx.BaseTransport | None = None,
+        *,
+        role: str = "stage",
+        on_call: Callable[[dict], None] | None = None,
     ):
         self.cfg = cfg
+        self.role = role
+        self.on_call = on_call
         self.last_attempts: list[dict] = []
         self.max_attempts = cfg.max_retries + 1
         self.client = httpx.Client(
@@ -53,11 +59,26 @@ class LLMClient:
     def close(self) -> None:
         self.client.close()
 
+    def _report(self, started: float, outcome: str, tokens_in, tokens_out) -> None:
+        """Usage and timing only: never the key, messages or content."""
+        if self.on_call is not None:
+            self.on_call(
+                {
+                    "role": self.role,
+                    "model": self.cfg.model,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "latency_ms": round((time.monotonic() - started) * 1000),
+                    "outcome": outcome,
+                }
+            )
+
     def complete(self, messages: list[dict], tools: list[dict]) -> LLMResponse:
         self.last_attempts = []
         if not 1 <= self.max_attempts <= self.cfg.max_retries + 1:
             raise LLMError("LLM attempt cap exceeds configured retry allowance")
         for attempt in range(self.max_attempts):
+            started = time.monotonic()
             try:
                 response = self.client.post(
                     self.cfg.base_url.rstrip("/") + "/chat/completions",
@@ -77,6 +98,8 @@ class LLMClient:
                 code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
                 # A 4xx other than 408 was rejected before processing: usage is known zero.
                 usage = 0 if code is not None and 400 <= code < 500 and code != 408 else None
+                timed_out = isinstance(exc, httpx.TimeoutException) or code == 408
+                self._report(started, "timeout" if timed_out else "error", usage, usage)
                 self.last_attempts.append(
                     {
                         "status": "error",
@@ -115,6 +138,7 @@ class LLMClient:
                         "cached_tokens"
                     ),
                 )
+                self._report(started, "ok", parsed.tokens_in, parsed.tokens_out)
                 self.last_attempts.append(
                     {
                         "status": "success",
@@ -129,6 +153,7 @@ class LLMClient:
                 )
                 return parsed
             except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
+                self._report(started, "error", None, None)
                 self.last_attempts.append(
                     {
                         "status": "error",

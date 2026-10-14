@@ -10,11 +10,38 @@ class WorkflowError(ValueError):
     pass
 
 
+class ReviewerError(WorkflowError):
+    """A known-usage reviewer failure, distinct from a budget stop."""
+
+
+class RunInterrupted(Exception):
+    """A cancel or pause request reached the workflow; not a workflow failure."""
+
+    def __init__(self, kind: Literal["cancel", "pause"]):
+        super().__init__(kind)
+        self.kind = kind
+
+
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class Profile(Record):
+    domain: str | None = None
+    research_type: str | None = None
+
+
 _ENUMERATOR = re.compile(r"^\s*(?:\(\d+\)|\d+[.)]|-)\s+")
+FINDING_CATEGORIES = (
+    "leakage",
+    "baseline",
+    "control",
+    "statistics",
+    "reproducibility",
+    "evidence",
+    "other",
+    "framing",
+)
 
 
 class Finding(Record):
@@ -23,7 +50,21 @@ class Finding(Record):
     issue: str
     consequence: str
     suggestion: str
+    anchor: str = ""
+    category: Literal[*FINDING_CATEGORIES] = "other"
     evidence_refs: list[str] = Field(default_factory=list)
+
+
+class RevisionDisposition(Record):
+    finding_id: str
+    outcome: Literal["fixed", "rebutted", "not_fixed"]
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def grounds_required(self) -> "RevisionDisposition":
+        if self.outcome != "fixed" and not (self.note or "").strip():
+            raise ValueError("rebutted/not_fixed require a note")
+        return self
 
 
 class AgentOutput(Record):
@@ -33,6 +74,8 @@ class AgentOutput(Record):
     question: str = ""
     recommended_action: str = ""
     options: list[str] = Field(default_factory=list)
+    default: int = Field(default=1, ge=1, le=4)
+    responses: list[RevisionDisposition] = Field(default_factory=list)
 
     @field_validator("markdown")
     @classmethod
@@ -56,6 +99,8 @@ class AgentOutput(Record):
     @model_validator(mode="after")
     def valid_options(self) -> "AgentOutput":
         if not self.options:
+            if self.question.strip():
+                raise ValueError("question requires 2 to 4 options")
             return self
         if not self.question.strip():
             raise ValueError("options require a nonblank question")
@@ -65,11 +110,14 @@ class AgentOutput(Record):
             raise ValueError("options must not be blank")
         if len({option.strip().casefold() for option in self.options}) != len(self.options):
             raise ValueError("options must be distinct")
+        if self.default > len(self.options):
+            raise ValueError("question default must select a listed option")
         return self
 
 
 class RunState(Record):
     run_id: str
+    profile: Profile | None = None
     stage: int = Field(default=1, ge=1, le=7)
     status: str = "RUNNING"
     attempt: int = Field(default=1, ge=1)
@@ -86,6 +134,7 @@ class RunState(Record):
     question: str = ""
     question_kind: str = ""
     question_options: list[str] = Field(default_factory=list)
+    question_default: int = Field(default=1, ge=1, le=4)
 
 
 class Quantity(Record):
@@ -125,6 +174,17 @@ class CalculationRequest(Record):
     unit_of_randomization: str | None = None
     unit_of_analysis: str | None = None
     cluster: ClusterInputs | None = None
+    p_discordant_10: Quantity | None = None
+    p_discordant_01: Quantity | None = None
+    n_pairs: int | None = None
+    family_size: int | None = None
+    p_values: list[float] | None = None
+    values: list[float] | None = None
+    confidence: float | None = None
+    a12: Quantity | None = None
+    cliffs_delta: Quantity | None = None
+    resamples: int | None = None
+    random_seed: int | None = None
 
 
 class CalculationResult(Record):
@@ -143,3 +203,6 @@ class CalculationResult(Record):
     df: int | None = None
     mde: float | None = None
     reasons: list[str] = Field(default_factory=list)
+    ci_low: float | None = None
+    ci_high: float | None = None
+    adjusted: list[float] | None = None

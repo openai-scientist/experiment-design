@@ -3,15 +3,19 @@
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
+from typing import Literal
 
 from pydantic import ValidationError
 
 from experiment_design.contracts import RunState, WorkflowError
+from experiment_design.vocabulary import ACTIVITY_TYPES
 
 
 def _hash(path: Path) -> str:
@@ -49,10 +53,19 @@ def _json(path: Path, data: dict) -> None:
     _atomic(path, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
+# A store change: ('event', kind, data) after the journal write, or ('state', old, new)
+# after the checkpoint write.
+StoreChange = tuple[Literal["event"], str, dict] | tuple[Literal["state"], RunState, RunState]
+
+
 class RunStore:
     def __init__(self, run_dir: Path):
         self.path = Path(run_dir).resolve()
         self._executing = False
+        self._listeners: list[Callable[[StoreChange], None]] = []
+        self._control_lock = threading.Lock()
+        self._coalescing = 0
+        self._pending_state: tuple[RunState, RunState] | None = None
         if self.path.is_file():
             raise WorkflowError(
                 "Legacy SQLite runs are unsupported; supply a filesystem run directory"
@@ -104,19 +117,103 @@ class RunStore:
         store.complete(1, [], ["hypothesis.md"])
         return store
 
+    def subscribe(self, listener: Callable[[StoreChange], None]) -> None:
+        """Listener errors propagate: a failed projection must not look like success."""
+        self._listeners.append(listener)
+
+    def _notify(self, change: StoreChange) -> None:
+        if change[0] == "state" and self._coalescing:
+            first = self._pending_state[0] if self._pending_state else change[1]
+            self._pending_state = (first, change[2])
+            return
+        for listener in list(self._listeners):
+            listener(change)
+
+    @contextmanager
+    def coalesced(self):
+        """Report the state changes of one logical step as a single change."""
+        self._coalescing += 1
+        try:
+            yield
+        finally:
+            self._coalescing -= 1
+            if not self._coalescing and self._pending_state:
+                (previous, current), self._pending_state = self._pending_state, None
+                self._notify(("state", previous, current))
+
     def update(self, **fields) -> RunState:
         state = RunState.model_validate({**self.state.model_dump(), **fields})
         _json(self.path / "checkpoint.json", state.model_dump(mode="json"))
-        self.state = state
+        previous, self.state = self.state, state
+        self._notify(("state", previous, state))
         return state
 
     def config(self) -> dict:
         return json.loads((self.path / "config.json").read_text(encoding="utf-8"))
 
+    def bound_findings(self, stage: int, name: str, round: int) -> list[dict]:
+        """Assign persistent IDs to records bound to exact review bytes and their round."""
+        text = self.read(stage, name)
+        source = f"{round}:{stage}/{name}:" + hashlib.sha256(text.encode()).hexdigest()
+        known = {
+            e["data"]["binding"]: e["data"]["finding_id"]
+            for e in self.events()
+            if e["kind"] == "finding.mapped"
+        }
+        result = []
+        for i, finding in enumerate(json.loads(text).get("findings", [])):
+            binding = f"{source}:{i}"
+            if binding not in known:
+                count = sum(v.startswith(f"F{round}-") for v in known.values())
+                known[binding] = f"F{round}-{count + 1}"
+                self.event(
+                    "finding.mapped",
+                    {
+                        "binding": binding,
+                        "finding_id": known[binding],
+                        "raw_id": finding["id"],
+                        "round": round,
+                    },
+                )
+            result.append({**finding, "finding_id": known[binding]})
+        return result
+
     def set_run_limits(self, limits: dict) -> None:
         config = self.config()
         config["run"] = {**(config.get("run") or {}), **limits}
         _json(self.path / "config.json", config)
+
+    def _control(self) -> dict:
+        try:
+            control = json.loads((self.path / "control.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return control if isinstance(control, dict) else {}
+
+    def _set_control(self, **fields) -> None:
+        with self._control_lock:
+            control = {**self._control(), **fields}
+            _json(self.path / "control.json", {k: v for k, v in control.items() if v is not None})
+
+    def request_interrupt(self, kind: Literal["cancel", "pause"]) -> None:
+        if kind not in {"cancel", "pause"}:
+            raise WorkflowError("Unknown interrupt kind")
+        self._set_control(interrupt=kind)
+
+    def clear_interrupt(self) -> None:
+        self._set_control(interrupt=None)
+
+    def interrupt(self) -> str | None:
+        kind = self._control().get("interrupt")
+        return kind if kind in {"cancel", "pause"} else None
+
+    def remember_status(self, status: str | None) -> None:
+        """The status a paused run returns to on resume."""
+        self._set_control(resume_status=status)
+
+    def remembered_status(self) -> str | None:
+        status = self._control().get("resume_status")
+        return status if isinstance(status, str) else None
 
     def _artifact(self, stage: int, name: str) -> Path:
         if not isinstance(stage, int) or isinstance(stage, bool) or not 1 <= stage <= 7:
@@ -255,8 +352,9 @@ class RunStore:
                 os.replace(source, target)
         state = RunState.model_validate(transaction["state"])
         _json(self.path / "checkpoint.json", state.model_dump(mode="json"))
-        self.state = state
+        previous, self.state = self.state, state
         marker.unlink()
+        self._notify(("state", previous, state))
 
     def event(self, kind: str, data: dict) -> None:
         path = self.path / "events.jsonl"
@@ -276,6 +374,31 @@ class RunStore:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
+        self._notify(("event", kind, data))
+
+    def activity(
+        self,
+        type: str,
+        *,
+        actor: str,
+        summary: str,
+        step_key: str | None = None,
+        refs: Sequence[str] = (),
+        payload: Mapping | None = None,
+    ) -> None:
+        if type not in ACTIVITY_TYPES:
+            raise WorkflowError(f"Unknown activity type '{type}'")
+        self.event(
+            "activity",
+            {
+                "type": type,
+                "actor": actor,
+                "summary": summary,
+                "step_key": step_key,
+                "refs": list(refs),
+                "payload": dict(payload or {}),
+            },
+        )
 
     def events(self) -> list[dict]:
         path = self.path / "events.jsonl"

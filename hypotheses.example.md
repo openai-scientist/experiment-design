@@ -1,60 +1,35 @@
 # Hypotheses
 
-**Topic:** Weekly AI-generated feedback on grade-7 math homework compared with teacher-written feedback
+**Topic:** LLM-based automated program repair compared with a template-based baseline on Defects4J
 
-## H1: AI-generated homework feedback is non-inferior to teacher-written feedback in end-of-term math scores.
+## H1: The LLM-based repair tool fixes more Defects4J bugs than the template-based baseline.
 
-- **Exposure:** Weekly AI-generated written feedback on math homework, with teacher-written feedback as the control.
-- **Outcome:** End-of-term standardized math score (points, 0–100).
-- **Estimand:** Difference in mean score, AI minus teacher.
-- **Method:** Class-randomized trial; mixed model with class random effect.
-- **Prediction:** The lower 97.5% one-sided confidence bound of (AI − teacher) is above −3 points.
-- **Falsified if:** The lower bound is ≤ −3 points.
-- **Rationale:** Timely, specific feedback may match teacher feedback in learning effect.
+- **Exposure:** Candidate patch generation by the LLM-based repair tool, with the template-based repair tool as the control.
+- **Outcome:** Fraction of bugs for which at least one generated patch passes the full developer test suite (plausible fix rate).
+- **Estimand:** Difference in plausible fix rate on the same bugs, LLM tool minus baseline.
+- **Method:** Paired comparison on the same bug set, same patch budget per bug and same time limit; McNemar test on per-bug success.
+- **Prediction:** The LLM tool fixes a larger share of bugs; the paired difference is positive with a 95% confidence interval above zero.
+- **Falsified if:** The paired difference is zero or negative, or its 95% confidence interval includes zero.
+- **Rationale:** Large language models may propose edits outside a fixed template set.
 - **Limitations:**
-  - Teachers cannot be blinded.
+  - Defects4J bugs may appear in LLM pre-training data (benchmark contamination).
+  - Passing the test suite does not prove the patch is correct.
 
-## H2: AI-generated feedback reduces teacher time spent on homework feedback.
+## H2: Plausible fixes of the LLM-based tool are not less often semantically correct than those of the baseline.
 
 - **Exposure:** Same as H1.
-- **Outcome:** Teacher minutes spent producing homework feedback per week (self-logged).
-- **Estimand:** Difference in mean weekly feedback minutes per teacher, AI minus teacher.
-- **Method:** Same trial as H1; teacher-level time logs.
-- **Prediction:** Mean weekly feedback time is at least 30% lower in the AI arm.
-- **Falsified if:** The reduction is below 30% or the 95% confidence interval includes zero.
-- **Rationale:** Teachers only review AI drafts instead of writing feedback.
+- **Outcome:** Fraction of plausible patches judged equivalent to the developer fix by blinded manual review.
+- **Estimand:** Difference in correctness rate among plausible patches, LLM tool minus baseline.
+- **Method:** Two blinded reviewers label a random sample of plausible patches from each tool; disagreement resolved by a third reviewer.
+- **Prediction:** The lower confidence bound of the difference is above a non-inferiority margin the researcher must state.
+- **Falsified if:** The lower bound is at or below the margin.
+- **Rationale:** More plausible fixes are only useful if they are also correct.
 - **Limitations:**
-  - Self-logged time may be biased.
-
-## H3: AI-generated feedback widens the score gap for students with low baseline achievement.
-
-- **Exposure:** Same as H1.
-- **Outcome:** End-of-term standardized math score (points, 0–100).
-- **Estimand:** Interaction of arm and low baseline achievement (bottom tertile of prior-year score) on end-of-term score.
-- **Method:** Same trial as H1; arm-by-baseline interaction in the mixed model.
-- **Prediction:** Among bottom-tertile students, AI minus teacher is at least 2 points lower than among other students.
-- **Falsified if:** The interaction estimate is above −2 points or its 95% confidence interval includes zero.
-- **Rationale:** Struggling students may need explanations that generic AI feedback does not give (contrarian view).
-- **Limitations:**
-  - Subgroup power is limited with 40 classes.
+  - Manual review is costly; the reviewed sample may be small.
 
 ## Scope
-Grade-7 classes in one district, one term; scores range from 0 to 100.
-
-## Constraints
-- at most 40 classes available (20 per arm)
-- teachers cannot be blinded
-- one term
-
-## Budget
-District analyst time ≈ 40 h.
-
-## Assumptions
-- A1: Class size about 25 students {value: 25, unit: students}
-- A2: ICC 0.10 for class-level clustering, to be confirmed from district records {value: 0.10, unit: ""}
+Java bugs in Defects4J, one tool version per system, a fixed patch budget per bug.
 
 ## Sources
-### S1: District note (DRAFT)
-DRAFT — researcher must replace with real district data before the pilot is scored.
-
-The standard deviation of last year's term scores was about 10 points. The typical class size was about 25 students.
+### S1: Researcher note (DRAFT)
+DRAFT — the researcher must replace this with the tool versions, the Defects4J release and any pilot results before the plan is scored.

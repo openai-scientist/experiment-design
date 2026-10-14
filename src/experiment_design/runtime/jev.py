@@ -38,12 +38,12 @@ class Judge(Protocol):
 
 
 class TypeSafeJudge:
-    def __init__(self, cfg: JevConfig, client: Any | None = None):
+    def __init__(self, cfg: JevConfig, client: Any | None = None, *, api_key: str | None = None):
         self.cfg = cfg
         self.last_attempts: list[dict] = []
         self.max_attempts = 3
         if client is None:
-            key = os.environ.get(cfg.api_key_env)
+            key = api_key or os.environ.get(cfg.api_key_env)
             if not key:
                 raise ConfigError(f"missing API key environment variable {cfg.api_key_env}")
             client = TypeSafeClient(api_key=key, retry=RetryPolicy(max_retries=0))

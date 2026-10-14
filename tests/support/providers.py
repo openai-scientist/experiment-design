@@ -73,7 +73,19 @@ class Provider(Reader):
     def complete(self, messages, tools):
         calls = self.reading_calls(messages)
         if not calls:
-            calls = [ToolCall(id="submit", name="submit", arguments=json.dumps(next(self.outputs)))]
+            body = dict(next(self.outputs))
+            task = json.loads(messages[1]["content"])
+            documents = read_documents(messages)
+            if task.get("task", "").startswith("Role: revision.") and "responses" not in body:
+                body["responses"] = [
+                    {
+                        "finding_id": f["finding_id"],
+                        "outcome": "not_fixed",
+                        "note": "Scripted fixture did not supply a disposition",
+                    }
+                    for f in json.loads(documents.get("revision_findings", "[]"))
+                ]
+            calls = [ToolCall(id="submit", name="submit", arguments=json.dumps(body))]
         return LLMResponse(
             content=None, tool_calls=calls, tokens_in=2, tokens_out=3, tokens_cached=1
         )
@@ -97,6 +109,23 @@ class ToolProvider(Reader):
         calls = self.reading_calls(messages)
         if not calls:
             name, args = next(self.calls)
+            task = json.loads(messages[1]["content"])
+            if (
+                name == "submit"
+                and task.get("task", "").startswith("Role: revision.")
+                and "responses" not in args
+            ):
+                documents = read_documents(messages)
+                args = args | {
+                    "responses": [
+                        {
+                            "finding_id": f["finding_id"],
+                            "outcome": "not_fixed",
+                            "note": "Scripted fixture did not supply a disposition",
+                        }
+                        for f in json.loads(documents.get("revision_findings", "[]"))
+                    ]
+                }
             calls = [ToolCall(id=name, name=name, arguments=json.dumps(args))]
         return LLMResponse(content=None, tool_calls=calls, tokens_in=2, tokens_out=3)
 

@@ -8,11 +8,19 @@ from pydantic import ValidationError
 
 from experiment_design.agents.prompts import prompt
 from experiment_design.config import RunConfig
-from experiment_design.contracts import AgentOutput, CalculationRequest, WorkflowError
+from experiment_design.contracts import (
+    AgentOutput,
+    CalculationRequest,
+    ReviewerError,
+    RevisionDisposition,
+    WorkflowError,
+)
+from experiment_design.packs import Pack
 from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.science.evidence import supports_number
-from experiment_design.science.power import calculate
+from experiment_design.science.registry import LEGACY_CALCULATORS, calculate
+from experiment_design.vocabulary import REVIEW_ROLES
 
 _READ_LINES = 400
 _READ_CAP = 1000
@@ -222,6 +230,8 @@ def run_specialist(
     cfg: RunConfig,
     workspace: dict[str, str],
     required: list[str],
+    *,
+    pack: Pack | None = None,
 ) -> AgentOutput:
     missing = [name for name in required if name not in workspace]
     if missing:
@@ -231,7 +241,7 @@ def run_specialist(
         "then check and submit."
     )
     messages = [
-        {"role": "system", "content": prompt(role)},
+        {"role": "system", "content": prompt(role, pack)},
         {
             "role": "user",
             "content": json.dumps(
@@ -331,6 +341,7 @@ def run_specialist(
     ]
     task_tokens = sum(e["tokens"] or 0 for e in prior)
     attempts_used = len(prior)
+    contract_rejections = 0
     for turn in range(len(prior), cfg.task_max_turns):
         if (
             task_tokens >= cfg.task_max_tokens
@@ -343,6 +354,8 @@ def run_specialist(
             configured = (
                 getattr(getattr(llm, "cfg", None), "max_retries", cfg.task_max_turns - 1) + 1
             )
+            if role in REVIEW_ROLES:
+                configured = min(configured, 2)
             llm.max_attempts = min(configured, cfg.task_max_turns - attempts_used)
         canonical = json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         store.event(
@@ -401,6 +414,8 @@ def run_specialist(
             store.update(status="USAGE_UNKNOWN", usage_unknown=True)
             raise WorkflowError("Provider usage is unknown") from failure
         if failure:
+            if role in REVIEW_ROLES:
+                raise ReviewerError("Reviewer call failed after retry") from failure
             raise WorkflowError("Provider call failed") from failure
         if (
             task_tokens > cfg.task_max_tokens
@@ -429,6 +444,7 @@ def run_specialist(
                 }
             )
         submission = None
+        contract_failure = False
         for call in response.tool_calls:
             try:
                 args = json.loads(call.arguments)
@@ -436,6 +452,53 @@ def run_specialist(
                     raise ValueError("Tool arguments must be a JSON object")
                 if call.name in {"submit", "check"}:
                     output, problems = _problems(args, workspace, required, covered, accepted_refs)
+                    expected = (
+                        [f["finding_id"] for f in json.loads(workspace["revision_findings"])]
+                        if role == "revision" and "revision_findings" in workspace
+                        else []
+                    )
+                    missing_responses = []
+                    if output is not None and expected:
+                        received = [r.finding_id for r in output.responses]
+                        extra = sorted(set(received) - set(expected))
+                        twice = sorted({f for f in received if received.count(f) > 1})
+                        if extra or twice:
+                            problems.append(
+                                "revision responses must name each input finding once"
+                                + (f"; unknown finding_id: {', '.join(extra)}" if extra else "")
+                                + (f"; repeated finding_id: {', '.join(twice)}" if twice else "")
+                            )
+                        missing_responses = [f for f in expected if f not in received]
+                    contract_problem = (
+                        (
+                            output is None
+                            and (
+                                args.get("question")
+                                or args.get("needs_input")
+                                or role == "revision"
+                            )
+                        )
+                        or missing_responses
+                        or any("revision responses" in p for p in problems)
+                        or (role in REVIEW_ROLES and problems)
+                    )
+                    if call.name == "submit" and contract_problem:
+                        contract_rejections += 1
+                        if contract_rejections >= 2 and missing_responses and not problems:
+                            output.responses.extend(
+                                RevisionDisposition(
+                                    finding_id=f,
+                                    outcome="not_fixed",
+                                    note="no response from reviser",
+                                )
+                                for f in missing_responses
+                            )
+                        elif missing_responses:
+                            problems.append(
+                                "Missing revision responses: " + ", ".join(missing_responses)
+                            )
+                        if contract_rejections >= 2 and problems:
+                            contract_failure = True
                     if call.name == "check":
                         result = {"ok": not problems, "problems": problems}
                     else:
@@ -476,7 +539,15 @@ def run_specialist(
                     request = CalculationRequest.model_validate(args)
                     if not request.calculator_id:
                         raise ValueError("Explicit calculator_id required")
-                    quantities = [request.margin, request.effect, request.sd]
+                    quantities = [
+                        request.margin,
+                        request.effect,
+                        request.sd,
+                        request.a12,
+                        request.cliffs_delta,
+                        request.p_discordant_10,
+                        request.p_discordant_01,
+                    ]
                     if request.cluster:
                         quantities += [request.cluster.size, request.cluster.icc]
                     sources = store.sources()
@@ -490,7 +561,7 @@ def run_specialist(
                             )
                         ):
                             raise ValueError("Calculation value/span lacks supplied source support")
-                    computed = calculate(request)
+                    computed = calculate(request, pack.calculators if pack else LEGACY_CALCULATORS)
                     ref = (
                         "calculation:"
                         + hashlib.sha256(
@@ -529,6 +600,10 @@ def run_specialist(
                     "content": json.dumps(result, ensure_ascii=False),
                 }
             )
+        if contract_failure:
+            if role in REVIEW_ROLES:
+                raise ReviewerError("Invalid reviewer submission after one retry")
+            raise WorkflowError("Invalid question or revision response after one retry")
         if submission is not None:
             store.event("agent.accepted", {"task": task})
             return submission

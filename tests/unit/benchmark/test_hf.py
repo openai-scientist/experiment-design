@@ -1,0 +1,44 @@
+"""Metadata access must distinguish absence from an unavailable source."""
+
+import httpx
+import pytest
+
+from experiment_design.agents.benchmark.hf import HFClient, HFUnavailable
+
+
+@pytest.mark.parametrize("token", [None, "hf-test-secret"])
+def test_metadata_request_auth_and_search(token):
+    def response(request):
+        assert request.headers.get("Authorization") == (f"Bearer {token}" if token else None)
+        if request.url.path == "/api/datasets":
+            assert request.url.params["search"] == "classification"
+            return httpx.Response(200, json=[{"id": "owner/data"}])
+        return httpx.Response(200, json={"sha": "revision"})
+
+    client = HFClient(token=token, transport=httpx.MockTransport(response))
+    assert client.search_datasets("classification") == [{"id": "owner/data"}]
+    assert client.dataset_info("owner/data") == {"sha": "revision"}
+    assert client.model_info("owner/model") == {"sha": "revision"}
+    assert "hf-test-secret" not in repr(client)
+    client.close()
+
+
+def test_missing_repository_is_none():
+    client = HFClient(transport=httpx.MockTransport(lambda request: httpx.Response(404)))
+    assert client.dataset_info("missing") is None
+    client.close()
+
+
+@pytest.mark.parametrize("status", [401, 429, 500, 503])
+def test_unavailable_metadata_is_not_an_empty_success(status):
+    client = HFClient(transport=httpx.MockTransport(lambda request: httpx.Response(status)))
+    with pytest.raises(HFUnavailable):
+        client.dataset_info("owner/data")
+    client.close()
+
+
+def test_malformed_metadata_is_unavailable():
+    client = HFClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=[])))
+    with pytest.raises(HFUnavailable):
+        client.model_info("owner/model")
+    client.close()

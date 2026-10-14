@@ -22,6 +22,7 @@ class DocumentStore:
             status="AWAITING_RESEARCHER",
             question="",
             question_kind="",
+            profile=None,
         )
         self.valid_stages = {4, 5, 6}
         self.recorded = []
