@@ -22,7 +22,9 @@ variables without exposing secrets. `run <input.md> [additional.md ...]` starts 
 single active seven-stage workflow under `runs_root`. `resume <run-directory>`
 reuses valid completed stages and cumulative usage. `status`, `review`, `decide`
 and `export` work offline without provider keys. A decision records real text,
-researcher identity and `--revision` equal to the current attempt. Explicit run
+researcher identity and `--revision` equal to the current attempt. A pending question
+carries 2-4 numbered options; answer with `decide --action ANSWER --option N [--text ...]`
+or `--text` alone; the record stores the exact option text and the free text. Explicit run
 budget increases require `--llm-token-limit` and a nonblank `--reason`; ordinary
 resume preserves the pinned ceiling, consumed tokens and unknown-usage stops.
 
@@ -36,7 +38,9 @@ Agents are bounded workspace agents: each gets a goal and an index of role-scope
 documents, then uses read, search, source, calculate and check before submit.
 They own bounded scientific reasoning and specialist tools. Science owns the
 existing supported statistical algorithms. Workflow owns stages and legal routes.
-Publication copies exact reviewed Markdown bytes without model calls or rendering.
+Publication copies exact reviewed Markdown bytes without rendering. Today it makes no model
+calls; `publication/experiment_index.py` will extract an index with a model call once
+Task B8 wires it, while the plan bytes stay exact.
 CLI/config own researcher commands and configuration.
 
 | Stage | Responsibility |
@@ -52,7 +56,8 @@ CLI/config own researcher commands and configuration.
 JEV chooses WHAT/NEXT among legal code-enumerated options; agents choose HOW.
 Validate returned options; never claim JEV itself is deterministic. Sole legal
 routes are labelled automatic and require no fabricated JEV call. Methodology is
-open-ended; calculator coverage is not an allowlist or universal power gate.
+open-ended; calculator coverage is not an allowlist or universal power gate. A method
+without a calculator can still be proposed, with its uncertainty stated.
 Keep TypeSafe/JEV provider dependency and public configuration.
 
 ## Authority and scientific honesty
@@ -66,12 +71,15 @@ Agent proposals and clarification questions are not confirmed researcher intent.
 Record exact replies, identity, UTC time, current attempt and relevant document or
 source/question bindings. Stale replies/reviews cannot bless a revised document.
 Independent critics receive the same draft with fresh work and no pending peer
-results. Final checking receives the revised document and original objections.
+results. Final checking receives the revised document, original objections and a code-computed
+unified diff of the revision. After each revision both critics record, per objection,
+resolved, rebuttal accepted or maintained with grounds; maintained ones go to the final
+check. Evidence search covers supplied documents only.
 
 Never invent evidence, numerical computations, answers, acceptance or superiority.
-Statistics come only from calculators in `science/registry.py` enabled by the active pack.
+Statistics are computed only by calculators in `science/registry.py` (enabled by the active
+pack; wired by Task B3, until then the legacy calculators apply).
 Each calculator needs a test against independent reference values. Do not add mixed-model power.
-Unsupported methods remain scientifically available with honest uncertainty.
 Computation findings cite accepted own-task tool evidence; prior-task support does
 not become a reviewer's own computation. Source spans must exist in supplied text.
 
@@ -98,22 +106,34 @@ approval and gaps belong in publication metadata and researcher view headers.
 
 ## Working agreements and verification
 
-Inspect surrounding code, callers, tests and Git changes; preserve others' work.
-Use `rg`/`rg --files`; broad discovery includes hidden/ignored source with explicit
-exclusions for Git/dependencies/caches/builds/unrelated worktrees. Report actual
-scope and exclusions; do not read secrets or `.env` during discovery.
-Keep fixes scoped, typed public APIs, domain names and Ruff. Delegate only when
-requested/required with disjoint ownership; never invoke Astra without explicit
-user request. No unauthorized commit/push/reset/stash/branch changes.
+Use `rg`/`rg --files`; never read secrets or `.env`. Keep typed public APIs, domain names
+and Ruff. Never invoke Astra without explicit user request. No unauthorized
+commit/push/reset/stash/branch changes.
 
-Tests guard real scientific/authority/provenance/storage/command contracts using
-fake external providers and independent calculator references. Run focused checks
-while editing; shared contracts/runtime/storage/science/workflow changes require
-full deterministic tests. Before handoff run full tests, lint and format checks.
-Mutation-check changed authority/scientific guards, confirm failure and restore
-exactly. Report PASS/FAIL/INCONCLUSIVE with actual commands and limitations.
+Tests use fake external providers and independent calculator references. Shared
+contracts/runtime/storage/science/workflow changes require full deterministic tests;
+before handoff run full tests, lint and format checks. Mutation-check changed
+authority/scientific guards, then restore exactly.
+
+Regenerate the statistics fixture with
+`uv run --with statsmodels tests/fixtures/stats_reference.py`.
+`tests/unit/science/test_stats.py` checks the generator SHA-256 in
+`tests/fixtures/stats_reference.json`, so edit the generator and fixture together.
+
+## Service and contract
+
+`exd-api` (extra `api`) serves the Platform engine contract from `api/contract_models.py`.
+`api/runs.py` creates one engine run per `stage_run_id`, drives the same seven-stage
+workflow on the filesystem store, and publishes `stage-07/exp_plan.md` as the
+`exd.exp_plan/v1` artifact. The plan review at stage 6 opens a gate (`api/mapping.py`); the service
+sends events and telemetry to Platform through `api/callbacks.py`.
+Management owns the contract. Do not edit `tests/contract/vendor/`. To refresh it, copy
+`schema/`, `examples/` and README from management `docs/contract` and write the management
+commit and contract version into `vendor/SOURCE`. `vendor/README.md` describes management's
+repo: its `scripts/export_contract.py` and `tests/contracts` do not exist here. Check with
+`uv run pytest tests/contract -q`.
 
 Live verification requires explicit authorization and passing deterministic
 prerequisites: production CLI, empty new Store, fresh provider calls and exactly
-the specified inputs. Surface missing-input decisions; never inject answers or
-force state. Record command/input/run ID/stopping state/artifacts.
+the specified inputs. Never inject answers or force state. Record command, input,
+run ID, stopping state and artifacts.
