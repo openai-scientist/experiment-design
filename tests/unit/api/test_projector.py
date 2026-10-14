@@ -50,7 +50,7 @@ def test_step_entered_event_changes_step(tmp_path):
 
 def test_unmapped_events_emit_nothing(tmp_path):
     store, _, out = _wired(tmp_path)
-    store.event("route", {"choice": "DESIGN"})
+    store.event("limits.changed", {"max_refinements": 3})
     store.update(llm_tokens=5)
     assert out == []
 
