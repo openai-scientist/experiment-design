@@ -523,15 +523,18 @@ class RunManager:
 
     def _cycle(self, run: _Run) -> bool:
         """One pass: advance the workflow, then act on where it stopped. True = go again."""
-        state = advance(
-            run.store,
-            run.llm,
-            run.judge,
-            run.cfg.run,
-            review_llm=run.review_llm,
-            hold_at_review=True,
-            integrations=run.integrations,
-        )
+        state = run.store.state
+        # INCOMPLETE waits for the researcher and PUBLISHED is done; advancing would redo them.
+        if state.status not in {"INCOMPLETE", "PUBLISHED"}:
+            state = advance(
+                run.store,
+                run.llm,
+                run.judge,
+                run.cfg.run,
+                review_llm=run.review_llm,
+                hold_at_review=True,
+                integrations=run.integrations,
+            )
         with run.lock:
             self._deliver_revisions(run)
             if state.status == "PUBLISHED":
@@ -566,9 +569,8 @@ class RunManager:
                     self._set_gate(run, gate)
                     return False
                 return self._answer_for_system(run)
-            elif state.status == "INCOMPLETE":
-                # Part A S2.7 turns this into a researcher gate; until then it is a failure.
-                self._fail(run, "review_incomplete", "The independent review did not complete.")
+            elif state.status == "INCOMPLETE" and run.gate is None:
+                self._open_incomplete_gate(run)
         return False
 
     def _deliver_revisions(self, run: _Run) -> None:
@@ -631,9 +633,22 @@ class RunManager:
             return
         self._set_gate(run, gate)
 
+    def _open_incomplete_gate(self, run: _Run) -> None:
+        """The revisions ran out without a passed review: the researcher decides, mode aside."""
+        store = run.store
+        data = store.read(store.state.plan_stage, store.state.plan_name).encode("utf-8")
+        artifact_id = self._upload_plan(run, data, primary=False, metadata={})
+        self._deliver_review(run, artifact_id)
+        self._set_gate(run, open_gate(store, artifact_ids=[artifact_id], mode=run.mode))
+
     def _deliver_review(self, run: _Run, artifact_id: str) -> None:
         store = run.store
+        error = None
         if store.state.status == "REVIEW_ERROR":
+            error = "Reviewer failed after one retry"
+        elif store.state.status == "INCOMPLETE" and not store.valid(5):
+            error = "The run stopped before a final review existed"
+        if error:
             self._emit(
                 run,
                 "review.completed",
@@ -641,7 +656,7 @@ class RunManager:
                     "round": store.state.attempt,
                     "passed": False,
                     "artifact_id": None,
-                    "error": "Reviewer failed after one retry",
+                    "error": error,
                 },
             )
             return
@@ -651,6 +666,8 @@ class RunManager:
             artifact_id=artifact_id,
             reviewer_model=run.cfg.review_llm.model,
         )
+        if store.state.status == "INCOMPLETE":
+            report = report.model_copy(update={"passed": False})
         body = report.model_dump_json(by_alias=True).encode()
         report_id = self._upload_artifact(run, "review.findings/v1", "review_findings.json", body)
         self._emit(

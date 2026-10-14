@@ -90,6 +90,18 @@ def open_gate(
             default_option_id=f"o{state.question_default}",
             opened_at=datetime.now(UTC),
         )
+    if state.status == "INCOMPLETE":
+        return Gate(
+            gate_id=f"g{state.attempt}-s6-incomplete",
+            kind=GateKind.artifact_review,
+            step_key=step_key(6),
+            prompt=(
+                "The independent review did not pass. Approve the plan with its open findings "
+                "or request changes."
+            ),
+            artifact_ids=list(artifact_ids),
+            opened_at=datetime.now(UTC),
+        )
     if (state.status == "PENDING_REVIEW" and state.stage == 6) or state.status == "REVIEW_ERROR":
         return Gate(
             gate_id=f"g{state.attempt}-s6-review",

@@ -1113,6 +1113,12 @@ def respond(
             raise WorkflowError("Response and researcher identity must be nonblank")
         options = store.state.question_options
         secondary = store.state.question_kind == "REVIEW"
+        # A Platform run that stopped INCOMPLETE waits for the researcher; CLI runs keep the guard.
+        incomplete = store.state.status == "INCOMPLETE" and bool(
+            read_run_meta(store.path).get("platform_run_id")
+        )
+        if incomplete and action not in {"APPROVE", "REQUEST_CHANGES"}:
+            raise WorkflowError("An incomplete review takes APPROVE or REQUEST_CHANGES")
         if secondary and (
             store.state.status != "AWAITING_RESEARCHER"
             or action not in {"APPROVE", "REQUEST_CHANGES"}
@@ -1136,7 +1142,7 @@ def respond(
         if (
             not secondary
             and action != "ANSWER"
-            and (store.state.plan_hash is None or not store.valid(6))
+            and (store.state.plan_hash is None or not (incomplete or store.valid(6)))
         ):
             raise WorkflowError("No current presented plan")
         if store.state.plan_hash is not None:
@@ -1157,6 +1163,7 @@ def respond(
                 raise WorkflowError("Revision must preserve final-check allowance")
         if (
             not secondary
+            and not incomplete
             and action == "APPROVE"
             and (not store.state.review_complete or not store.valid(5))
         ):
@@ -1220,4 +1227,10 @@ def respond(
             from experiment_design.publication.plan import publish
 
             publish(store)
+        if incomplete and action == "APPROVE":
+            from experiment_design.publication.plan import publish
+
+            store.update(stage=7)
+            publish(store, allow_incomplete=True)
+            store.update(status="PUBLISHED")
         return store.state
