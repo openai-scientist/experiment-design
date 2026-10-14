@@ -704,9 +704,11 @@ class ReframeJudge:
 def test_reframe_objections_reach_framing_and_survive_crash(tmp_path):
     store = store_for(tmp_path)
     first = [{"markdown": t} for t in ["Brief1", "Draft1", "Method1", "Skeptic1"]]
-    first.append({"markdown": "Brief2", "findings": [MAJOR | {"evidence_refs": ["fake"]}]})
+    # Reframed framing keeps submitting an invalid output (a question flag with no question)
+    # until its two turns run out; critics need both turns to read and submit.
+    first += [{"markdown": "Brief2", "needs_input": True}] * 2
     with pytest.raises(WorkflowError, match="allowance"):
-        advance(store, Provider(first), ReframeJudge(), RunConfig(task_max_turns=1))
+        advance(store, Provider(first), ReframeJudge(), RunConfig(task_max_turns=2))
     resumed = Provider(
         [{"markdown": t} for t in ["Brief2", "Draft2", "Method2", "Skeptic2", "Final2"]]
     )

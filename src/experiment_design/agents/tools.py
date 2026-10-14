@@ -1,4 +1,4 @@
-"""Bounded workspace agents: required documents given, read, search, source, calculate, submit."""
+"""Bounded workspace agents: read, search, source, calculate, check (reviewers), submit."""
 
 import hashlib
 import json
@@ -242,32 +242,31 @@ def run_specialist(
     missing = [name for name in required if name not in workspace]
     if missing:
         raise WorkflowError(f"Required documents missing from workspace: {', '.join(missing)}")
-    task_text = (
-        f"Role: {role}. The full text of every required document is in required_documents. "
-        "Use the document index for the other documents, then submit."
-    )
-    covered: dict[str, set[int]] = {
-        name: set(range(1, len(workspace[name].splitlines()) + 1)) for name in required
-    }
+    # Review roles read for themselves and check before submit: giving them the documents
+    # up front and dropping check weakened the independent review in a blind comparison.
+    reviewer = role in REVIEW_ROLES
+    covered: dict[str, set[int]] = {}
+    task: dict[str, object] = {"required": required, "documents": _index(workspace)}
+    if reviewer:
+        task["task"] = (
+            f"Role: {role}. Inspect the document index, read every required document fully, "
+            "then check and submit."
+        )
+    else:
+        task["task"] = (
+            f"Role: {role}. The full text of every required document is in required_documents. "
+            "Use the document index for the other documents, then submit."
+        )
+        task["required_documents"] = {
+            name: "\n".join(
+                f"{n}: {line}" for n, line in enumerate(workspace[name].splitlines(), 1)
+            )
+            for name in required
+        }
+        covered = {name: set(range(1, len(workspace[name].splitlines()) + 1)) for name in required}
     messages = [
         {"role": "system", "content": prompt(role, pack)},
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "task": task_text,
-                    "required": required,
-                    "required_documents": {
-                        name: "\n".join(
-                            f"{n}: {line}" for n, line in enumerate(workspace[name].splitlines(), 1)
-                        )
-                        for name in required
-                    },
-                    "documents": _index(workspace),
-                },
-                ensure_ascii=False,
-            ),
-        },
+        {"role": "user", "content": json.dumps(task, ensure_ascii=False)},
     ]
     tools = [
         _tool("submit", "Submit the final scientific output", AgentOutput.model_json_schema()),
@@ -331,6 +330,14 @@ def run_specialist(
             },
         ),
     ]
+    if reviewer:
+        tools.append(
+            _tool(
+                "check",
+                "Advisory: report every problem submit would reject, without submitting",
+                AgentOutput.model_json_schema(),
+            )
+        )
     if role in CALCULATING_ROLES:
         tools.append(
             _tool(
@@ -457,7 +464,8 @@ def run_specialist(
                     "role": "user",
                     "content": "Plain-text replies are discarded. Put your document in submit "
                     "(markdown and the other fields), or continue with read, search, source"
-                    + (" or calculate." if role in CALCULATING_ROLES else "."),
+                    + (", calculate" if role in CALCULATING_ROLES else "")
+                    + (" or check." if reviewer else "."),
                 }
             )
         submission = None
@@ -467,7 +475,10 @@ def run_specialist(
                 args = json.loads(call.arguments)
                 if not isinstance(args, dict):
                     raise ValueError("Tool arguments must be a JSON object")
-                if call.name == "submit":
+                if call.name == "check" and reviewer:
+                    _, problems = _problems(args, workspace, required, covered, accepted_refs)
+                    result = {"ok": not problems, "problems": problems}
+                elif call.name == "submit":
                     output, problems = _problems(args, workspace, required, covered, accepted_refs)
                     if (
                         output is not None

@@ -1,6 +1,7 @@
 """Scientific responsibilities without a prescribed methodology or template."""
 
 from experiment_design.packs import Pack
+from experiment_design.vocabulary import REVIEW_ROLES
 
 _COMMON = """You are a bounded workspace agent. Your first message gives a goal and an index of
 named documents (name, line count, first line) and the full numbered text of every
@@ -15,6 +16,47 @@ evidence of a value;
 document only inside submit; a plain-text reply is discarded. Submit is
 rejected unless every required document is fully read; the required documents are
 already given in full. Evidence comes only from the
+supplied documents; there is no web or external literature search.
+Use exact supplied hypothesis, constraints, documents and actual researcher ANSWERs.
+Preserve source-fixed methodology and confirmed intent. The source may state several
+hypotheses; each keeps its own claim, prediction and decision or failure rule. Never
+drop, merge or reword a stated hypothesis silently; excluding or deferring one is a
+researcher decision. A multiplicity adjustment changes stated decision rules, so offer
+it only as a labelled proposal. When a material defect can be resolved only by the
+researcher (a stated hypothesis or decision rule that is ambiguous or contradicts itself),
+revision cannot fix it: set needs_input and ask one concrete question with options,
+unless your role says not to ask. A researcher ANSWER that states a rule or choice
+supersedes the conflicting source text and research_brief; apply it and never ask again
+what actual researcher answers already settle. Proposals and CLARIFY questions
+are not researcher answers. Choose scientific methods freely; compare alternatives and
+competing explanations. Explain assumptions, limitations and unsupported numerical
+claims. Do not invent evidence, computations, quotations, replies or approval. Source
+citations must be identifiable in supplied documents. Calculation coverage does not
+determine method suitability. Write scientific content as readable Markdown in the input
+language, with no internal IDs or workflow metadata.
+The primary reader of the plan is a downstream AI agent on an AI-scientist platform that
+will implement and run the experiment; humans review and adjust. Write the plan so that
+agent can implement it without guessing: concrete procedure, materials and data,
+measurements and how they are recorded, prespecified analysis, decision rules. When an
+implementation detail is not supplied, propose a concrete, justified default and label it
+"Proposal — confirm before launch"; that is the designer's job, not a researcher
+question. Treat ambiguity that would force a downstream agent to guess as a material gap;
+a clearly labelled, reasonable proposal is not such a gap.
+"""
+
+# Review roles read their documents themselves and check before submit: giving them the
+# documents up front and dropping check made the independent review measurably weaker.
+_COMMON_REVIEW = """You are a bounded workspace agent. Your first message gives a goal and an
+index of named documents (name, line count, first line), not their content. Work like this:
+inspect the index; turns are limited, so in your first turn call read once with names
+listing every required document; use search to find passages; before citing spans in
+findings, call source once with quotes listing every verbatim span you will cite (not
+line numbers), and cite only the refs it returns, in findings evidence_refs and never in
+the Markdown (there, name the document or quote it); only supplied sources count as
+evidence of a value;
+{calculate}run check on your draft output; then submit. Deliver your
+document only inside submit; a plain-text reply is discarded. Submit is
+rejected until every required document is fully read. Evidence comes only from the
 supplied documents; there is no web or external literature search.
 Use exact supplied hypothesis, constraints, documents and actual researcher ANSWERs.
 Preserve source-fixed methodology and confirmed intent. The source may state several
@@ -163,7 +205,8 @@ def prompt(role: str, pack: Pack | None = None) -> str:
     text = (
         _ROLES[role]
         if role in _SUBMIT_ONLY
-        else _COMMON.replace("{calculate}", calculate) + _ROLES[role]
+        else (_COMMON_REVIEW if role in REVIEW_ROLES else _COMMON).replace("{calculate}", calculate)
+        + _ROLES[role]
     )
     if role not in _SUBMIT_ONLY:
         text += (

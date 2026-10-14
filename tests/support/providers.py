@@ -31,7 +31,7 @@ def read_documents(messages) -> dict[str, str]:
 
 
 class Reader:
-    """Reads any document still not covered before the scripted answer; required ones come given."""
+    """Reads every required document not given up front before the scripted answer."""
 
     def __init__(self):
         self.inputs = []
@@ -43,7 +43,8 @@ class Reader:
             self.starts.append(len(self.inputs) - 1)
         task = json.loads(messages[1]["content"])
         covered: dict[str, set[int]] = {
-            name: set(range(1, totals_of(task, name) + 1)) for name in task["required"]
+            name: set(range(1, totals_of(task, name) + 1))
+            for name in task.get("required_documents", {})
         }
         for message in messages:
             if message["role"] == "tool":
