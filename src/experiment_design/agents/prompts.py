@@ -156,6 +156,13 @@ _SUBMIT_ONLY = frozenset({"indexer", "surveyor", "selector", "profile_inference"
 
 def prompt(role: str, pack: Pack | None = None) -> str:
     text = _ROLES[role] if role in _SUBMIT_ONLY else _COMMON + _ROLES[role]
+    if role not in _SUBMIT_ONLY:
+        text += (
+            " Every researcher question must have 2-4 distinct plain-text options and "
+            "default (a 1-based option number). Revision responses must contain exactly one "
+            "{finding_id, outcome: fixed|rebutted|not_fixed, note} for every revision_findings "
+            "entry. Rebutted and not_fixed require grounds in note. Never infer resolution."
+        )
     if pack is None:
         return text
     additions = [pack.role_addenda.get(role, "")]

@@ -177,7 +177,12 @@ def test_revision_question_goes_to_the_researcher_before_any_rejoinder(tmp_path)
     store = store_for(tmp_path)
     outputs = happy_outputs()[:4]
     outputs[2]["findings"] = [MAJOR]
-    ask = {"markdown": "Revised plan", "needs_input": True, "question": "Which control?"}
+    ask = {
+        "markdown": "Revised plan",
+        "needs_input": True,
+        "question": "Which control?",
+        "options": ["Sham", "Usual care"],
+    }
     provider = Provider([*outputs, ask])
     state = advance(store, provider, Judge(), RunConfig())
     assert state.status == "AWAITING_RESEARCHER"
@@ -211,7 +216,11 @@ class AskJudge:
 def test_answer_to_a_critic_question_resumes_at_revision(tmp_path):
     store = store_for(tmp_path)
     outputs = happy_outputs()[:4]
-    outputs[2] |= {"findings": [MAJOR], "question": "Which control?"}
+    outputs[2] |= {
+        "findings": [MAJOR],
+        "question": "Which control?",
+        "options": ["Sham", "Usual care"],
+    }
     state = advance(store, Provider(outputs), AskJudge(), RunConfig())
     assert (state.status, state.stage) == ("AWAITING_RESEARCHER", 4)
     respond(store, action="ANSWER", text="Sham", researcher="R", revision=state.attempt)
@@ -229,7 +238,7 @@ def test_answer_to_a_critic_question_resumes_at_revision(tmp_path):
 def test_answer_to_a_final_check_question_revises_with_its_objections(tmp_path):
     store = store_for(tmp_path)
     outputs = happy_outputs()
-    outputs[4] |= {"question": "Which margin?"}
+    outputs[4] |= {"question": "Which margin?", "options": ["Three points", "Five points"]}
     state = advance(store, Provider(outputs), AskJudge(), RunConfig())
     assert (state.status, state.stage) == ("AWAITING_RESEARCHER", 5)
     respond(store, action="ANSWER", text="Three points", researcher="R", revision=state.attempt)

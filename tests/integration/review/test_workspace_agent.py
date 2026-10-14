@@ -321,7 +321,8 @@ def test_option_out_of_range_is_rejected(tmp_path, option):
 
 
 def test_option_rejected_when_no_options_are_stored(tmp_path):
-    store = asked(tmp_path, options=())
+    store = asked(tmp_path)
+    store.update(question_options=[])  # historical checkpoint, before mandatory options
     assert store.state.question_options == []
     with pytest.raises(WorkflowError, match="Option"):
         respond(store, action="ANSWER", text="", researcher="R", revision=1, option=1)

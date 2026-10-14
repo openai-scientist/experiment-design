@@ -183,9 +183,10 @@ def _ask(store: RunStore, outputs: list[AgentOutput]) -> None:
     asking = [o for o in outputs if o.question.strip()]
     store.update(
         status="AWAITING_RESEARCHER",
-        question="\n".join(questions),
+        question=asking[0].question,
         question_kind="ANSWER",
-        question_options=asking[0].options if len(asking) == 1 else [],
+        question_options=asking[0].options,
+        question_default=asking[0].default,
     )
 
 

@@ -8,7 +8,12 @@ from pydantic import ValidationError
 
 from experiment_design.agents.prompts import prompt
 from experiment_design.config import RunConfig
-from experiment_design.contracts import AgentOutput, CalculationRequest, WorkflowError
+from experiment_design.contracts import (
+    AgentOutput,
+    CalculationRequest,
+    RevisionDisposition,
+    WorkflowError,
+)
 from experiment_design.packs import Pack
 from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.llm import LLMClient
@@ -334,6 +339,7 @@ def run_specialist(
     ]
     task_tokens = sum(e["tokens"] or 0 for e in prior)
     attempts_used = len(prior)
+    contract_rejections = 0
     for turn in range(len(prior), cfg.task_max_turns):
         if (
             task_tokens >= cfg.task_max_tokens
@@ -432,6 +438,7 @@ def run_specialist(
                 }
             )
         submission = None
+        contract_failure = False
         for call in response.tool_calls:
             try:
                 args = json.loads(call.arguments)
@@ -439,6 +446,46 @@ def run_specialist(
                     raise ValueError("Tool arguments must be a JSON object")
                 if call.name in {"submit", "check"}:
                     output, problems = _problems(args, workspace, required, covered, accepted_refs)
+                    expected = (
+                        [f["finding_id"] for f in json.loads(workspace["revision_findings"])]
+                        if role == "revision" and "revision_findings" in workspace
+                        else []
+                    )
+                    missing_responses = []
+                    if output is not None and expected:
+                        received = [r.finding_id for r in output.responses]
+                        if len(received) != len(set(received)) or set(received) - set(expected):
+                            problems.append("revision responses must name each input finding once")
+                        missing_responses = [f for f in expected if f not in received]
+                    contract_problem = (
+                        (
+                            output is None
+                            and (
+                                args.get("question")
+                                or args.get("needs_input")
+                                or role == "revision"
+                            )
+                        )
+                        or missing_responses
+                        or any("revision responses" in p for p in problems)
+                    )
+                    if call.name == "submit" and contract_problem:
+                        contract_rejections += 1
+                        if contract_rejections >= 2 and missing_responses and not problems:
+                            output.responses.extend(
+                                RevisionDisposition(
+                                    finding_id=f,
+                                    outcome="not_fixed",
+                                    note="no response from reviser",
+                                )
+                                for f in missing_responses
+                            )
+                        elif missing_responses:
+                            problems.append(
+                                "Missing revision responses: " + ", ".join(missing_responses)
+                            )
+                        if contract_rejections >= 2 and problems:
+                            contract_failure = True
                     if call.name == "check":
                         result = {"ok": not problems, "problems": problems}
                     else:
@@ -540,6 +587,8 @@ def run_specialist(
                     "content": json.dumps(result, ensure_ascii=False),
                 }
             )
+        if contract_failure:
+            raise WorkflowError("Invalid question or revision response after one retry")
         if submission is not None:
             store.event("agent.accepted", {"task": task})
             return submission

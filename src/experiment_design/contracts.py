@@ -51,6 +51,18 @@ class Finding(Record):
     evidence_refs: list[str] = Field(default_factory=list)
 
 
+class RevisionDisposition(Record):
+    finding_id: str
+    outcome: Literal["fixed", "rebutted", "not_fixed"]
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def grounds_required(self) -> "RevisionDisposition":
+        if self.outcome != "fixed" and not (self.note or "").strip():
+            raise ValueError("rebutted/not_fixed require a note")
+        return self
+
+
 class AgentOutput(Record):
     markdown: str
     findings: list[Finding] = Field(default_factory=list)
@@ -58,6 +70,8 @@ class AgentOutput(Record):
     question: str = ""
     recommended_action: str = ""
     options: list[str] = Field(default_factory=list)
+    default: int = Field(default=1, ge=1, le=4)
+    responses: list[RevisionDisposition] = Field(default_factory=list)
 
     @field_validator("markdown")
     @classmethod
@@ -81,6 +95,8 @@ class AgentOutput(Record):
     @model_validator(mode="after")
     def valid_options(self) -> "AgentOutput":
         if not self.options:
+            if self.question.strip():
+                raise ValueError("question requires 2 to 4 options")
             return self
         if not self.question.strip():
             raise ValueError("options require a nonblank question")
@@ -90,6 +106,8 @@ class AgentOutput(Record):
             raise ValueError("options must not be blank")
         if len({option.strip().casefold() for option in self.options}) != len(self.options):
             raise ValueError("options must be distinct")
+        if self.default > len(self.options):
+            raise ValueError("question default must select a listed option")
         return self
 
 
@@ -112,6 +130,7 @@ class RunState(Record):
     question: str = ""
     question_kind: str = ""
     question_options: list[str] = Field(default_factory=list)
+    question_default: int = Field(default=1, ge=1, le=4)
 
 
 class Quantity(Record):

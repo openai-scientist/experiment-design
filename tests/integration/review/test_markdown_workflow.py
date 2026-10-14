@@ -118,7 +118,14 @@ def test_material_final_gap_exhausted_allowance_is_incomplete(tmp_path):
 def test_missing_core_answer_bound_and_preserved(tmp_path):
     store = store_for(tmp_path)
     first = Provider(
-        [{"markdown": "Need population", "needs_input": True, "question": "Which population?"}]
+        [
+            {
+                "markdown": "Need population",
+                "needs_input": True,
+                "question": "Which population?",
+                "options": ["Adults", "Children"],
+            }
+        ]
     )
     state = advance(store, first, Judge(), RunConfig())
     assert state.status == "AWAITING_RESEARCHER"
