@@ -11,6 +11,7 @@ from experiment_design.config import RunConfig
 from experiment_design.contracts import (
     AgentOutput,
     CalculationRequest,
+    ReviewerError,
     RevisionDisposition,
     WorkflowError,
 )
@@ -19,6 +20,7 @@ from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.science.evidence import supports_number
 from experiment_design.science.registry import LEGACY_CALCULATORS, calculate
+from experiment_design.vocabulary import REVIEW_ROLES
 
 _READ_LINES = 400
 _READ_CAP = 1000
@@ -352,6 +354,8 @@ def run_specialist(
             configured = (
                 getattr(getattr(llm, "cfg", None), "max_retries", cfg.task_max_turns - 1) + 1
             )
+            if role in REVIEW_ROLES:
+                configured = min(configured, 2)
             llm.max_attempts = min(configured, cfg.task_max_turns - attempts_used)
         canonical = json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         store.event(
@@ -410,6 +414,8 @@ def run_specialist(
             store.update(status="USAGE_UNKNOWN", usage_unknown=True)
             raise WorkflowError("Provider usage is unknown") from failure
         if failure:
+            if role in REVIEW_ROLES:
+                raise ReviewerError("Reviewer call failed after retry") from failure
             raise WorkflowError("Provider call failed") from failure
         if (
             task_tokens > cfg.task_max_tokens
@@ -468,6 +474,7 @@ def run_specialist(
                         )
                         or missing_responses
                         or any("revision responses" in p for p in problems)
+                        or (role in REVIEW_ROLES and problems)
                     )
                     if call.name == "submit" and contract_problem:
                         contract_rejections += 1
@@ -588,6 +595,8 @@ def run_specialist(
                 }
             )
         if contract_failure:
+            if role in REVIEW_ROLES:
+                raise ReviewerError("Invalid reviewer submission after one retry")
             raise WorkflowError("Invalid question or revision response after one retry")
         if submission is not None:
             store.event("agent.accepted", {"task": task})

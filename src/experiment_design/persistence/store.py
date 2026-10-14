@@ -151,6 +151,33 @@ class RunStore:
     def config(self) -> dict:
         return json.loads((self.path / "config.json").read_text(encoding="utf-8"))
 
+    def bound_findings(self, stage: int, name: str, round: int) -> list[dict]:
+        """Assign persistent IDs to records bound to exact review bytes and their round."""
+        text = self.read(stage, name)
+        source = f"{round}:{stage}/{name}:" + hashlib.sha256(text.encode()).hexdigest()
+        known = {
+            e["data"]["binding"]: e["data"]["finding_id"]
+            for e in self.events()
+            if e["kind"] == "finding.mapped"
+        }
+        result = []
+        for i, finding in enumerate(json.loads(text).get("findings", [])):
+            binding = f"{source}:{i}"
+            if binding not in known:
+                count = sum(v.startswith(f"F{round}-") for v in known.values())
+                known[binding] = f"F{round}-{count + 1}"
+                self.event(
+                    "finding.mapped",
+                    {
+                        "binding": binding,
+                        "finding_id": known[binding],
+                        "raw_id": finding["id"],
+                        "round": round,
+                    },
+                )
+            result.append({**finding, "finding_id": known[binding]})
+        return result
+
     def set_run_limits(self, limits: dict) -> None:
         config = self.config()
         config["run"] = {**(config.get("run") or {}), **limits}

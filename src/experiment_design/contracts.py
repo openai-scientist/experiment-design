@@ -10,6 +10,10 @@ class WorkflowError(ValueError):
     pass
 
 
+class ReviewerError(WorkflowError):
+    """A known-usage reviewer failure, distinct from a budget stop."""
+
+
 class RunInterrupted(Exception):
     """A cancel or pause request reached the workflow; not a workflow failure."""
 

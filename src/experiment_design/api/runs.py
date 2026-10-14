@@ -43,6 +43,7 @@ from experiment_design.api.contract_models import (
     RunState,
     is_compatible,
 )
+from experiment_design.api.findings import review_findings
 from experiment_design.api.inputs import InputError, fetch_inputs
 from experiment_design.api.mapping import failure_of, open_gate, step_key
 from experiment_design.api.observability import SECRETS
@@ -526,7 +527,7 @@ class RunManager:
         with run.lock:
             if state.status == "PUBLISHED":
                 self._deliver_published(run)
-            elif state.status == "PENDING_REVIEW":
+            elif state.status in {"PENDING_REVIEW", "REVIEW_ERROR"}:
                 self._open_review_gate(run)
             elif state.status == "AWAITING_RESEARCHER":
                 if run.mode in {InteractionMode.copilot, InteractionMode.full}:
@@ -555,10 +556,57 @@ class RunManager:
         store = run.store
         data = store.read(store.state.plan_stage, store.state.plan_name).encode("utf-8")
         artifact_id = self._upload_plan(run, data, primary=False, metadata={})
+        self._deliver_review(run, artifact_id)
         gate = open_gate(store, artifact_ids=[artifact_id], mode=run.mode)
         if gate is None:
             return
         self._set_gate(run, gate)
+
+    def _deliver_review(self, run: _Run, artifact_id: str) -> None:
+        store = run.store
+        if store.state.status == "REVIEW_ERROR":
+            self._emit(
+                run,
+                "review.completed",
+                {
+                    "round": store.state.attempt,
+                    "passed": False,
+                    "artifact_id": None,
+                    "error": "Reviewer failed after one retry",
+                },
+            )
+            return
+        report = review_findings(
+            store,
+            round=store.state.attempt,
+            artifact_id=artifact_id,
+            reviewer_model=run.cfg.review_llm.model,
+        )
+        body = report.model_dump_json(by_alias=True).encode()
+        report_id = self._upload_artifact(run, "review.findings/v1", "review_findings.json", body)
+        self._emit(
+            run,
+            "review.completed",
+            {"round": report.round, "passed": report.passed, "artifact_id": report_id},
+        )
+
+    def _upload_artifact(self, run: _Run, schema_id: str, name: str, body: bytes) -> str:
+        meta = ArtifactMeta(
+            schema_id=schema_id,
+            version=self._next_version(run),
+            filename=name,
+            media_type="application/json",
+            sha256=hashlib.sha256(body).hexdigest(),
+            primary=False,
+            review_round=run.store.state.attempt,
+        )
+        result = self._push(run, meta, body)
+        self._emit(
+            run,
+            "artifact.delivered",
+            {"artifact_id": result, "schema": schema_id, "version": meta.version, "primary": False},
+        )
+        return result
 
     def _set_gate(self, run: _Run, gate: Gate | None) -> None:
         if gate is None:

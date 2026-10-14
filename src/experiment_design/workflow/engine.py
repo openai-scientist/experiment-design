@@ -10,9 +10,16 @@ from pathlib import Path
 from experiment_design.agents.prompts import snapshot
 from experiment_design.agents.tools import run_specialist
 from experiment_design.config import ExdConfig, RunConfig
-from experiment_design.contracts import AgentOutput, RunInterrupted, RunState, WorkflowError
+from experiment_design.contracts import (
+    AgentOutput,
+    ReviewerError,
+    RunInterrupted,
+    RunState,
+    WorkflowError,
+)
 from experiment_design.packs import load_pack
 from experiment_design.packs.infer import infer_research_type
+from experiment_design.persistence.api_state import read_run_meta
 from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
@@ -181,11 +188,12 @@ def _ask(store: RunStore, outputs: list[AgentOutput]) -> None:
     if not questions:
         raise WorkflowError("ASK_RESEARCHER requires a concrete agent question")
     asking = [o for o in outputs if o.question.strip()]
+    legacy_combined = len(asking) > 1 and not read_run_meta(store.path).get("platform_run_id")
     store.update(
         status="AWAITING_RESEARCHER",
-        question=asking[0].question,
+        question="\n".join(questions) if legacy_combined else asking[0].question,
         question_kind="ANSWER",
-        question_options=asking[0].options,
+        question_options=[] if legacy_combined else asking[0].options,
         question_default=asking[0].default,
     )
 
@@ -537,6 +545,15 @@ def advance(
             return store.state
         try:
             return _advance(store, llm, judge, cfg, review_llm, hold_at_review, integrations)
+        except ReviewerError:
+            if not hold_at_review:
+                store.update(status="STOPPED")
+                raise
+            store.event(
+                "review.error",
+                {"attempt": store.state.attempt, "error": "Reviewer failed after one retry"},
+            )
+            return store.update(status="REVIEW_ERROR", review_complete=False)
         except WorkflowError as exc:
             if store.state.status != "USAGE_UNKNOWN":
                 store.update(status="STOPPED")

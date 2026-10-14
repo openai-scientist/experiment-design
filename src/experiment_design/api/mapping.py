@@ -26,6 +26,7 @@ _STATUS_PHASE = {
     "PAUSED": Phase.paused,
     "PENDING_REVIEW": Phase.awaiting_researcher,
     "REQUESTED_CHANGES": Phase.revising,
+    "REVIEW_ERROR": Phase.awaiting_researcher,
 }
 _FAILURES = {
     "REJECTED": ("rejected", "The researcher rejected the plan."),
@@ -77,7 +78,7 @@ def open_gate(
             default_option_id=f"o{state.question_default}",
             opened_at=datetime.now(UTC),
         )
-    if state.status == "PENDING_REVIEW" and state.stage == 6:
+    if (state.status == "PENDING_REVIEW" and state.stage == 6) or state.status == "REVIEW_ERROR":
         return Gate(
             gate_id=f"g{state.attempt}-s6-review",
             kind=GateKind.artifact_review,
