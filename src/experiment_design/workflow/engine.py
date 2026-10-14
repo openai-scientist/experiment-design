@@ -522,7 +522,7 @@ def _rejoinders(
             }
             | own
         )
-        required = [HYPOTHESES_INPUT, "plan", "plan_diff", "response", "revision_responses", *own]
+        required = [HYPOTHESES_INPUT, "plan", "plan_diff", "response", *own]
         _agent(store, llm, cfg, name, 4, name, workspace, required, review_llm=review_llm)
 
 
