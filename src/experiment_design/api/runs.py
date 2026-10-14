@@ -80,6 +80,7 @@ from experiment_design.workflow.engine import (
 )
 
 logger = logging.getLogger("experiment_design.api")
+_STOPPED_STATUSES = {"STOPPED", "USAGE_UNKNOWN", "REJECTED", "CANCELLED", "FAILED"}
 
 LlmFactory = Callable[[LLMConfig, str, ModelRole, Callable[[dict], None]], Any]
 JudgeFactory = Callable[[JevConfig, str], Judge]
@@ -504,8 +505,12 @@ class RunManager:
                     self._interrupted(run, exc.kind)
                 except StageClosed:
                     self._stage_closed(run)
-                except WorkflowError:
-                    pass  # advance stopped the run; the projector announced run.failed
+                except WorkflowError as exc:
+                    # advance stops the run itself and the projector announces run.failed;
+                    # any other WorkflowError would leave the run waiting with no gate.
+                    if run.store.state.status not in _STOPPED_STATUSES:
+                        logger.exception("workflow error in run %s", run.engine_run_id)
+                        self._fail(run, "internal_error", str(exc))
                 except (LLMError, JudgeError, CallbackError, ConfigError) as exc:
                     self._fail(run, _failure_code(exc), _failure_message(exc))
                 except Exception:  # a dead worker thread would leave the run stuck RUNNING

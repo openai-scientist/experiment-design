@@ -734,6 +734,11 @@ def advance(
             if not hold_at_review:
                 store.update(status="STOPPED")
                 raise
+            if store.state.plan_stage is None:
+                # A re-review failed before a plan was current: there is nothing to present.
+                store.update(status="STOPPED")
+                store.event("workflow.stop", {"reason": "Reviewer failed after two retries"})
+                raise
             store.event(
                 "review.error",
                 {"attempt": store.state.attempt, "error": "Reviewer failed after two retries"},

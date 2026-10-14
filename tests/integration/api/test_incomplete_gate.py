@@ -201,3 +201,61 @@ def test_comment_after_reviewer_failure_is_accepted(tmp_path):
     events = manager._runs[run_id].store.events()
     actions = [e["data"]["action"] for e in events if e["kind"] == "researcher.response"]
     assert actions[-1] == "REQUEST_CHANGES"
+
+
+class SkepticBreaksLater(EndlessProvider):
+    """skeptic submits a malformed finding once ``broken`` is set."""
+
+    broken = False
+
+    def complete(self, messages, tools):
+        response = super().complete(messages, tools)
+        task = json.loads(messages[1]["content"])
+        call = response.tool_calls[0] if response.tool_calls else None
+        if (
+            SkepticBreaksLater.broken
+            and call
+            and call.name == "submit"
+            and "Role: skeptic." in task.get("task", "")
+        ):
+            call.arguments = json.dumps(json.loads(call.arguments) | {"findings": [{"id": "x"}]})
+            return LLMResponse(content=None, tool_calls=[call], tokens_in=1, tokens_out=1)
+        return response
+
+
+def test_reviewer_failure_on_re_review_fails_the_run_instead_of_hanging(tmp_path):
+    def factory(cfg, key, review_role, on_call):
+        record = lambda: on_call({"role": review_role.value, "model": cfg.model, "outcome": "ok"})  # noqa: E731
+        return SkepticBreaksLater(record)
+
+    SkepticBreaksLater.broken = False
+    manager, platform, _ = _manager(tmp_path, llm_factory=factory)
+    run_id = manager.create(
+        make_request(platform, stage_run_id="sr1", mode="copilot")
+    ).engine_run_id
+    assert manager.wait_idle(run_id)
+    state = manager.state(run_id)
+    while "-s6-" not in state.open_gate.gate_id:
+        gate = state.open_gate
+        if gate.kind is GateKind.question:
+            answer = GateAnswer(
+                action="answer", option_id=gate.default_option_id, actor="user", decided_by="u1"
+            )
+        else:
+            answer = GateAnswer(action="approve", actor="user", decided_by="u1")
+        manager.answer(run_id, gate.gate_id, answer)
+        assert manager.wait_idle(run_id)
+        state = manager.state(run_id)
+    SkepticBreaksLater.broken = True
+    try:
+        manager.answer(
+            run_id,
+            state.open_gate.gate_id,
+            GateAnswer(action="comment", actor="user", decided_by="u2", findings=[FINDING]),
+        )
+        assert manager.wait_idle(run_id)
+    finally:
+        SkepticBreaksLater.broken = False
+    state = manager.state(run_id)
+    assert state.phase is Phase.failed
+    assert state.open_gate is None
