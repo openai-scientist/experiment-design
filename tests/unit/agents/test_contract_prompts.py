@@ -91,3 +91,24 @@ def test_wire_revision_mapping_preserves_rebuttal(tmp_path):
     response = revision_response(store, round=1, before_id="old", after_id="new")
     assert response.items[0].outcome == "rebutted"
     assert response.items[0].note == "Confirmed comparison retained"
+
+
+def test_revision_feedback_names_unknown_and_repeated_finding_ids(tmp_path):
+    response = {"finding_id": "F1-1", "outcome": "fixed", "note": "Added"}
+    bad = {
+        "markdown": "Revised",
+        "responses": [response, response, response | {"finding_id": "F1"}],
+    }
+    good = {"markdown": "Revised", "responses": [response]}
+    provider = Provider([bad, good])
+    run_specialist(
+        "revision",
+        store_for(tmp_path),
+        provider,
+        RunConfig(),
+        {"revision_findings": json.dumps([{"finding_id": "F1-1"}])},
+        [],
+    )
+    feedback = json.dumps(provider.inputs[-1], ensure_ascii=False)
+    assert "unknown finding_id: F1" in feedback
+    assert "repeated finding_id: F1-1" in feedback

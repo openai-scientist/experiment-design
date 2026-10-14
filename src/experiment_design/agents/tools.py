@@ -460,8 +460,14 @@ def run_specialist(
                     missing_responses = []
                     if output is not None and expected:
                         received = [r.finding_id for r in output.responses]
-                        if len(received) != len(set(received)) or set(received) - set(expected):
-                            problems.append("revision responses must name each input finding once")
+                        extra = sorted(set(received) - set(expected))
+                        twice = sorted({f for f in received if received.count(f) > 1})
+                        if extra or twice:
+                            problems.append(
+                                "revision responses must name each input finding once"
+                                + (f"; unknown finding_id: {', '.join(extra)}" if extra else "")
+                                + (f"; repeated finding_id: {', '.join(twice)}" if twice else "")
+                            )
                         missing_responses = [f for f in expected if f not in received]
                     contract_problem = (
                         (
