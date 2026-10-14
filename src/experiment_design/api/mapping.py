@@ -7,6 +7,7 @@ from experiment_design.api.contract_models import (
     FailureInfo,
     Gate,
     GateKind,
+    GateOption,
     InteractionMode,
     Phase,
 )
@@ -59,6 +60,23 @@ def open_gate(
 ) -> Gate | None:
     """The gate a held run waits behind; S1 knows only the researcher review of the plan."""
     state = store.state
+    if (
+        state.status == "AWAITING_RESEARCHER"
+        and state.question_kind == "ANSWER"
+        and mode in {InteractionMode.copilot, InteractionMode.full}
+    ):
+        return Gate(
+            gate_id=f"g{state.attempt}-s{state.stage}-q",
+            kind=GateKind.question,
+            step_key=step_key(state.stage),
+            prompt=state.question,
+            options=[
+                GateOption(option_id=f"o{i}", label=label)
+                for i, label in enumerate(state.question_options, 1)
+            ],
+            default_option_id=f"o{state.question_default}",
+            opened_at=datetime.now(UTC),
+        )
     if state.status == "PENDING_REVIEW" and state.stage == 6:
         return Gate(
             gate_id=f"g{state.attempt}-s6-review",

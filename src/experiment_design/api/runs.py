@@ -23,6 +23,7 @@ from experiment_design.api.contract_models import (
     EXD_EXP_PLAN,
     GATE_ACTION_INVALID,
     GATE_NOT_OPEN,
+    GATE_OPTION_INVALID,
     RUN_CLOSED,
     SERVICE_KEY_HEADER,
     TERMINAL_PHASES,
@@ -528,6 +529,10 @@ class RunManager:
             elif state.status == "PENDING_REVIEW":
                 self._open_review_gate(run)
             elif state.status == "AWAITING_RESEARCHER":
+                if run.mode in {InteractionMode.copilot, InteractionMode.full}:
+                    gate = open_gate(run.store, artifact_ids=[], mode=run.mode)
+                    self._set_gate(run, gate)
+                    return False
                 return self._answer_for_system(run)
             elif state.status == "INCOMPLETE":
                 # Part A S2.7 turns this into a researcher gate; until then it is a failure.
@@ -542,7 +547,7 @@ class RunManager:
             text="" if state.question_options else _DEFAULT_ANSWER,
             researcher="system",
             revision=state.attempt,
-            option=1 if state.question_options else None,
+            option=state.question_default if state.question_options else None,
         )
         return True
 
@@ -553,13 +558,18 @@ class RunManager:
         gate = open_gate(store, artifact_ids=[artifact_id], mode=run.mode)
         if gate is None:
             return
+        self._set_gate(run, gate)
+
+    def _set_gate(self, run: _Run, gate: Gate | None) -> None:
+        if gate is None:
+            return
         run.gate = gate
-        update_run_meta(store.path, gate=gate.model_dump(mode="json"))
+        update_run_meta(run.store.path, gate=gate.model_dump(mode="json"))
         self._emit(
             run,
             "run.gate_opened",
             gate.model_dump(mode="json"),
-            phase=Phase.awaiting_researcher,
+            phase=run.phase,
             step=gate.step_key,
         )
 
@@ -674,8 +684,16 @@ class RunManager:
                 raise ConflictError(GATE_NOT_OPEN, "no such gate is open")
             if run.phase is Phase.paused:
                 raise ConflictError(GATE_NOT_OPEN, "the run is paused")
-            if gate.kind is not GateKind.artifact_review or answer.action == "answer":
-                raise RequestRejected(GATE_ACTION_INVALID, "this gate takes approve or comment")
+            if (gate.kind is GateKind.question) != (answer.action == "answer"):
+                raise RequestRejected(GATE_ACTION_INVALID, "action does not match gate kind")
+            option = None
+            if gate.kind is GateKind.question:
+                option = next(
+                    (i for i, o in enumerate(gate.options, 1) if o.option_id == answer.option_id),
+                    None,
+                )
+                if option is None:
+                    raise RequestRejected(GATE_OPTION_INVALID, "select a listed option")
             researcher = (
                 answer.decided_by.strip()
                 if answer.actor == "user" and answer.decided_by and answer.decided_by.strip()
@@ -683,7 +701,16 @@ class RunManager:
             )
             state = run.store.state
             try:
-                if answer.action == "approve":
+                if answer.action == "answer":
+                    respond(
+                        run.store,
+                        action="ANSWER",
+                        option=option,
+                        text=answer.text or "",
+                        researcher=researcher,
+                        revision=state.attempt,
+                    )
+                elif answer.action == "approve":
                     respond(
                         run.store,
                         action="APPROVE",

@@ -126,7 +126,10 @@ def create_app(settings: ApiSettings, *, manager: RunManager | None = None) -> F
             steps=[
                 StepInfo(step_key=k, label=label, order=i) for i, (k, label) in enumerate(STEPS, 1)
             ],
-            question_gates={},
+            question_gates={
+                mode: ["s2_framing", "s3_design", "s4_review", "s5_final_check"]
+                for mode in ("copilot", "full")
+            },
             activity_types=list(ACTIVITY_TYPES),
             integrations=list(INTEGRATIONS),
             optional_integrations=list(OPTIONAL_INTEGRATIONS),
