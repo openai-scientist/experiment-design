@@ -265,7 +265,13 @@ def _critic_options(
 
 
 def _final_review_names(store: RunStore) -> list[str]:
-    optional = ("final_objections", "plan_diff", "methodologist_rejoinder", "skeptic_rejoinder")
+    optional = (
+        "final_objections",
+        "plan_diff",
+        "revision_responses",
+        "methodologist_rejoinder",
+        "skeptic_rejoinder",
+    )
     return ["methodologist_review", "skeptic_review", "response"] + [
         name for name in optional if (store.path / "stage-04" / (name + ".md")).is_file()
     ]
@@ -401,6 +407,7 @@ def _revision(
     review_llm: LLMClient | None = None,
 ) -> None:
     old_plan = _revision_input_plan(store)
+    objections = _with_finding_records(store, objections)
     store.event(
         "revision.pending",
         {"attempt": store.state.attempt, "plan": old_plan, "objections": objections},
@@ -408,6 +415,20 @@ def _revision(
     store.update(refinements=store.state.refinements + 1)
     store.archive_from(4)
     _run_revision(store, llm, cfg, old_plan, objections, review_llm)
+
+
+def _with_finding_records(store: RunStore, objections: dict[str, str]) -> dict[str, str]:
+    records = []
+    for stage, name in (
+        (4, "methodologist_review.json"),
+        (4, "skeptic_review.json"),
+        (5, "final_review.json"),
+    ):
+        try:
+            records.extend(store.bound_findings(stage, name, store.state.attempt))
+        except FileNotFoundError:
+            continue
+    return objections | {"revision_findings": json.dumps(records, ensure_ascii=False)}
 
 
 def _plan_diff(old_plan: str, revised_plan: str) -> str:
@@ -463,10 +484,11 @@ def _rejoinders(
                 "plan": store.read(4, "revised_plan.md"),
                 "plan_diff": store.read(4, "plan_diff.md"),
                 "response": store.read(4, "response.md"),
+                "revision_responses": store.read(4, "revision_responses.md"),
             }
             | own
         )
-        required = [HYPOTHESES_INPUT, "plan", "plan_diff", "response", *own]
+        required = [HYPOTHESES_INPUT, "plan", "plan_diff", "response", "revision_responses", *own]
         _agent(store, llm, cfg, name, 4, name, workspace, required, review_llm=review_llm)
 
 
@@ -499,6 +521,11 @@ def _run_revision(
         for name, text in objections.items():
             store.write(4, name + ".md", text)
         store.write(4, "response.md", _response(output))
+        store.write(
+            4,
+            "revision_responses.md",
+            json.dumps([r.model_dump() for r in output.responses], ensure_ascii=False, indent=2),
+        )
         store.write(4, "plan_diff.md", _plan_diff(old_plan, output.markdown))
         asking = output.needs_input and bool(output.question.strip())
         store.write(
@@ -508,6 +535,7 @@ def _run_revision(
         "revised_plan.md",
         "revised_plan.json",
         "response.md",
+        "revision_responses.md",
         "plan_diff.md",
         "route.json",
     ] + [name + ".md" for name in objections]
@@ -523,6 +551,23 @@ def _run_revision(
     dependencies = [(1, "hypothesis.md"), (2, "research_brief.md"), (3, "draft_plan.md")]
     store.complete(4, dependencies, outputs)
     _plan(store, 4, "revised_plan.md")
+    if not any(
+        e["kind"] == "revision.completed" and e["data"]["attempt"] == store.state.attempt
+        for e in store.events()
+    ):
+        metadata = json.loads(store.read(4, "revised_plan.json"))
+        store.event(
+            "revision.completed",
+            {
+                "attempt": store.state.attempt,
+                "round": max(1, store.state.attempt - 1),
+                "before": old_plan,
+                "after": store.read(4, "revised_plan.md"),
+                "patch": store.read(4, "plan_diff.md"),
+                "responses": metadata.get("responses", []),
+                "findings": json.loads(objections.get("revision_findings", "[]")),
+            },
+        )
     if not asking:
         store.update(stage=5)
 
@@ -929,6 +974,8 @@ def respond(
         if action == "APPROVE" and (not store.state.review_complete or not store.valid(5)):
             raise WorkflowError("Approval requires current complete independent review")
         resumed = _answer_revision(store) if action == "ANSWER" else None
+        if resumed is not None:
+            resumed["objections"] = _with_finding_records(store, resumed["objections"])
         sources = json.dumps(store.sources(), ensure_ascii=False, sort_keys=True)
         brief = store.read(2, "research_brief.md") if store.valid(2) else ""
         record = {

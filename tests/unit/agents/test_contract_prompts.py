@@ -67,3 +67,27 @@ def test_revision_rebuttal_requires_grounds():
     assert valid.responses[0].outcome == "rebutted"
     with pytest.raises(ValueError):
         AgentOutput(markdown="Revised", responses=[{"finding_id": "F1-1", "outcome": "rebutted"}])
+
+
+def test_wire_revision_mapping_preserves_rebuttal(tmp_path):
+    from experiment_design.api.findings import revision_response
+
+    store = store_for(tmp_path)
+    store.write(
+        4,
+        "revised_plan.json",
+        json.dumps(
+            {
+                "responses": [
+                    {
+                        "finding_id": "F1-1",
+                        "outcome": "rebutted",
+                        "note": "Confirmed comparison retained",
+                    }
+                ]
+            }
+        ),
+    )
+    response = revision_response(store, round=1, before_id="old", after_id="new")
+    assert response.items[0].outcome == "rebutted"
+    assert response.items[0].note == "Confirmed comparison retained"

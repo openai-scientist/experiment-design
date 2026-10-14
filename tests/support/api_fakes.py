@@ -10,7 +10,7 @@ from experiment_design.api.contract_models import (
 )
 from experiment_design.runtime.llm import LLMResponse, ToolCall
 from tests.contract.fake_platform import FakePlatform
-from tests.support.providers import Reader
+from tests.support.providers import Reader, read_documents
 
 SECRET = "sk-test"
 TYPESAFE_SECRET = "tsk-test"
@@ -109,6 +109,21 @@ class EndlessProvider(Reader):
         if not calls:
             self.answers += 1
             body = json.dumps({"markdown": f"Output {self.answers}"})
+            if task.get("task", "").startswith("Role: revision."):
+                records = json.loads(read_documents(messages).get("revision_findings", "[]"))
+                body = json.dumps(
+                    {
+                        "markdown": f"Output {self.answers}",
+                        "responses": [
+                            {
+                                "finding_id": f["finding_id"],
+                                "outcome": "not_fixed",
+                                "note": "Scripted fixture did not supply a disposition",
+                            }
+                            for f in records
+                        ],
+                    }
+                )
             calls = [ToolCall(id=f"submit-{self.answers}", name="submit", arguments=body)]
         return LLMResponse(content=None, tool_calls=calls, tokens_in=2, tokens_out=3)
 

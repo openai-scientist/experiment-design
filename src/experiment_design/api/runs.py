@@ -38,6 +38,8 @@ from experiment_design.api.contract_models import (
     InteractionMode,
     ModelRole,
     Phase,
+    RevisionDiff,
+    RevisionResponse,
     RunCreateRequest,
     RunCreateResponse,
     RunState,
@@ -525,6 +527,7 @@ class RunManager:
             integrations=run.integrations,
         )
         with run.lock:
+            self._deliver_revisions(run)
             if state.status == "PUBLISHED":
                 self._deliver_published(run)
             elif state.status in {"PENDING_REVIEW", "REVIEW_ERROR"}:
@@ -539,6 +542,44 @@ class RunManager:
                 # Part A S2.7 turns this into a researcher gate; until then it is a failure.
                 self._fail(run, "review_incomplete", "The independent review did not complete.")
         return False
+
+    def _deliver_revisions(self, run: _Run) -> None:
+        delivered = read_run_meta(run.store.path).get("revisions", {})
+        for event in run.store.events():
+            if event["kind"] != "revision.completed":
+                continue
+            data = event["data"]
+            key = str(data["attempt"])
+            if key in delivered:
+                continue
+            before_id = self._upload_plan(run, data["before"].encode(), primary=False, metadata={})
+            after_id = self._upload_plan(run, data["after"].encode(), primary=False, metadata={})
+            diff = RevisionDiff(
+                round=data["round"],
+                artifact_before=before_id,
+                artifact_after=after_id,
+                patch=data["patch"],
+            )
+            response = RevisionResponse(
+                round=data["round"],
+                artifact_before=before_id,
+                artifact_after=after_id,
+                items=data["responses"],
+            )
+            self._upload_artifact(
+                run,
+                "revision.diff/v1",
+                "plan_diff.json",
+                diff.model_dump_json(by_alias=True).encode(),
+            )
+            self._upload_artifact(
+                run,
+                "revision.response/v1",
+                "revision_response.json",
+                response.model_dump_json(by_alias=True).encode(),
+            )
+            delivered[key] = {"before": before_id, "after": after_id}
+            update_run_meta(run.store.path, revisions=delivered)
 
     def _answer_for_system(self, run: _Run) -> bool:
         state = run.store.state

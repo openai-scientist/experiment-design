@@ -1,5 +1,6 @@
 """Translate current scientific findings with persistent engine-assigned identities."""
 
+import json
 from contextlib import suppress
 from typing import Literal
 
@@ -7,6 +8,8 @@ from experiment_design.api.contract_models import (
     Anchor,
     FindingCategory,
     ReviewFindings,
+    RevisionItem,
+    RevisionResponse,
 )
 from experiment_design.api.contract_models import (
     Finding as WireFinding,
@@ -77,4 +80,16 @@ def review_findings(
         reviewer_model=reviewer_model,
         findings=[*original, *final],
         passed=not any(f.severity == "blocking" for f in final),
+    )
+
+
+def revision_response(
+    store: RunStore, *, round: int, before_id: str, after_id: str
+) -> RevisionResponse:
+    metadata = json.loads(store.read(4, "revised_plan.json"))
+    return RevisionResponse(
+        round=round,
+        artifact_before=before_id,
+        artifact_after=after_id,
+        items=[RevisionItem.model_validate(r) for r in metadata.get("responses", [])],
     )
