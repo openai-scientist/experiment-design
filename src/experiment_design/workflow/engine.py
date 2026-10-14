@@ -1115,8 +1115,9 @@ def respond(
             raise WorkflowError("Response and researcher identity must be nonblank")
         options = store.state.question_options
         secondary = store.state.question_kind == "REVIEW"
-        # A Platform run that stopped INCOMPLETE waits for the researcher; CLI runs keep the guard.
-        incomplete = store.state.status == "INCOMPLETE" and bool(
+        # A Platform run that stopped INCOMPLETE, or whose reviewer failed, waits for the
+        # researcher; CLI runs keep the guard.
+        incomplete = store.state.status in {"INCOMPLETE", "REVIEW_ERROR"} and bool(
             read_run_meta(store.path).get("platform_run_id")
         )
         if incomplete and action not in {"APPROVE", "REQUEST_CHANGES"}:

@@ -155,3 +155,49 @@ def test_cli_incomplete_guard_unchanged(tmp_path):
         with pytest.raises(WorkflowError):
             respond(store, action=action, text="x", researcher="R", revision=store.state.attempt)
     assert store.state.status == "INCOMPLETE" and store.state.approval != "approved"
+
+
+class BadFinalCheck(EndlessProvider):
+    """final_check always submits a malformed finding, so the reviewer fails after one retry."""
+
+    def complete(self, messages, tools):
+        response = super().complete(messages, tools)
+        task = json.loads(messages[1]["content"])
+        call = response.tool_calls[0] if response.tool_calls else None
+        if call and call.name == "submit" and "Role: final_check." in task.get("task", ""):
+            call.arguments = json.dumps(json.loads(call.arguments) | {"findings": [{"id": "x"}]})
+            return LLMResponse(content=None, tool_calls=[call], tokens_in=1, tokens_out=1)
+        return response
+
+
+def _review_error(tmp_path):
+    def factory(cfg, key, review_role, on_call):
+        record = lambda: on_call({"role": review_role.value, "model": cfg.model, "outcome": "ok"})  # noqa: E731
+        return BadFinalCheck(record)
+
+    manager, platform, _ = _manager(tmp_path, llm_factory=factory)
+    run_id = manager.create(make_request(platform, stage_run_id="sr1", mode="light")).engine_run_id
+    state = _wait(manager, run_id, Phase.awaiting_researcher, gate=True)
+    assert manager.wait_idle(run_id)
+    assert manager._runs[run_id].store.state.status == "REVIEW_ERROR"
+    return manager, run_id, state.open_gate.gate_id
+
+
+def test_approve_after_reviewer_failure_publishes(tmp_path):
+    manager, run_id, gate_id = _review_error(tmp_path)
+    state = manager.answer(
+        run_id, gate_id, GateAnswer(action="approve", actor="user", decided_by="u1")
+    )
+    assert state.phase is Phase.published
+
+
+def test_comment_after_reviewer_failure_is_accepted(tmp_path):
+    manager, run_id, gate_id = _review_error(tmp_path)
+    manager.answer(
+        run_id,
+        gate_id,
+        GateAnswer(action="comment", actor="user", decided_by="u2", findings=[FINDING]),
+    )
+    events = manager._runs[run_id].store.events()
+    actions = [e["data"]["action"] for e in events if e["kind"] == "researcher.response"]
+    assert actions[-1] == "REQUEST_CHANGES"
