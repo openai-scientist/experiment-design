@@ -418,3 +418,14 @@ def test_rejoinder_never_sees_the_peers_accepted_calculation(tmp_path):
     assert prior_calculation_lines(provider, 6) == 1  # "[]": neither methodologist calculation
     assert prior_calculation_lines(provider, 5) > 1  # its own earlier calculation stays visible
     assert prior_calculation_lines(provider, 7) > 1  # the fresh final check sees both
+
+
+def test_reviser_sees_only_persistent_finding_ids(tmp_path):
+    outputs = happy_outputs()
+    outputs[2]["findings"] = [MAJOR | {"id": "F1"}]
+    outputs[4:4] = revised("Revised plan")
+    provider = Provider(outputs)
+    advance(store_for(tmp_path), provider, Judge(), RunConfig())
+    records = json.loads(provider.documents(4)["revision_findings"])
+    assert [r["finding_id"] for r in records] == ["F1-1"]
+    assert all("id" not in r for r in records)

@@ -557,9 +557,11 @@ def _with_finding_records(store: RunStore, objections: dict[str, str]) -> dict[s
         (5, "final_review.json"),
     ):
         try:
-            records.extend(store.bound_findings(stage, name, store.state.attempt))
+            found = store.bound_findings(stage, name, store.state.attempt)
         except FileNotFoundError:
             continue
+        # The reviser answers by finding_id; a raw reviewer id (F1 from both critics) misleads it.
+        records.extend({k: v for k, v in f.items() if k != "id"} for f in found)
     return objections | {"revision_findings": json.dumps(records, ensure_ascii=False)}
 
 
