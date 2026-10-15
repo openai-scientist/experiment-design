@@ -90,6 +90,12 @@ _DUE = (
     "executing the plan); the plan only has to say how that evidence will be obtained. "
     "Otherwise leave due as 'now'. "
 )
+_KIND = (
+    " Set kind to 'needs_evidence' on a finding whose defect needs an external lookup, "
+    "verification, data access or evidence, so that editing the plan cannot resolve it "
+    "(a license or provenance to confirm, a dataset to inspect, a missing citation). "
+    "Otherwise leave kind as 'fix': the plan text can resolve it. "
+)
 _ROLES = {
     "profile_inference": (
         "Infer the research type from the hypotheses and brief: comparative_benchmark, "
@@ -232,7 +238,7 @@ def prompt(role: str, pack: Pack | None = None) -> str:
             "entry. Rebutted and not_fixed require grounds in note. Never infer resolution."
         )
     if role in REVIEW_ROLES:
-        text += _DUE
+        text += _DUE + _KIND
     if pack is None:
         return text
     additions = [pack.role_addenda.get(role, "")]

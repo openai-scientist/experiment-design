@@ -7,9 +7,11 @@ from datetime import UTC, datetime
 from experiment_design.agents.benchmark.github import GitHubClient, GitHubUnavailable
 from experiment_design.agents.benchmark.hf import HFClient, HFUnavailable
 from experiment_design.agents.benchmark.models import Resource
+from experiment_design.agents.benchmark.zenodo import ZenodoClient, ZenodoUnavailable
 
 _HUB = "https://huggingface.co"
 _GITHUB_REPO = re.compile(r"^https://github\.com/([^/\s]+)/([^/\s#?]+)")
+_ZENODO_RECORD = re.compile(r"10\.5281/zenodo\.(\d+)|zenodo\.org/records?/(\d+)", re.IGNORECASE)
 _GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 _GITHUB_RESERVED = {
     "orgs",
@@ -41,7 +43,13 @@ def acquire(
     hf: HFClient,
     now: Callable[[], datetime],
     github: GitHubClient | None = None,
+    zenodo: ZenodoClient | None = None,
 ) -> Resource:
+    record = _ZENODO_RECORD.search(resource.source_url or "")
+    if record is not None:
+        if zenodo is None:
+            return resource
+        return _acquire_zenodo(resource, zenodo, now, record[1] or record[2])
     repo_id = resource.hf_repo_id or (resource.name if resource.origin == "hf_hub" else None)
     if repo_id is None:
         repo = _github_repo(resource.source_url or "")
@@ -126,5 +134,50 @@ def _acquire_github(
             if isinstance(spdx, str) and spdx != "NOASSERTION"
             else resource.license,
             "retrieved_at": moment,
+        }
+    )
+
+
+def _acquire_zenodo(
+    resource: Resource, zenodo: ZenodoClient, now: Callable[[], datetime], record_id: str
+) -> Resource:
+    try:
+        record = zenodo.record(record_id)
+    except ZenodoUnavailable as exc:
+        return resource.model_copy(
+            update={"reasons": [*resource.reasons, f"Zenodo unavailable: {exc}"]}
+        )
+    if record is None:
+        return resource.model_copy(
+            update={
+                "status": "not_found",
+                "reasons": [*resource.reasons, f"Zenodo record '{record_id}' not found"],
+            }
+        )
+    metadata = record.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    doi, version = record.get("doi"), metadata.get("version")
+    revision = f"zenodo:{record_id}"
+    details = [f"{label} {value}" for label, value in (("doi", doi), ("version", version)) if value]
+    if details:
+        revision += " (" + ", ".join(details) + ")"
+    license_ = metadata.get("license")
+    license_id = license_.get("id") if isinstance(license_, dict) else None
+    checksums = [
+        f"{f['key']} {f['checksum']}"
+        for f in record.get("files") or []
+        if isinstance(f, dict) and isinstance(f.get("key"), str) and f.get("checksum")
+    ]
+    # Resource has no checksum field for a record's files; the notes carry them.
+    notes = [f"Zenodo file checksums: {'; '.join(checksums)}"] if checksums else []
+    return resource.model_copy(
+        update={
+            "revision": revision,
+            "license": license_id
+            if isinstance(license_id, str) and license_id
+            else resource.license,
+            "retrieved_at": now().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source_url": f"https://zenodo.org/records/{record_id}",
+            "reasons": [*resource.reasons, *notes],
         }
     )

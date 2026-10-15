@@ -38,3 +38,7 @@
   kind: benchmark
   tasks: [classification, tabular]
   source_url: https://www.openml.org/search?type=study&study_type=task&id=99
+- name: CIFAR-10-C
+  kind: benchmark
+  tasks: [classification, vision, robustness, distribution-shift, calibration]
+  source_url: https://zenodo.org/records/2535967

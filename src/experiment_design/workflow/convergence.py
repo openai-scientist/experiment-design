@@ -65,7 +65,13 @@ def previous_majors(findings: list[Finding]) -> list[dict]:
     """The earlier MAJOR findings, relabelled P1.. so they cannot collide with new ids."""
     majors = [f for f in findings if f.severity == "MAJOR"]
     return [
-        {"id": f"P{n}", "anchor": f.anchor, "issue": f.issue, "consequence": f.consequence}
+        {
+            "id": f"P{n}",
+            "anchor": f.anchor,
+            "issue": f.issue,
+            "consequence": f.consequence,
+            "kind": f.kind,
+        }
         for n, f in enumerate(majors, 1)
     ]
 
@@ -106,6 +112,7 @@ def converge_final(
                     consequence=p["consequence"],
                     suggestion="Resolve the earlier finding.",
                     anchor=p["anchor"],
+                    kind=p.get("kind", "fix"),
                 )
             )
     for finding in majors:

@@ -66,7 +66,7 @@ def test_index_mismatch_cannot_be_dropped_by_final_checker(tmp_path):
             response = super().complete(messages, tools)
             if "experiments" in tools[0]["function"]["parameters"].get("properties", {}):
                 body = json.loads(response.tool_calls[0].arguments)
-                body["experiments"][0]["plan_section"] = "## Absent"
+                body["experiments"][0]["hypothesis_ids"] = ["H1"]  # H2 left without an experiment
                 response = response.model_copy(
                     update={
                         "tool_calls": [
@@ -82,3 +82,39 @@ def test_index_mismatch_cannot_be_dropped_by_final_checker(tmp_path):
     assert any(f["severity"] == "MAJOR" and f["category"] == "reproducibility" for f in findings)
     with pytest.raises(WorkflowError):
         publish(store)
+
+
+def test_index_heading_and_hash_mismatches_are_repaired_by_code_not_reviewed(tmp_path):
+    from experiment_design.runtime.llm import ToolCall
+
+    store, cfg = profiled_store(tmp_path)
+
+    class LooseIndex(EndlessProvider):
+        def complete(self, messages, tools):
+            response = super().complete(messages, tools)
+            if "experiments" in tools[0]["function"]["parameters"].get("properties", {}):
+                body = json.loads(response.tool_calls[0].arguments)
+                section = body["experiments"][0]["plan_section"]
+                # Live: the extracted index dropped the heading marks and the case.
+                body["experiments"][0]["plan_section"] = section.lstrip("# ").upper()
+                body["plan_sha256"] = "stale"
+                call = ToolCall(id="loose", name="submit", arguments=json.dumps(body))
+                response = response.model_copy(update={"tool_calls": [call]})
+            return response
+
+    state = reach_review(store, LooseIndex(), cfg)
+    assert state.status == "PENDING_REVIEW"
+    plan = store.read(state.plan_stage, state.plan_name)
+    index = json.loads(store.read(state.plan_stage, "index.json"))
+    assert index["experiments"][0]["plan_section"] in plan.splitlines()
+    assert index["plan_sha256"] == hashlib.sha256(plan.encode()).hexdigest()
+    findings = json.loads(store.read(5, "deterministic_findings.json"))
+    assert not [f for f in findings if f["anchor"] == "Experiment index"]
+
+
+def test_resource_shortfall_findings_need_evidence_not_a_plan_edit(tmp_path):
+    store, cfg = profiled_store(tmp_path)
+    reach_review(store, EndlessProvider(), cfg)
+    findings = json.loads(store.read(5, "deterministic_findings.json"))
+    shortfalls = [f for f in findings if f["id"].startswith("shortfall-")]
+    assert shortfalls and all(f["kind"] == "needs_evidence" for f in shortfalls)

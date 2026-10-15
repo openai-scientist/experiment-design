@@ -11,6 +11,7 @@ from experiment_design.config import RunConfig
 from experiment_design.contracts import (
     AgentOutput,
     CalculationRequest,
+    Finding,
     ReviewerError,
     RevisionDisposition,
     WorkflowError,
@@ -101,6 +102,24 @@ def _usage_ceiling(llm: object, attempts: list[dict]) -> int | None:
     return final["tokens_in"] + max_tokens
 
 
+def _incomplete(store: RunStore, task: str, role: str, budget: str) -> AgentOutput:
+    """A review past its task allowance ends with one MINOR finding; the workflow goes on."""
+    issue = f"review incomplete: {role} exceeded its {budget} budget"
+    store.event("agent.accepted", {"task": task, "incomplete": budget})
+    return AgentOutput(
+        markdown=f"{issue.capitalize()}. This review did not finish its inspection.",
+        findings=[
+            Finding(
+                id="review-incomplete",
+                severity="MINOR",
+                issue=issue,
+                consequence="The plan was not fully inspected by this review.",
+                suggestion="Treat this review as partial; repeat it if the plan is still in doubt.",
+            )
+        ],
+    )
+
+
 def _digest(read_result: dict) -> dict:
     """Journal a read by identity; the model alone receives the text."""
     text = read_result["text"]
@@ -164,6 +183,12 @@ def _read(workspace: dict[str, str], covered: dict[str, set[int]], args: dict) -
         "total_lines": len(lines),
         "text": "\n".join(f"{n}: {lines[n - 1]}" for n in chosen),
     }
+
+
+def _read_key(args: dict) -> str:
+    """Identity of what a read returns: with names, the other arguments are ignored. Live: a
+    reviewer sent names plus a different name each call, five whole copies in one turn."""
+    return json.dumps(["names", args["names"]] if "names" in args else args, sort_keys=True)
 
 
 def _search(workspace: dict[str, str], args: dict) -> dict:
@@ -370,10 +395,11 @@ def run_specialist(
     # passed the task token ceiling. A repeated identical read returns a pointer instead.
     reads_done: dict[str, str] = {}
     for turn in range(len(prior), cfg.task_max_turns):
-        if (
-            task_tokens >= cfg.task_max_tokens
-            or store.state.llm_tokens >= store.state.llm_token_limit
-        ):
+        if store.state.llm_tokens >= store.state.llm_token_limit:
+            raise WorkflowError("LLM token budget exhausted")
+        if task_tokens >= cfg.task_max_tokens:
+            if reviewer:
+                return _incomplete(store, task, role, "tokens")
             raise WorkflowError("LLM token budget exhausted")
         if attempts_used >= cfg.task_max_turns:
             break
@@ -444,11 +470,13 @@ def run_specialist(
             if role in REVIEW_ROLES:
                 raise ReviewerError("Reviewer call failed after retry") from failure
             raise WorkflowError("Provider call failed") from failure
-        if (
-            task_tokens > cfg.task_max_tokens
-            or store.state.llm_tokens > store.state.llm_token_limit
-            or attempts_used > cfg.task_max_turns
-        ):
+        if store.state.llm_tokens > store.state.llm_token_limit:
+            raise WorkflowError("LLM token or turn budget exceeded")
+        if task_tokens > cfg.task_max_tokens or attempts_used > cfg.task_max_turns:
+            if reviewer:
+                return _incomplete(
+                    store, task, role, "tokens" if task_tokens > cfg.task_max_tokens else "turns"
+                )
             raise WorkflowError("LLM token or turn budget exceeded")
         assistant: dict = {"role": "assistant", "content": response.content}
         if response.tool_calls:
@@ -562,12 +590,10 @@ def run_specialist(
                     else:
                         submission = output
                         result = {"accepted": True}
-                elif call.name == "read" and (
-                    earlier := reads_done.get(json.dumps(args, sort_keys=True))
-                ):
+                elif call.name == "read" and (earlier := reads_done.get(_read_key(args))):
                     result = {"repeated": f"Same read as call {earlier}; its result is above."}
                 elif call.name == "read":
-                    reads_done[json.dumps(args, sort_keys=True)] = call.id
+                    reads_done[_read_key(args)] = call.id
                     if "names" in args:
                         result = {
                             "documents": [
@@ -661,4 +687,6 @@ def run_specialist(
         if submission is not None:
             store.event("agent.accepted", {"task": task})
             return submission
+    if reviewer:
+        return _incomplete(store, task, role, "turns")
     raise WorkflowError("Specialist turn allowance exhausted without accepted submission")

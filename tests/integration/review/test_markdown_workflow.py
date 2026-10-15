@@ -250,7 +250,7 @@ def test_reframe_allowance_preserves_history_and_bounds_loop(tmp_path):
 
     store = store_for(tmp_path)
     output = [
-        {"markdown": t}
+        {"markdown": t} | ({"findings": [MAJOR]} if t == "Method1" else {})  # a fix to reframe for
         for t in [
             "Brief1",
             "Draft1",
@@ -712,6 +712,7 @@ class ReframeJudge:
 def test_reframe_objections_reach_framing_and_survive_crash(tmp_path):
     store = store_for(tmp_path)
     first = [{"markdown": t} for t in ["Brief1", "Draft1", "Method1", "Skeptic1"]]
+    first[2]["findings"] = [MAJOR]  # a fix to reframe for
     # Reframed framing keeps submitting an invalid output (a question flag with no question)
     # until its two turns run out; critics need both turns to read and submit.
     first += [{"markdown": "Brief2", "needs_input": True}] * 2

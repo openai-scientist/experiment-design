@@ -1,7 +1,7 @@
 """Deterministic checks on declared experiment metadata, without editing the plan."""
 
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Literal
 
 from experiment_design.contracts import Finding, WorkflowError
 from experiment_design.packs import Pack
@@ -10,8 +10,16 @@ from experiment_design.publication.experiment_index import ExperimentIndex
 Validator = Callable[[ExperimentIndex, Mapping[str, Any]], list[Finding]]
 
 
-def _finding(rule: str, identifier: str, category: str, issue: str, suggestion: str) -> Finding:
+def _finding(
+    rule: str,
+    identifier: str,
+    category: str,
+    issue: str,
+    suggestion: str,
+    kind: Literal["fix", "needs_evidence"] = "fix",
+) -> Finding:
     return Finding(
+        kind=kind,
         id=f"{rule}-{identifier}",
         severity="MAJOR",
         category=category,
@@ -110,6 +118,7 @@ def project_diversity(index: ExperimentIndex, resources: Mapping[str, Any]) -> l
             "reproducibility",
             "Project diversity is insufficient.",
             "Identify at least two independent projects and disclose their selection.",
+            "needs_evidence",
         )
         for position, resource in enumerate(resources.get("resources", []))
         if resource.get("kind") == "dataset"

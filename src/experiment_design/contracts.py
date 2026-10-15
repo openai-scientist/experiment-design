@@ -55,6 +55,9 @@ class Finding(Record):
     evidence_refs: list[str] = Field(default_factory=list)
     # "later": the subject exists only when the plan is executed; never blocks the plan.
     due: Literal["now", "later"] = "now"
+    # "needs_evidence": the defect needs a lookup, verification or data, not a plan edit; it
+    # never triggers a revision.
+    kind: Literal["fix", "needs_evidence"] = "fix"
 
 
 class Resolution(Record):

@@ -13,6 +13,7 @@ from experiment_design.agents.benchmark.github import GitHubClient
 from experiment_design.agents.benchmark.hf import HFClient
 from experiment_design.agents.benchmark.step import STEP_KEY as RESOURCES_STEP
 from experiment_design.agents.benchmark.step import run_resources
+from experiment_design.agents.benchmark.zenodo import ZenodoClient
 from experiment_design.agents.prompts import snapshot
 from experiment_design.agents.tools import run_specialist
 from experiment_design.api.contract_models import EXD_RESOURCES
@@ -33,6 +34,7 @@ from experiment_design.publication.experiment_index import (
     ExperimentIndex,
     check_index,
     extract_index,
+    rebind_index,
 )
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
@@ -279,6 +281,7 @@ def _resources_gate(
         store.event("step.entered", {"step_key": RESOURCES_STEP})
         hf = HFClient(token=(integrations or {}).get("huggingface"))
         github = GitHubClient(token=os.environ.get("GITHUB_TOKEN"))
+        zenodo = ZenodoClient()
         try:
             run_resources(
                 store,
@@ -287,11 +290,13 @@ def _resources_gate(
                 load_pack(store.state.profile),
                 hf,
                 github=github,
+                zenodo=zenodo,
                 comments=decision["text"] if decision is not None else "",
             )
         finally:
             hf.close()
             github.close()
+            zenodo.close()
     _ask_review(
         store,
         step_key=RESOURCES_STEP,
@@ -304,7 +309,9 @@ def _resources_gate(
 
 
 def _index_plan(store: RunStore, llm: LLMClient, cfg: RunConfig, stage: int, document: str) -> None:
-    index = extract_index(store, llm, cfg, document, store.read(1, "hypothesis.md"))
+    index = rebind_index(
+        extract_index(store, llm, cfg, document, store.read(1, "hypothesis.md")), document
+    )
     if store.state.profile and store.state.profile.research_type:
         for experiment in index.experiments:
             if experiment.type == "base":
@@ -324,12 +331,15 @@ def _resource_notes(store: RunStore, document: str) -> str:
 
 
 def _deterministic_findings(store: RunStore) -> list[Finding]:
-    index = ExperimentIndex.model_validate_json(store.read(store.state.plan_stage, "index.json"))
+    plan = store.read(store.state.plan_stage, store.state.plan_name)
+    # Heading and hash mismatches are mechanical: code repairs them before any check.
+    index = rebind_index(
+        ExperimentIndex.model_validate_json(store.read(store.state.plan_stage, "index.json")), plan
+    )
     try:
         resources = json.loads(store.read(3, "resources.json"))
     except FileNotFoundError:
         resources = {}
-    plan = store.read(store.state.plan_stage, store.state.plan_name)
     ids = re.findall(r"^## (H\d+)\b", store.read(1, "hypothesis.md"), re.M)
     findings = check_index(index, plan, ids) + validators.run(
         load_pack(store.state.profile), index, resources
@@ -344,6 +354,7 @@ def _deterministic_findings(store: RunStore) -> list[Finding]:
                 issue=shortfall,
                 consequence="Resource minimum is not established",
                 suggestion="Disclose the shortfall",
+                kind="needs_evidence",
             )
         )
     store.activity(
@@ -386,6 +397,23 @@ def _forced_stop(store: RunStore, stage: int) -> bool:
     return route["choice"] == "STOP" and route.get("forced") is True
 
 
+def _major_fix(finding: Finding) -> bool:
+    return finding.severity == "MAJOR" and finding.kind == "fix"
+
+
+def _open_evidence(final: AgentOutput, maintained: list[AgentOutput]) -> str:
+    """Limitations section for MAJOR findings that only evidence or a lookup can resolve."""
+    items = [
+        f"- {f.issue}"
+        for o in [final, *maintained]
+        for f in o.findings
+        if f.severity == "MAJOR" and f.kind == "needs_evidence"
+    ]
+    if not items:
+        return ""
+    return "\n\n## Limitations (open, need evidence)\n" + "\n".join(items) + "\n"
+
+
 def _critic_options(
     store: RunStore,
     cfg: RunConfig,
@@ -394,14 +422,16 @@ def _critic_options(
     changes_requested: bool,
 ) -> tuple[list[str], bool]:
     """Legal routes after the critics, and whether STOP stands alone only because of limits."""
-    material = any(f.severity == "MAJOR" for o in [method, skeptic] for f in o.findings)
+    material = any(_major_fix(f) for o in [method, skeptic] for f in o.findings)
     options = (
         []
         if material or changes_requested or method.needs_input or skeptic.needs_input
         else ["CHECK"]
     )
     paths = ["REVISE"] if changes_requested else ["REVISE", "REFRAME"]
-    available = [path for path in paths if _can_refine(store, cfg, path)]
+    # A revision is offered only for an open MAJOR fix finding (or a researcher's request).
+    revisable = material or changes_requested
+    available = [path for path in paths if revisable and _can_refine(store, cfg, path)]
     if changes_requested and available:
         # The researcher asked for changes: the judge does not overrule them (live: the judge
         # chose STOP after three change requests, so none was ever revised).
@@ -410,7 +440,7 @@ def _critic_options(
     if method.question.strip() or skeptic.question.strip():
         options.append("ASK_RESEARCHER")
     options.append("STOP")
-    return options, options == ["STOP"] and available != paths
+    return options, options == ["STOP"] and revisable and available != paths
 
 
 def _final_review_names(store: RunStore) -> list[str]:
@@ -437,19 +467,18 @@ def _maintained(store: RunStore, review_names: list[str]) -> list[AgentOutput]:
 def _final_options(
     store: RunStore, cfg: RunConfig, final: AgentOutput, maintained: list[AgentOutput]
 ) -> tuple[list[str], bool]:
-    material = (
-        final.needs_input
-        or any(f.severity == "MAJOR" for f in final.findings)
-        or any(f.severity == "MAJOR" for o in maintained for f in o.findings)
-    )
+    fixable = any(_major_fix(f) for o in [final, *maintained] for f in o.findings)
+    material = final.needs_input or fixable
     options = [] if material else ["PRESENT"]
     paths = ["REVISE", "REFRAME"]
-    available = [path for path in paths if _can_refine(store, cfg, path)]
+    # MAJOR needs_evidence findings alone do not call for a revision: the plan is presented
+    # with them listed under Limitations.
+    available = [path for path in paths if fixable and _can_refine(store, cfg, path)]
     options += available
     if final.question.strip():
         options.append("ASK_RESEARCHER")
     options.append("STOP")
-    return options, options == ["STOP"] and available != paths
+    return options, options == ["STOP"] and fixable and available != paths
 
 
 def _previous_final(store: RunStore) -> tuple[list[Finding], str] | None:
@@ -1140,7 +1169,8 @@ def _advance(
                 6,
                 "researcher_review.md",
                 "Scientific review: reviewed complete. Researcher acceptance: pending.\n\n"
-                + store.read(store.state.plan_stage, store.state.plan_name),
+                + store.read(store.state.plan_stage, store.state.plan_name)
+                + _open_evidence(final, _maintained(store, review_names)),
             )
             replies = [e["data"] for e in store.events() if e["kind"] == "researcher.response"]
             store.write(

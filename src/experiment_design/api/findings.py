@@ -37,6 +37,7 @@ def to_contract_finding(
         if f.severity == "MAJOR"
         else "minor",
         category=f.category if f.category in FindingCategory else "other",
+        kind=f.kind,
         issue=f.issue + " Consequence: " + f.consequence,
         suggestion=f.suggestion,
         evidence_refs=f.evidence_refs,
@@ -79,7 +80,7 @@ def review_findings(
         reviewed_artifact_id=artifact_id,
         reviewer_model=reviewer_model,
         findings=[*original, *final],
-        passed=not any(f.severity == "blocking" for f in final),
+        passed=not any(f.severity == "blocking" and f.kind == "fix" for f in final),
     )
 
 
