@@ -566,7 +566,7 @@ def stop_after(monkeypatch, store, stage, on_call):
     return real_complete
 
 
-def test_resume_after_failed_step_keeps_requested_change_plan(tmp_path):
+def test_resume_after_failed_step_keeps_requested_change_plan(tmp_path, monkeypatch):
     store = store_for(tmp_path)
     outputs = happy_outputs()
     outputs[2]["findings"] = [MAJOR]
@@ -579,20 +579,16 @@ def test_resume_after_failed_step_keeps_requested_change_plan(tmp_path):
         researcher="R",
         revision=store.state.attempt,
     )
-    judge = FailOnceJudge()
-    first = Provider([{"markdown": "Method"}, {"markdown": "Skeptic"}])
-    with pytest.raises(WorkflowError, match="illegal"):
-        advance(store, first, judge, RunConfig())
-    assert store.state.status == "STOPPED"
-    resumed = Provider(
-        [{"markdown": t} for t in ["Method", "Skeptic"]]
-        + revised("Second revision")
-        + [{"markdown": "Final"}]
-    )
-    state = advance(store, resumed, judge, RunConfig())
-    assert resumed.documents(0)["plan"] == "Previously revised plan"
-    assert "Change measurement" in resumed.documents(0)["researcher_responses"]
-    assert state.refinements == 2
+    # A change request routes to REVISE without the judge; the revised stage fails to save.
+    real_complete = stop_after(monkeypatch, store, 4, on_call=1)
+    first = Provider([{"markdown": t} for t in ["Method", "Skeptic"]] + revised("Second revision"))
+    with pytest.raises(WorkflowError, match="simulated"):
+        advance(store, first, Judge(), RunConfig())
+    assert first.documents(0)["plan"] == "Previously revised plan"
+    assert "Change measurement" in first.documents(0)["researcher_responses"]
+    monkeypatch.setattr(store, "complete", real_complete)
+    resumed = Provider([{"markdown": "Final"}])
+    advance(store, resumed, Judge(), RunConfig())
     assert store.read(7, "exp_plan.md") == "Second revision"
 
 
@@ -893,3 +889,34 @@ def test_provider_attempt_event_stores_digest_not_messages(tmp_path):
     canonical = json.dumps(sent, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     assert data["messages_sha256"] == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     assert data["message_count"] == len(sent) == 2
+
+
+def test_a_change_request_is_revised_even_when_the_judge_would_stop(tmp_path):
+    class StopJudge:
+        def decide(self, state, questions):
+            return {
+                key: Decision(
+                    "STOP" if "STOP" in q.options else next(iter(q.options)), {}, 1.0, tokens=1
+                )
+                for key, q in questions.items()
+            }
+
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[2]["findings"] = [MAJOR]
+    outputs[4:4] = revised("Previously revised plan")
+    advance(store, Provider(outputs), Judge(), RunConfig())
+    respond(
+        store,
+        action="REQUEST_CHANGES",
+        text="Change measurement",
+        researcher="R",
+        revision=store.state.attempt,
+    )
+    provider = Provider(
+        [{"markdown": t} for t in ["Method", "Skeptic"]]
+        + revised("Second revision")
+        + [{"markdown": "Final"}]
+    )
+    advance(store, provider, StopJudge(), RunConfig())
+    assert store.read(4, "revised_plan.md").startswith("Second revision")

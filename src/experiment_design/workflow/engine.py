@@ -389,6 +389,10 @@ def _critic_options(
     )
     paths = ["REVISE"] if changes_requested else ["REVISE", "REFRAME"]
     available = [path for path in paths if _can_refine(store, cfg, path)]
+    if changes_requested and available:
+        # The researcher asked for changes: the judge does not overrule them (live: the judge
+        # chose STOP after three change requests, so none was ever revised).
+        return available, False
     options += available
     if method.question.strip() or skeptic.question.strip():
         options.append("ASK_RESEARCHER")
@@ -955,7 +959,11 @@ def _advance(
                 store.write(4, "revised_plan.md", draft)
                 extras = []
                 if store.state.profile is not None:
-                    store.write(4, "index.json", store.read(3, "index.json"))
+                    if draft == store.read(3, "draft_plan.md"):
+                        store.write(4, "index.json", store.read(3, "index.json"))
+                    else:
+                        # A requested change left unrevised: the index must match this plan.
+                        _index_plan(store, llm, cfg, 4, draft)
                     extras.append("index.json")
                 store.write(4, "route.json", json.dumps({"choice": route, "forced": forced}))
                 store.complete(
