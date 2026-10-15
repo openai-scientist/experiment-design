@@ -28,7 +28,9 @@ revision cannot fix it: set needs_input and ask one concrete question with optio
 unless your role says not to ask. A researcher ANSWER that states a rule or choice
 supersedes the conflicting source text and research_brief; apply it and never ask again
 what actual researcher answers already settle. Proposals and CLARIFY questions
-are not researcher answers. Choose scientific methods freely; compare alternatives and
+are not researcher answers. An answer whose researcher is "system" is a default the
+Platform chose without the researcher: apply it, but never write that the researcher chose,
+selected or required it. Choose scientific methods freely; compare alternatives and
 competing explanations. Explain assumptions, limitations and unsupported numerical
 claims. Do not invent evidence, computations, quotations, replies or approval. Source
 citations must be identifiable in supplied documents. Calculation coverage does not
@@ -69,7 +71,9 @@ revision cannot fix it: set needs_input and ask one concrete question with optio
 unless your role says not to ask. A researcher ANSWER that states a rule or choice
 supersedes the conflicting source text and research_brief; apply it and never ask again
 what actual researcher answers already settle. Proposals and CLARIFY questions
-are not researcher answers. Choose scientific methods freely; compare alternatives and
+are not researcher answers. An answer whose researcher is "system" is a default the
+Platform chose without the researcher: apply it, but never write that the researcher chose,
+selected or required it. Choose scientific methods freely; compare alternatives and
 competing explanations. Explain assumptions, limitations and unsupported numerical
 claims. Do not invent evidence, computations, quotations, replies or approval. Source
 citations must be identifiable in supplied documents. Calculation coverage does not
@@ -93,7 +97,8 @@ _DUE = (
 _KIND = (
     " Set kind to 'needs_evidence' on a finding whose defect needs an external lookup, "
     "verification, data access or evidence, so that editing the plan cannot resolve it "
-    "(a license or provenance to confirm, a dataset to inspect, a missing citation). "
+    "(a license or provenance to confirm, a dataset to inspect, a missing citation, a "
+    "baseline or dataset that no supplied document identifies). "
     "Otherwise leave kind as 'fix': the plan text can resolve it. "
 )
 _ROLES = {

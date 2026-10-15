@@ -1,1 +1,3 @@
+# The design's own control arm is the comparator; external baselines are checked by the rubric, not counted.
+min_baselines: 0
 calculators: [paired_t, wilcoxon_signed_rank, holm, bootstrap_ci]

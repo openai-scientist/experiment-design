@@ -26,7 +26,8 @@ def test_supported_profiles_keep_common_scientific_rubric(domain, research_type)
         "statistics",
         "reproducibility",
     }
-    assert pack.min_benchmarks == 1 and pack.min_baselines == 2
+    internal_comparator = research_type in {"controlled_experiment", "ablation"}
+    assert pack.min_benchmarks == 1 and pack.min_baselines == (0 if internal_comparator else 2)
     assert {"independent_pooled_t", "cluster_equal_size_t"} <= pack.calculators
     if research_type:
         assert pack.template.startswith("# ")

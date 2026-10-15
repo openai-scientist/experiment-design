@@ -108,7 +108,7 @@ def _open_findings_section(findings: list[dict]) -> str:
         "",
         "## Open findings",
         "",
-        "The independent review was not satisfied when the researcher accepted this plan.",
+        "The independent review was not satisfied when this plan was accepted.",
     ]
     if not findings:
         lines.append("No specific finding was recorded.")
