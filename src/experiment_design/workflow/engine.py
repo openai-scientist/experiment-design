@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -330,12 +330,13 @@ def _resource_notes(store: RunStore, document: str) -> str:
     )
 
 
-def _deterministic_findings(store: RunStore) -> list[Finding]:
-    plan = store.read(store.state.plan_stage, store.state.plan_name)
+def _deterministic_findings(
+    store: RunStore, stage: int | None = None, plan_name: str | None = None
+) -> list[Finding]:
+    stage = stage or store.state.plan_stage
+    plan = store.read(stage, plan_name or store.state.plan_name)
     # Heading and hash mismatches are mechanical: code repairs them before any check.
-    index = rebind_index(
-        ExperimentIndex.model_validate_json(store.read(store.state.plan_stage, "index.json")), plan
-    )
+    index = rebind_index(ExperimentIndex.model_validate_json(store.read(stage, "index.json")), plan)
     try:
         resources = json.loads(store.read(3, "resources.json"))
     except FileNotFoundError:
@@ -420,9 +421,14 @@ def _critic_options(
     method: AgentOutput,
     skeptic: AgentOutput,
     changes_requested: bool,
+    deterministic: Sequence[Finding] = (),
 ) -> tuple[list[str], bool]:
     """Legal routes after the critics, and whether STOP stands alone only because of limits."""
-    material = any(_major_fix(f) for o in [method, skeptic] for f in o.findings)
+    # A code check on the draft calls for a revision only when one is left; otherwise the
+    # final check reports it as before.
+    material = any(_major_fix(f) for o in [method, skeptic] for f in o.findings) or (
+        any(_major_fix(f) for f in deterministic) and _can_refine(store, cfg, "REVISE")
+    )
     options = (
         []
         if material or changes_requested or method.needs_input or skeptic.needs_input
@@ -439,7 +445,11 @@ def _critic_options(
     options += available
     if method.question.strip() or skeptic.question.strip():
         options.append("ASK_RESEARCHER")
-    options.append("STOP")
+    # The first critic round revises a fixable MAJOR rather than stopping on it (live: the judge
+    # chose STOP over an undeclared seed count and the plan shipped with it open). Later rounds
+    # leave STOP to the judge, so one forced revision per check is the most this rule costs.
+    if not (material and available and store.state.refinements == 0):
+        options.append("STOP")
     return options, options == ["STOP"] and revisable and available != paths
 
 
@@ -465,7 +475,11 @@ def _maintained(store: RunStore, review_names: list[str]) -> list[AgentOutput]:
 
 
 def _final_options(
-    store: RunStore, cfg: RunConfig, final: AgentOutput, maintained: list[AgentOutput]
+    store: RunStore,
+    cfg: RunConfig,
+    final: AgentOutput,
+    maintained: list[AgentOutput],
+    first_check: bool = True,
 ) -> tuple[list[str], bool]:
     fixable = any(_major_fix(f) for o in [final, *maintained] for f in o.findings)
     material = final.needs_input or fixable
@@ -477,7 +491,9 @@ def _final_options(
     options += available
     if final.question.strip():
         options.append("ASK_RESEARCHER")
-    options.append("STOP")
+    # The first final check revises a fixable MAJOR it finds rather than stopping on it.
+    if not (fixable and available and first_check):
+        options.append("STOP")
     return options, options == ["STOP"] and fixable and available != paths
 
 
@@ -937,13 +953,20 @@ def _advance(
         if pending:
             _run_revision(store, llm, cfg, pending["plan"], pending["objections"], review_llm)
         redecide = False
+        # Code checks (seeds, index) run on the draft too, so the first revision fixes them
+        # instead of the final check finding them after the revision loop.
+        early = (
+            _deterministic_findings(store, 3, "draft_plan.md")
+            if store.state.profile is not None and not changes_requested
+            else []
+        )
         if store.valid(4) and _forced_stop(store, 4):
             method, skeptic = (
                 _load(store, 4, name) for name in ("methodologist_review", "skeptic_review")
             )
-            redecide = _critic_options(store, cfg, method, skeptic, changes_requested)[0] != [
-                "STOP"
-            ]
+            redecide = _critic_options(store, cfg, method, skeptic, changes_requested, early)[
+                0
+            ] != ["STOP"]
         if not store.valid(4) or redecide:
             store.update(stage=4)
             draft = (
@@ -977,7 +1000,7 @@ def _advance(
                     needed,
                     review_llm=review_llm,
                 )
-            options, forced = _critic_options(store, cfg, method, skeptic, changes_requested)
+            options, forced = _critic_options(store, cfg, method, skeptic, changes_requested, early)
             route = _route(store, judge, cfg, options, [method, skeptic])
             if route == "ASK_RESEARCHER":
                 store.write(4, "route.json", json.dumps({"choice": route}))
@@ -1001,13 +1024,13 @@ def _advance(
                 )
                 continue
             if route == "REVISE":
-                _revision(
-                    store,
-                    llm,
-                    cfg,
-                    {"methodologist_review": method.markdown, "skeptic_review": skeptic.markdown},
-                    review_llm,
-                )
+                objections = {
+                    "methodologist_review": method.markdown,
+                    "skeptic_review": skeptic.markdown,
+                }
+                if fixes := [f.model_dump() for f in early if _major_fix(f)]:
+                    objections["deterministic_findings"] = json.dumps(fixes, ensure_ascii=False)
+                _revision(store, llm, cfg, objections, review_llm)
                 changes_requested = False
             else:
                 store.write(
@@ -1063,9 +1086,13 @@ def _advance(
         redecide = False
         if store.valid(5) and _forced_stop(store, 5):
             final = _load(store, 5, "final_review")
-            redecide = _final_options(store, cfg, final, _maintained(store, review_names))[0] != [
-                "STOP"
-            ]
+            redecide = _final_options(
+                store,
+                cfg,
+                final,
+                _maintained(store, review_names),
+                _previous_final(store) is None,
+            )[0] != ["STOP"]
         if not store.valid(5) or redecide:
             store.update(stage=5)
             if not redecide:
@@ -1124,7 +1151,9 @@ def _advance(
                 final.findings.extend(f for f in deterministic if (f.id, f.issue) not in seen)
                 store.write(5, "final_review.json", _metadata(final))
             maintained = _maintained(store, review_names)
-            options, forced = _final_options(store, cfg, final, maintained)
+            options, forced = _final_options(
+                store, cfg, final, maintained, _previous_final(store) is None
+            )
             route = _route(store, judge, cfg, options, [final, *maintained])
             store.write(5, "route.json", json.dumps({"choice": route, "forced": forced}))
             store.complete(

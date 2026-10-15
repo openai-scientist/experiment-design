@@ -110,13 +110,15 @@ def test_stop_chosen_by_jev_among_legal_options_stays_final(tmp_path):
     store = store_for(tmp_path)
     outputs = happy_outputs()[:4]
     outputs[2]["findings"] = [MAJOR]
+    # After a first refinement STOP is the judge's call again (the first round must revise).
+    store.update(refinements=1)
     state = advance(store, Provider(outputs), StopJudge(), RunConfig())
     assert state.status == "INCOMPLETE"
     assert json.loads(store.read(4, "route.json")) == {"choice": "STOP", "forced": False}
     store.update(llm_token_limit=10_000_000)
     resumed = Provider([])
     state = advance(store, resumed, StopJudge(), RunConfig())
-    assert state.status == "INCOMPLETE" and state.refinements == 0
+    assert state.status == "INCOMPLETE" and state.refinements == 1
     assert not resumed.inputs
 
 

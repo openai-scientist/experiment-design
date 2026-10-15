@@ -166,11 +166,63 @@ def test_final_check_offers_revision_only_for_a_major_fix(tmp_path):
     options, forced = engine._final_options(store, cfg, evidence, [])
     assert options == ["PRESENT", "STOP"] and not forced
     options, _ = engine._final_options(store, cfg, fix, [])
-    assert options == ["REVISE", "REFRAME", "STOP"]
+    assert options == ["REVISE", "REFRAME"]  # a fixable MAJOR with refinements left is not stopped
     # A critic's maintained needs_evidence finding is no reason to revise either.
     maintained = AgentOutput(markdown="r", findings=[Finding.model_validate(EVIDENCE)])
     options, _ = engine._final_options(store, cfg, AgentOutput(markdown="f"), [maintained])
     assert options == ["PRESENT", "STOP"]
+
+
+def test_stop_returns_only_when_no_refinement_is_left(tmp_path):
+    store = store_for(tmp_path)
+    fix = AgentOutput(markdown="f", findings=[Finding.model_validate(FIX)])
+    options, forced = engine._final_options(store, RunConfig(max_refinements=0), fix, [])
+    assert options == ["STOP"] and forced
+    quiet = AgentOutput(markdown="s")
+    options, forced = engine._critic_options(store, RunConfig(max_refinements=0), fix, quiet, False)
+    assert options == ["STOP"] and forced
+    options, _ = engine._critic_options(store, RunConfig(), fix, quiet, False)
+    assert options == ["REVISE", "REFRAME"]
+
+
+def test_a_code_check_on_the_draft_calls_for_a_revision_before_the_final_check(tmp_path):
+    store = store_for(tmp_path)
+    quiet = AgentOutput(markdown="q")
+    seeds = Finding.model_validate(
+        FIX | {"id": "seed-e1", "issue": "Fewer than three seeds declared."}
+    )
+    options, _ = engine._critic_options(store, RunConfig(), quiet, quiet, False, [seeds])
+    assert options == ["REVISE", "REFRAME"]
+    evidence = Finding.model_validate(EVIDENCE)
+    options, _ = engine._critic_options(store, RunConfig(), quiet, quiet, False, [evidence])
+    assert options == ["CHECK", "STOP"]
+
+
+def test_a_fixable_final_finding_is_revised_not_stopped(tmp_path):
+    store = store_for(tmp_path)
+    texts = ["Brief", "Draft", "Method review", "Skeptic review", "Final review"]
+    script = [{"markdown": t} for t in texts]
+    script[4]["findings"] = [FIX]
+    script += [
+        {"markdown": "Revised draft"},
+        {"markdown": "Method rejoinder"},
+        {"markdown": "Skeptic rejoinder"},
+        {
+            "markdown": "Final review, clean",
+            "resolutions": [{"finding_id": "P1", "status": "resolved", "reason": "Control added"}],
+        },
+    ]
+    state = advance(store, Provider(script), Judge(), RunConfig())
+    assert state.status == "PUBLISHED" and state.refinements == 1
+    routes = [e["data"]["choice"] for e in store.events() if e["kind"] == "route"]
+    assert routes[-2:] == ["REVISE", "PRESENT"]
+
+
+def test_after_the_first_final_check_stop_is_the_judges_call_again(tmp_path):
+    store = store_for(tmp_path)
+    fix = AgentOutput(markdown="f", findings=[Finding.model_validate(FIX)])
+    options, forced = engine._final_options(store, RunConfig(), fix, [], first_check=False)
+    assert options == ["REVISE", "REFRAME", "STOP"] and not forced
 
 
 def test_a_plan_with_only_major_needs_evidence_is_presented_with_its_limitations(tmp_path):
