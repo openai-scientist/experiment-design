@@ -3,10 +3,10 @@
 Neither file ever holds a credential: only identifiers, counters and open-gate facts.
 """
 
-import json
 import threading
 from pathlib import Path
 
+from experiment_design.persistence import filecache
 from experiment_design.persistence.store import _json
 
 _INDEX_LOCK = threading.Lock()
@@ -20,7 +20,7 @@ class ApiIndex:
 
     def _read(self) -> dict[str, str]:
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = filecache.read_json(self.path)
         except (OSError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}
@@ -36,7 +36,7 @@ class ApiIndex:
 
 def read_run_meta(run_dir: Path) -> dict:
     try:
-        data = json.loads((Path(run_dir) / "api-run.json").read_text(encoding="utf-8"))
+        data = filecache.read_json(Path(run_dir) / "api-run.json")
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}

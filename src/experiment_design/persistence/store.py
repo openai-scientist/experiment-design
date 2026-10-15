@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import ValidationError
 
 from experiment_design.contracts import RunState, WorkflowError
+from experiment_design.persistence import filecache
 from experiment_design.vocabulary import ACTIVITY_TYPES
 
 _HASHES: dict[tuple[str, int, int, int], str] = {}
@@ -31,7 +32,7 @@ def _hash(path: Path) -> str:
         cached = _HASHES.get(key)
     if cached is not None:
         return cached
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256(filecache.read_bytes(path)).hexdigest()
     with _HASHES_LOCK:
         _HASHES[key] = digest
     return digest
@@ -89,9 +90,7 @@ def read_log(path: Path, parse: Callable[[bytes], object], corrupt: str) -> LogS
         and previous.signature[0] <= status.st_size
     ):
         start, records = previous.offset, previous.records
-    with path.open("rb") as handle:
-        handle.seek(start)
-        lines = handle.read().splitlines(keepends=True)
+    lines = filecache.read_bytes(path)[start:].splitlines(keepends=True)
     parsed, tail, offset = list(records), None, start
     for index, line in enumerate(lines):
         try:
@@ -124,6 +123,7 @@ def _atomic(path: Path, data: bytes) -> None:
         for attempt in range(_REPLACE_TRIES):
             try:
                 os.replace(temporary, path)
+                filecache.wrote(path, data)
                 break
             except PermissionError as exc:
                 # Windows refuses to replace a file another process is reading.
@@ -178,7 +178,9 @@ class RunStore:
             raise WorkflowError(f"Invalid filesystem run {self.path}: {exc}") from exc
 
     def _load_state(self) -> None:
-        self.state = RunState.model_validate_json((self.path / "checkpoint.json").read_bytes())
+        self.state = RunState.model_validate_json(
+            filecache.read_bytes(self.path / "checkpoint.json")
+        )
 
     @classmethod
     def create(
@@ -248,7 +250,7 @@ class RunStore:
         return state
 
     def config(self) -> dict:
-        return json.loads((self.path / "config.json").read_text(encoding="utf-8"))
+        return filecache.read_json(self.path / "config.json")
 
     def bound_findings(self, stage: int, name: str, round: int) -> list[dict]:
         """Assign persistent IDs to records bound to exact review bytes and their round."""
@@ -284,7 +286,7 @@ class RunStore:
 
     def _control(self) -> dict:
         try:
-            control = json.loads((self.path / "control.json").read_text(encoding="utf-8"))
+            control = filecache.read_json(self.path / "control.json")
         except (OSError, ValueError):
             return {}
         return control if isinstance(control, dict) else {}
@@ -337,7 +339,7 @@ class RunStore:
         return target
 
     def read(self, stage: int, name: str) -> str:
-        return self._artifact(stage, name).read_bytes().decode("utf-8")
+        return filecache.read_text(self._artifact(stage, name))
 
     def write(self, stage: int, name: str, text: str) -> Path:
         path = self._artifact(stage, name)
@@ -353,7 +355,7 @@ class RunStore:
         for source_stage, name in inputs:
             if source_stage >= stage or not self.valid(source_stage):
                 raise WorkflowError("Stage dependency must be an earlier valid stage")
-            source_manifest = json.loads(self._artifact(source_stage, "manifest.json").read_bytes())
+            source_manifest = filecache.read_json(self._artifact(source_stage, "manifest.json"))
             if name not in source_manifest["outputs"]:
                 raise WorkflowError("Stage dependency must be a declared output")
             artifact = self._artifact(source_stage, name)
@@ -374,12 +376,12 @@ class RunStore:
         }
         if stage == 1:
             manifest["source_index_hash"] = _hash(self.path / "sources.json")
-            manifest["sources"] = json.loads((self.path / "sources.json").read_bytes())["sources"]
+            manifest["sources"] = filecache.read_json(self.path / "sources.json")["sources"]
         _json(self._artifact(stage, "manifest.json"), manifest)
 
     def valid(self, stage: int) -> bool:
         try:
-            manifest = json.loads(self._artifact(stage, "manifest.json").read_bytes())
+            manifest = filecache.read_json(self._artifact(stage, "manifest.json"))
             if manifest["stage"] != stage or not manifest["outputs"]:
                 return False
             for name, digest in manifest["outputs"].items():
@@ -389,9 +391,7 @@ class RunStore:
                 source_stage = dependency["stage"]
                 if source_stage >= stage or not self.valid(source_stage):
                     return False
-                source_manifest = json.loads(
-                    self._artifact(source_stage, "manifest.json").read_bytes()
-                )
+                source_manifest = filecache.read_json(self._artifact(source_stage, "manifest.json"))
                 if dependency["name"] not in source_manifest["outputs"]:
                     return False
                 if _hash(self._artifact(source_stage, dependency["name"])) != dependency["sha256"]:
@@ -433,7 +433,7 @@ class RunStore:
         marker = self.path / "archive-pending.json"
         if not marker.exists():
             return
-        transaction = json.loads(marker.read_bytes())
+        transaction = filecache.read_json(marker)
         stage, attempt = transaction["stage"], transaction["attempt"]
         self._artifact(stage, "manifest.json")
         if not isinstance(attempt, int) or attempt < 1:
@@ -467,13 +467,16 @@ class RunStore:
             else:
                 with path.open("r+b") as handle:  # drop the torn final append
                     handle.truncate(snapshot.offset)
+                filecache.forget(path)
                 forget_log(path)
         entry = {"kind": kind, "data": data, "timestamp": datetime.now(UTC).isoformat()}
         line = prefix + (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+        before = filecache.signature(path)
         with path.open("ab") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
+        filecache.appended(path, before, line)
         self._notify(("event", kind, data))
 
     def activity(
@@ -507,13 +510,13 @@ class RunStore:
     def sources(self) -> dict[str, str]:
         if not self.valid(1):
             raise WorkflowError("Supplied source snapshot changed or source index is invalid")
-        records = json.loads((self.path / "sources.json").read_bytes())["sources"]
+        records = filecache.read_json(self.path / "sources.json")["sources"]
         result = {}
         for record in records:
             path = (self.path / record["path"]).resolve()
             if not path.is_relative_to(self.path) or _hash(path) != record["sha256"]:
                 raise WorkflowError("Supplied source snapshot changed")
-            result[record["path"]] = path.read_bytes().decode("utf-8")
+            result[record["path"]] = filecache.read_text(path)
         return result
 
     @contextmanager

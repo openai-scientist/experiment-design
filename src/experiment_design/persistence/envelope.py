@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from experiment_design.api.contract_models import EventClass, EventEnvelope, Phase
+from experiment_design.persistence import filecache
 from experiment_design.persistence.store import LogSnapshot, _json, forget_log, read_log
 
 _LOCKS: dict[Path, threading.Lock] = {}
@@ -79,17 +80,21 @@ class EnvelopeLog:
                 else:
                     with self.path.open("r+b") as handle:  # drop the torn final append
                         handle.truncate(snapshot.offset)
+                    filecache.forget(self.path)
                     forget_log(self.path)
+            data = prefix + line.encode("utf-8") + b"\n"
+            before = filecache.signature(self.path)
             with self.path.open("ab") as handle:
-                handle.write(prefix + line.encode("utf-8") + b"\n")
+                handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+            filecache.appended(self.path, before, data)
         return envelope
 
     @property
     def delivered_seq(self) -> int:
         try:
-            value = json.loads(self._cursor.read_text(encoding="utf-8"))["delivered_seq"]
+            value = filecache.read_json(self._cursor)["delivered_seq"]
         except (OSError, ValueError, KeyError, TypeError):
             return 0
         return value if isinstance(value, int) and value >= 0 else 0
