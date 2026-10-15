@@ -471,7 +471,12 @@ def test_final_check_revision_transmits_original_final_objections(tmp_path):
     outputs = happy_outputs()
     outputs[-1] = {"markdown": "Final objection: missing blinding", "findings": [MAJOR]}
     outputs += revised("Blinded plan", recommended_action="Added blinding")
-    outputs.append({"markdown": "Fresh inspection"})
+    outputs.append(
+        {
+            "markdown": "Fresh inspection",
+            "resolutions": [{"finding_id": "P1", "status": "resolved", "reason": "fixed"}],
+        }
+    )
     provider = Provider(outputs)
     state = advance(store, provider, Judge(), RunConfig())
     assert state.review_complete
@@ -604,7 +609,14 @@ def test_resume_after_failed_revision_keeps_plan_and_objections(tmp_path, monkey
         advance(store, Provider(outputs), Judge(), RunConfig())
     refinements = store.state.refinements
     monkeypatch.setattr(store, "complete", real_complete)
-    resumed = Provider([{"markdown": "Fresh final"}])
+    resumed = Provider(
+        [
+            {
+                "markdown": "Fresh final",
+                "resolutions": [{"finding_id": "P1", "status": "resolved", "reason": "fixed"}],
+            }
+        ]
+    )
     state = advance(store, resumed, Judge(), RunConfig())
     # The accepted revision and both rejoinders are not replayed; only the final check runs.
     assert len(resumed.starts) == 1
@@ -946,6 +958,7 @@ def test_final_check_after_a_change_request_is_convergent(tmp_path):
     state = advance(store, provider, Judge(), RunConfig())
     final = json.loads(store.read(5, "final_review.json"))["findings"][0]
     assert (final["severity"], final["issue"]) == ("MINOR", "[unchanged] Late find")
+    assert "late: MAJOR → MINOR [unchanged]" in store.read(5, "final_review.md")
     assert state.review_complete
     documents = provider.documents(6)
     assert json.loads(documents["previous_final_findings"]) == []
@@ -961,3 +974,23 @@ def test_findings_about_execution_time_evidence_never_block(tmp_path):
     assert saved["severity"] == "MINOR"
     assert saved["issue"] == "[for execution] Dataset hash unknown"
     assert state.review_complete
+
+
+def test_previous_final_is_the_latest_archived_final_check(tmp_path):
+    from types import SimpleNamespace
+
+    from experiment_design.workflow.engine import _previous_final
+
+    store = SimpleNamespace(path=tmp_path)
+    assert _previous_final(store) is None
+    for number, plan in ((1, "old"), (2, "newer")):
+        (tmp_path / "attempts" / str(number) / "stage-05").mkdir(parents=True)
+        (tmp_path / "attempts" / str(number) / "stage-04").mkdir()
+        (tmp_path / "attempts" / str(number) / "stage-05" / "final_review.json").write_text(
+            json.dumps({"findings": []}), encoding="utf-8"
+        )
+        (tmp_path / "attempts" / str(number) / "stage-04" / "revised_plan.md").write_text(
+            plan, encoding="utf-8"
+        )
+    (tmp_path / "attempts" / "3" / "stage-04").mkdir(parents=True)
+    assert _previous_final(store) == ([], "newer")

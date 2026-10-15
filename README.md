@@ -83,7 +83,7 @@ The management repository owns the contract. A copy of its schemas and examples 
 Inputs: `i2h.hypotheses/v1` (required), `i2h.evidence/v1` and `review.findings/v1` (optional).
 Evidence cards are rendered under the hypotheses that cite them. Blocking and major review
 findings on the selected hypotheses become a "Known issues" list. A malformed optional input is
-skipped with a warning. After a researcher or system change request, the final check must
+skipped with a warning. After any earlier final check (researcher or system revision), the final check must
 resolve each earlier MAJOR finding and may raise a new MAJOR only on a section the revision
 changed. Findings about evidence that exists only at execution time never block a plan.
 

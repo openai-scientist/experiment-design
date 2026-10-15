@@ -10,6 +10,30 @@ from experiment_design.agents.benchmark.models import Resource
 
 _HUB = "https://huggingface.co"
 _GITHUB_REPO = re.compile(r"^https://github\.com/([^/\s]+)/([^/\s#?]+)")
+_GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+_GITHUB_RESERVED = {
+    "orgs",
+    "topics",
+    "users",
+    "settings",
+    "marketplace",
+    "features",
+    "collections",
+    "sponsors",
+}
+
+
+def _github_repo(url: str) -> tuple[str, str] | None:
+    match = _GITHUB_REPO.match(url)
+    if match is None:
+        return None
+    owner, name = match[1], match[2].removesuffix(".git")
+    if owner.casefold() in _GITHUB_RESERVED:
+        return None
+    for part in (owner, name):
+        if part in {".", ".."} or not _GITHUB_NAME.match(part):
+            return None
+    return owner, name
 
 
 def acquire(
@@ -20,10 +44,10 @@ def acquire(
 ) -> Resource:
     repo_id = resource.hf_repo_id or (resource.name if resource.origin == "hf_hub" else None)
     if repo_id is None:
-        match = _GITHUB_REPO.match(resource.source_url or "")
-        if match is None or github is None:
+        repo = _github_repo(resource.source_url or "")
+        if repo is None or github is None:
             return resource
-        return _acquire_github(resource, github, now, match[1], match[2].removesuffix(".git"))
+        return _acquire_github(resource, github, now, *repo)
     is_model = resource.kind == "baseline"
     try:
         info = hf.model_info(repo_id) if is_model else hf.dataset_info(repo_id)
@@ -84,11 +108,10 @@ def _acquire_github(
                 }
             )
         release = github.latest_release(owner, name)
-        revision = release.get("tag_name") if release else None
-        if not isinstance(revision, str) or not revision:
-            branch = repo.get("default_branch")
-            commit = github.commit(owner, name, branch) if isinstance(branch, str) else None
-            revision = commit.get("sha") if commit else None
+        tag = release.get("tag_name") if release else None
+        ref = tag if isinstance(tag, str) and tag else repo.get("default_branch")
+        commit = github.commit(owner, name, ref) if isinstance(ref, str) and ref else None
+        revision = commit.get("sha") if commit else None
     except GitHubUnavailable as exc:
         return resource.model_copy(
             update={"reasons": [*resource.reasons, f"GitHub unavailable: {exc}"]}

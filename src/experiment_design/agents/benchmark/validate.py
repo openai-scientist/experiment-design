@@ -20,12 +20,15 @@ def validate(resource: Resource) -> Resource:
     reasons = list(resource.reasons)
     if resource.kind == "baseline" and resource.source_url:
         return resource.model_copy(update={"status": "cited"})
-    if not reasons:
-        reasons.append("no Hub metadata with a revision was retrieved")
-    elif not any("revision" in reason or "Hub" in reason for reason in reasons):
-        reasons.append("no revision available")
-    if resource.retrieved_at and not resource.revision:
-        reasons.append("Hub response has no revision")
+    if (resource.source_url or "").startswith("https://github.com/"):
+        reasons.append("the GitHub lookup gave no revision")
+    else:
+        if not reasons:
+            reasons.append("no Hub metadata with a revision was retrieved")
+        elif not any("revision" in reason or "Hub" in reason for reason in reasons):
+            reasons.append("no revision available")
+        if resource.retrieved_at and not resource.revision:
+            reasons.append("Hub response has no revision")
     return resource.model_copy(update={"status": "unknown", "reasons": reasons})
 
 

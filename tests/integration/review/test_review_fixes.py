@@ -91,7 +91,15 @@ def test_stop_forced_by_budget_is_decided_again_after_a_ceiling_raise(tmp_path, 
     assert state.status == "INCOMPLETE" and state.refinements == 0
     assert json.loads(store.read(stage, "route.json")) == {"choice": "STOP", "forced": True}
     store.update(llm_token_limit=10_000)
-    resumed = Provider(revised("Revised plan") + [{"markdown": "Fresh final"}])
+    resumed = Provider(
+        revised("Revised plan")
+        + [
+            {
+                "markdown": "Fresh final",
+                "resolutions": [{"finding_id": "P1", "status": "resolved", "reason": "fixed"}],
+            }
+        ]
+    )
     state = advance(store, resumed, Judge(), cfg)
     assert state.review_complete and state.refinements == 1
     assert len(resumed.starts) == 4  # revision, two rejoinders, fresh final check

@@ -21,7 +21,7 @@ from experiment_design.api.contract_models import (
 _SKIPPED_FIELDS = {"id", "statement"}
 _LOGGER = logging.getLogger(__name__)
 _TRIM = 300
-_HYPOTHESIS_ANCHOR = re.compile(r"hypothesis:([A-Za-z0-9_-]+)")
+_HYPOTHESIS_ANCHOR = re.compile(r"hypothesis:([A-Za-z0-9_.-]+)")
 
 
 class InputError(ValueError):
@@ -44,8 +44,8 @@ def _trim(value: object) -> str:
 
 
 def _evidence_lines(card: dict) -> list[str]:
-    year = f" ({card['year']})" if card.get("year") else ""
-    link = card.get("doi") or card.get("url")
+    year = f" ({_trim(card['year'])})" if card.get("year") else ""
+    link = _trim(card.get("doi") or card.get("url") or "")
     lines = [f"- {_trim(card['title'])}{year}" + (f" — {link}" if link else "")]
     for field in ("data", "metrics", "findings"):
         if card.get(field):
@@ -63,7 +63,11 @@ def _render(hypotheses: list[dict], cards: dict[str, dict], issues: list[str]) -
             if name not in _SKIPPED_FIELDS
         ]
         refs = hypothesis.get("evidence_refs")
-        cited = [cards[ref] for ref in refs if ref in cards] if isinstance(refs, list) else []
+        cited = (
+            [cards[ref] for ref in refs if isinstance(ref, str) and ref in cards]
+            if isinstance(refs, list)
+            else []
+        )
         if cited:
             lines += ["", "### Evidence", ""]
             for card in cited:
@@ -110,7 +114,9 @@ def _evidence_cards(request: RunCreateRequest, http: httpx.Client) -> dict[str, 
     return cards
 
 
-def _known_issues(request: RunCreateRequest, http: httpx.Client, ids: set[str]) -> list[str]:
+def _known_issues(
+    request: RunCreateRequest, http: httpx.Client, ids: set[str], artifact_id: str
+) -> list[str]:
     refs = [ref for ref in request.inputs.artifacts if ref.schema_id == REVIEW_FINDINGS]
     body = _optional_body(refs[-1], http, REVIEW_FINDINGS) if refs else None
     if body is None:
@@ -120,14 +126,17 @@ def _known_issues(request: RunCreateRequest, http: httpx.Client, ids: set[str]) 
         for finding in body["findings"]:
             if finding["severity"] not in ("blocking", "major"):
                 continue
+            anchored = finding["anchor"].get("artifact_id")
+            if isinstance(anchored, str) and anchored != artifact_id:
+                continue
             locator = finding["anchor"]["locator"]
             match = _HYPOTHESIS_ANCHOR.match(locator)
-            if match is None or match[1] in ids:
+            if match is None or any(match[1] == i or match[1].startswith(i + ".") for i in ids):
                 issues.append(
                     f"- [{finding['finding_id']}] ({finding['severity']}) "
                     f"{locator}: {_trim(finding['issue'])}"
                 )
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError, AttributeError) as exc:
         _LOGGER.warning("Skipping malformed %s input: %r", REVIEW_FINDINGS, exc)
         return []
     return issues
@@ -175,7 +184,7 @@ def fetch_inputs(request: RunCreateRequest, http: httpx.Client, workdir: Path) -
     workdir.mkdir(parents=True, exist_ok=True)
     brief = _brief(request)
     cards = _evidence_cards(request, http)
-    issues = _known_issues(request, http, {h["id"] for h in kept})
+    issues = _known_issues(request, http, {h["id"] for h in kept}, ref.artifact_id)
     path = workdir / "hypotheses.md"
     path.write_text(_render(kept, cards, issues) + brief, encoding="utf-8")
     return [path]

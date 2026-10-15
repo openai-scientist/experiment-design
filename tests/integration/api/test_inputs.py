@@ -223,3 +223,36 @@ def test_malformed_or_tampered_optional_inputs_are_skipped_with_a_warning(tmp_pa
     assert (
         len([r for r in caplog.records if "optional" in r.message or "malformed" in r.message]) == 3
     )
+
+
+def test_hostile_cards_and_foreign_findings_are_neutralised(tmp_path):
+    platform = FakePlatform()
+    hypotheses = _hypotheses()
+    hypotheses[0]["evidence_refs"] = ["card-p-1", 7, None]
+    request = make_request(platform, stage_run_id="sr1", hypotheses=hypotheses, selection=["H1"])
+    evidence = _evidence()
+    evidence["cards"][0] |= {"year": "2024\n## Injected", "doi": "10.1/a\n# Heading"}
+    _add(platform, request, "i2h.evidence/v1", evidence)
+    review = _review()
+    review["findings"] += [
+        {
+            "finding_id": "F9",
+            "anchor": {"locator": "document:x", "artifact_id": "other"},
+            "severity": "major",
+            "issue": "foreign",
+            "author": "reviewer",
+        },
+        {
+            "finding_id": "F8",
+            "anchor": {"locator": "hypothesis:H1.2", "artifact_id": None},
+            "severity": "major",
+            "issue": "dotted",
+            "author": "reviewer",
+        },
+    ]
+    _add(platform, request, "review.findings/v1", review)
+    text = fetch_inputs(request, _http(platform), tmp_path)[0].read_text(encoding="utf-8")
+    assert "\n## Injected" not in text and "\n# Heading" not in text
+    assert "(2024 ## Injected)" in text
+    assert "F9" not in text
+    assert "[F8] (major) hypothesis:H1.2: dotted" in text

@@ -141,3 +141,10 @@ def test_minimums_report_missing_benchmark():
         "only 0 verified benchmark (minimum 1)",
         "only 0 verified or cited baseline (minimum 2)",
     ]
+
+
+def test_github_resource_without_revision_names_the_github_lookup():
+    resource = _resource(source_url="https://github.com/o/r", hf_repo_id=None)
+    out = validate(resource)
+    assert out.status == "unknown"
+    assert out.reasons == ["the GitHub lookup gave no revision"]

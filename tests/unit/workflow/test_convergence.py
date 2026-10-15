@@ -1,5 +1,10 @@
 from experiment_design.contracts import AgentOutput, Finding, Resolution
-from experiment_design.workflow.convergence import converge_final, due_later, previous_majors
+from experiment_design.workflow.convergence import (
+    converge_final,
+    due_later,
+    previous_majors,
+    severity_adjustments,
+)
 
 OLD = "# Plan\n## Design\nold design\n## Analysis\nsame\n## Costs\nsame\n"
 NEW = "# Plan\n## Design\nnew design\n## Analysis\nsame\n## Costs\nsame\n"
@@ -43,7 +48,7 @@ def test_maintained_previous_major_stays_major_on_unchanged_section():
     assert converge_final(kept, prior, OLD, NEW).findings[0].severity == "MAJOR"
 
 
-def test_missing_resolution_counts_as_maintained_and_resolved_does_not():
+def test_missing_resolution_counts_as_maintained_and_unfounded_resolved_is_rejected():
     prior = previous_majors([_finding("F1", anchor="Costs")])
     silent = converge_final(_output(_finding("F9", anchor="Costs")), prior, OLD, NEW)
     assert silent.findings[0].severity == "MAJOR"
@@ -51,7 +56,8 @@ def test_missing_resolution_counts_as_maintained_and_resolved_does_not():
         _finding("F9", anchor="Costs"),
         resolutions=[Resolution(finding_id="P1", status="resolved", reason="fixed")],
     )
-    assert converge_final(resolved, prior, OLD, NEW).findings[0].severity == "MINOR"
+    # The claim is rejected: the anchor section did not change.
+    assert converge_final(resolved, prior, OLD, NEW).findings[0].severity == "MAJOR"
 
 
 def test_later_findings_never_block():
@@ -60,3 +66,48 @@ def test_later_findings_never_block():
     assert out.findings[0].severity == "MINOR"
     assert out.findings[0].issue == "[for execution] Issue F1"
     assert out.findings[1].severity == "MAJOR"
+
+
+DUP_OLD = "# Plan\n## E1\n### Metrics\nm1\n## E2\n### Metrics\nm2\n"
+DUP_NEW = "# Plan\n## E1\n### Metrics\nm1\n## E2\n### Metrics\nchanged\n"
+
+
+def test_duplicate_headings_are_kept_apart_and_any_changed_match_counts():
+    own = converge_final(_output(_finding("F1", anchor="e1 > metrics")), [], DUP_OLD, DUP_NEW)
+    assert own.findings[0].severity == "MINOR"
+    shared = converge_final(_output(_finding("F1", anchor="Metrics")), [], DUP_OLD, DUP_NEW)
+    assert shared.findings[0].severity == "MAJOR"
+
+
+def test_maintained_resolution_by_id_keeps_a_new_major():
+    prior = previous_majors([_finding("F1", anchor="Costs")])
+    out = _output(
+        _finding("P1", anchor="Analysis"),
+        resolutions=[Resolution(finding_id="P1", status="maintained", reason="open")],
+    )
+    assert converge_final(out, prior, OLD, NEW).findings[0].severity == "MAJOR"
+
+
+def test_uncovered_maintained_major_is_added_again():
+    prior = previous_majors([_finding("F1", anchor="Costs")])
+    out = converge_final(_output(), prior, OLD, NEW)
+    assert [(f.id, f.severity, f.issue) for f in out.findings] == [
+        ("P1", "MAJOR", "[maintains P1] Issue F1")
+    ]
+
+
+def test_resolved_claim_on_unchanged_section_is_rejected_but_changed_one_accepted():
+    prior = previous_majors([_finding("F1", anchor="Costs"), _finding("F2", anchor="Design")])
+    claims = [
+        Resolution(finding_id="P1", status="resolved", reason="fixed"),
+        Resolution(finding_id="P2", status="resolved", reason="fixed"),
+    ]
+    out = converge_final(_output(resolutions=claims), prior, OLD, NEW)
+    assert [f.issue for f in out.findings] == ["[maintains P1] Issue F1"]
+
+
+def test_severity_adjustments_lists_each_demotion():
+    out = converge_final(_output(_finding("F1", anchor="Analysis")), [], OLD, NEW)
+    text = severity_adjustments(out)
+    assert "## Severity adjustments" in text and "F1: MAJOR → MINOR [unchanged]" in text
+    assert severity_adjustments(_output(_finding("F2", anchor="Design"))) == ""

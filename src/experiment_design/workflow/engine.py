@@ -37,7 +37,12 @@ from experiment_design.publication.experiment_index import (
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.vocabulary import REVIEW_ROLES
-from experiment_design.workflow.convergence import converge_final, due_later, previous_majors
+from experiment_design.workflow.convergence import (
+    converge_final,
+    due_later,
+    previous_majors,
+    severity_adjustments,
+)
 
 # The input may hold several hypotheses; the path is unchanged so old runs resume.
 HYPOTHESES_INPUT = "stage-01/hypothesis.md"
@@ -448,21 +453,20 @@ def _final_options(
 
 
 def _previous_final(store: RunStore) -> tuple[list[Finding], str] | None:
-    """The final findings and plan the researcher saw, when a change request led to this check."""
-    replies = [
-        e["data"]
-        for e in store.events()
-        if e["kind"] == "researcher.response" and "review_of" not in e["data"]
-    ]
-    if not replies or replies[-1]["action"] != "REQUEST_CHANGES":
-        return None
-    archive = store.path / "attempts" / str(replies[-1]["revision"])
-    try:
-        raw = json.loads((archive / "stage-05" / "final_review.json").read_text(encoding="utf-8"))
-        plan = (archive / "stage-04" / "revised_plan.md").read_text(encoding="utf-8")
-        return [Finding.model_validate(f) for f in raw["findings"]], plan
-    except (OSError, ValueError, KeyError):
-        return None
+    """The findings and plan of the most recent archived final check, if any."""
+    root = store.path / "attempts"
+    numbers = sorted((int(d.name) for d in root.glob("*") if d.name.isdigit()), reverse=True)
+    for number in numbers:
+        archive = root / str(number)
+        try:
+            raw = json.loads(
+                (archive / "stage-05" / "final_review.json").read_text(encoding="utf-8")
+            )
+            plan = (archive / "stage-04" / "revised_plan.md").read_text(encoding="utf-8")
+            return [Finding.model_validate(f) for f in raw["findings"]], plan
+        except (OSError, ValueError, KeyError):
+            continue
+    return None
 
 
 def _plan(store: RunStore, stage: int, name: str) -> None:
@@ -1085,6 +1089,8 @@ def _advance(
                 )
                 if earlier:
                     converge_final(final, prior, earlier[1], inputs["plan"])
+                if adjustments := severity_adjustments(final):
+                    store.write(5, "final_review.md", final.markdown.rstrip() + adjustments)
                 seen = {(f.id, f.issue) for f in final.findings}
                 final.findings.extend(f for f in deterministic if (f.id, f.issue) not in seen)
                 store.write(5, "final_review.json", _metadata(final))
