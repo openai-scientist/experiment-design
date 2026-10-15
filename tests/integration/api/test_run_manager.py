@@ -409,4 +409,4 @@ def test_questions_are_answered_for_the_system_in_light_mode(tmp_path):
     _wait(manager, run_id, Phase.awaiting_researcher, gate=True)
     log = (manager._runs[run_id].store.path / "stage-06" / "decisions.jsonl").read_text()
     record = json.loads(log.splitlines()[0])
-    assert (record["action"], record["researcher"], record["option"]) == ("ANSWER", "system", 1)
+    assert (record["action"], record["researcher"], record["option"]) == ("ANSWER", "system", None)

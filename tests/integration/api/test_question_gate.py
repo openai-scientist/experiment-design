@@ -85,7 +85,7 @@ def test_copilot_question_gate_and_exact_answer_resume(tmp_path):
     )
 
 
-def test_light_uses_actual_default_without_opening_question_gate(tmp_path):
+def test_light_answers_without_picking_an_option_or_opening_question_gate(tmp_path):
     manager, platform, _ = _manager(tmp_path, llm_factory=lambda *a: Asking())
     run_id = manager.create(make_request(platform, stage_run_id="q")).engine_run_id
     _wait(manager, run_id, Phase.awaiting_researcher, gate=True)
@@ -95,7 +95,8 @@ def test_light_uses_actual_default_without_opening_question_gate(tmp_path):
         for e in manager._runs[run_id].store.events()
         if e["kind"] == "researcher.response"
     ][0]
-    assert (record["option"], record["researcher"]) == (3, "system")
+    assert (record["option"], record["researcher"]) == (None, "system")
+    assert record["text"].startswith("No researcher can answer")
     assert not any(
         e.type == "run.gate_opened" and e.payload["kind"] == "question"
         for e in platform.events["q"]

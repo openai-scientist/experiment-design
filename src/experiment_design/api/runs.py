@@ -86,7 +86,14 @@ LlmFactory = Callable[[LLMConfig, str, ModelRole, Callable[[dict], None]], Any]
 JudgeFactory = Callable[[JevConfig, str], Judge]
 
 STAGE_KEY = "experiment_plan"
-_DEFAULT_ANSWER = "Proceed with the recommended default."
+# Auto and light runs have no researcher to answer: a model-written default option could add a
+# requirement that then steers the whole plan (auto run e526ff44), so none is picked.
+_DEFAULT_ANSWER = (
+    "No researcher can answer in this mode. Do not add a requirement because of this question. "
+    "Keep the plan's current choice; where none exists, take the option that adds the fewest new "
+    'requirements and label it "Proposal — confirm before launch". List this question under '
+    "Limitations as open for the researcher."
+)
 _CANCEL_WAIT_SECONDS = 5.0
 
 
@@ -621,10 +628,9 @@ class RunManager:
         respond(
             run.store,
             action="ANSWER",
-            text="" if state.question_options else _DEFAULT_ANSWER,
+            text=_DEFAULT_ANSWER,
             researcher="system",
             revision=state.attempt,
-            option=state.question_default if state.question_options else None,
         )
         return True
 
