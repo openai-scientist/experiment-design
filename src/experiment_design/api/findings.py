@@ -44,7 +44,18 @@ def to_contract_finding(
     )
 
 
-def mapped_findings(store: RunStore, stage: int, name: str, *, round: int, artifact_id: str):
+CRITIC_REVIEWS = ("methodologist_review.json", "skeptic_review.json")
+
+
+def mapped_findings(
+    store: RunStore,
+    stage: int,
+    name: str,
+    *,
+    round: int,
+    artifact_id: str,
+    open_after_final: bool | None = None,
+):
     result = []
     for record in store.bound_findings(stage, name, round):
         finding_id = record.pop("finding_id")
@@ -52,7 +63,7 @@ def mapped_findings(store: RunStore, stage: int, name: str, *, round: int, artif
         result.append(
             to_contract_finding(
                 finding,
-                open_after_final=stage == 5,
+                open_after_final=stage == 5 if open_after_final is None else open_after_final,
                 author="reviewer",
                 artifact_id=artifact_id,
                 finding_id=finding_id,
@@ -69,10 +80,26 @@ def review_findings(
     reviewer_model: str,
 ) -> ReviewFindings:
     if not store.valid(5):
-        raise WorkflowError("Current final review is absent or invalid")
+        if not store.valid(4):
+            raise WorkflowError("Current final review is absent or invalid")
+        # Stopped after the critics: their findings are what stays open (live: a stop before
+        # the final check reported no findings, so the ledger and the published plan lost five).
+        stopped = []
+        for name in CRITIC_REVIEWS:
+            with suppress(FileNotFoundError):
+                stopped += mapped_findings(
+                    store, 4, name, round=round, artifact_id=artifact_id, open_after_final=True
+                )
+        return ReviewFindings(
+            round=round,
+            reviewed_artifact_id=artifact_id,
+            reviewer_model=reviewer_model,
+            findings=stopped,
+            passed=False,
+        )
     final = mapped_findings(store, 5, "final_review.json", round=round, artifact_id=artifact_id)
     original = []
-    for name in ("methodologist_review.json", "skeptic_review.json"):
+    for name in CRITIC_REVIEWS:
         with suppress(FileNotFoundError):
             original += mapped_findings(store, 4, name, round=round, artifact_id=artifact_id)
     return ReviewFindings(

@@ -72,14 +72,24 @@ def test_incomplete_opens_gate(tmp_path):
     assert "run.failed" not in _types(platform)
 
 
-def test_incomplete_without_final_review_reports_the_error(tmp_path):
+def test_a_stop_before_the_final_review_reports_the_critics_findings(tmp_path):
     manager, platform, run_id = _incomplete(tmp_path, role="methodologist")
-    _wait(manager, run_id, Phase.awaiting_researcher, gate=True)
+    gate = _wait(manager, run_id, Phase.awaiting_researcher, gate=True).open_gate
     assert manager.wait_idle(run_id) and manager.flush(run_id)
     assert not manager._runs[run_id].store.valid(5)
     done = [e for e in platform.events["sr1"] if e.type == "review.completed"]
-    assert done[-1].payload["passed"] is False and done[-1].payload["error"]
-    assert not [a for a in platform.artifacts["sr1"] if a.meta.schema_id == "review.findings/v1"]
+    assert done[-1].payload["passed"] is False and not done[-1].payload.get("error")
+    (report,) = [a for a in platform.artifacts["sr1"] if a.meta.schema_id == "review.findings/v1"]
+    findings = json.loads(report.content)["findings"]
+    assert [(f["severity"], f["kind"]) for f in findings] == [("blocking", "fix")]
+    assert "No control arm" in findings[0]["issue"]
+    manager.answer(
+        run_id, gate.gate_id, GateAnswer(action="approve", actor="user", decided_by="u1")
+    )
+    _wait(manager, run_id, Phase.published)
+    assert manager.wait_idle(run_id)
+    plan = (manager._runs[run_id].store.path / "stage-07" / "exp_plan.md").read_text("utf-8")
+    assert "## Finding còn mở" in plan and "No control arm" in plan
 
 
 @pytest.mark.parametrize("mode", ["auto", "light"])

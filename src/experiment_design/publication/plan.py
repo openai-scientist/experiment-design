@@ -79,8 +79,16 @@ def render_review(store: RunStore) -> str:
 
 
 def _open_findings(store: RunStore) -> list[dict]:
-    """Findings of the final review, with the IDs the Platform saw; empty when it never ran."""
-    if not store.valid(5) or not (store.path / "stage-05" / "final_review.json").is_file():
+    """Findings of the final review, with the IDs the Platform saw; without a final review,
+    the critics' findings (a stop after the critics leaves them open)."""
+    if store.valid(5) and (store.path / "stage-05" / "final_review.json").is_file():
+        records = store.bound_findings(5, "final_review.json", store.state.attempt)
+    elif store.valid(4):
+        records = []
+        for name in ("methodologist_review.json", "skeptic_review.json"):
+            if (store.path / "stage-04" / name).is_file():
+                records += store.bound_findings(4, name, store.state.attempt)
+    else:
         return []
     return [
         {
@@ -90,7 +98,7 @@ def _open_findings(store: RunStore) -> list[dict]:
             "consequence": record.get("consequence", ""),
             "suggestion": record.get("suggestion", ""),
         }
-        for record in store.bound_findings(5, "final_review.json", store.state.attempt)
+        for record in records
     ]
 
 
