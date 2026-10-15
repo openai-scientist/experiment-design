@@ -55,8 +55,11 @@ CLI/config own researcher commands and configuration.
 | S6 | Present the exact current Markdown and record real researcher decisions. |
 | S7 | Publish `stage-07/exp_plan.md` without changing the scientific body. |
 
-JEV chooses WHAT/NEXT among legal code-enumerated options; agents choose HOW.
-Validate returned options; never claim JEV itself is deterministic. Sole legal
+Code enumerates the legal routes and picks one when a rule decides it: a sole option,
+a needed question, a progress route (DESIGN, CHECK, PRESENT) while no MAJOR fix is open,
+or a single legal refinement. JEV only chooses REVISE or REFRAME when both are legal.
+STOP is never judged while another route is legal. Agents choose HOW.
+Validate returned options; never claim JEV itself is deterministic. Rule-decided
 routes are labelled automatic and require no fabricated JEV call. Methodology is
 open-ended; calculator coverage is not an allowlist or universal power gate. A method
 without a calculator can still be proposed, with its uncertainty stated.

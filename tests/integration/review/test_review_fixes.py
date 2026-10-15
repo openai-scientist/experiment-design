@@ -70,16 +70,6 @@ def test_request_changes_reads_the_persisted_limits(tmp_path):
 # Stops that limits forced stay re-decidable
 
 
-class StopJudge(Judge):
-    """Chooses STOP whenever a refinement is also legal."""
-
-    def decide(self, state, questions):
-        return {
-            key: Decision("STOP" if "REVISE" in q.options else next(iter(q.options)), {}, 1.0, 1)
-            for key, q in questions.items()
-        }
-
-
 @pytest.mark.parametrize("stage", [4, 5])
 def test_stop_forced_by_budget_is_decided_again_after_a_ceiling_raise(tmp_path, stage):
     store = store_for(tmp_path)
@@ -106,20 +96,126 @@ def test_stop_forced_by_budget_is_decided_again_after_a_ceiling_raise(tmp_path, 
     assert store.read(7, "exp_plan.md") == "Revised plan"
 
 
-def test_stop_chosen_by_jev_among_legal_options_stays_final(tmp_path):
+def test_later_critic_round_with_a_fixable_major_never_stops(tmp_path):
     store = store_for(tmp_path)
     outputs = happy_outputs()[:4]
     outputs[2]["findings"] = [MAJOR]
-    # After a first refinement STOP is the judge's call again (the first round must revise).
+    outputs += revised("Revised plan") + [{"markdown": "Final review"}]
+    seen = []
+
+    class Recording(Judge):
+        def decide(self, state, questions):
+            seen.append((state, questions))
+            return super().decide(state, questions)
+
+    # After a first refinement the options still hold STOP, but the judge is not asked about it.
     store.update(refinements=1)
-    state = advance(store, Provider(outputs), StopJudge(), RunConfig())
+    state = advance(store, Provider(outputs), Recording(), RunConfig())
+    assert state.review_complete
+    (route,) = [r for r in events(store, "route") if r["rule"] == "jev_refinement"]
+    assert route["choice"] == "REVISE" and route["automatic"] is False
+    assert "probabilities" in route and "confidence" in route
+    ((sent, questions),) = seen
+    assert set(sent) == {"stage", "open_findings"}
+    assert [f["id"] for f in sent["open_findings"]] == ["gap"]
+    assert set(sent["open_findings"][0]) == {
+        "id",
+        "severity",
+        "category",
+        "issue",
+        "consequence",
+        "suggestion",
+    }
+    assert list(questions["next"].options) == ["REVISE", "REFRAME"]
+    assert "STOP" not in [r["choice"] for r in events(store, "route")]
+
+
+def test_later_final_check_with_a_fixable_major_never_stops(tmp_path):
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[4] = {"markdown": "First objection", "findings": [MAJOR]}
+    outputs += revised("Revised once") + [{"markdown": "Second objection", "findings": [MAJOR]}]
+    outputs += revised("Revised twice") + [{"markdown": "Third objection", "findings": [MAJOR]}]
+    seen = []
+
+    class Recording(Judge):
+        def decide(self, state, questions):
+            seen.append((state, list(questions["next"].options)))
+            return super().decide(state, questions)
+
+    state = advance(store, Provider(outputs), Recording(), RunConfig())
+    # The second check is a later check, where STOP is legal; the judge still sees only the
+    # narrow question and the open findings. The third check has no refinement left.
+    assert [options for _, options in seen] == [["REVISE", "REFRAME"]] * 2
+    assert all(set(sent) == {"stage", "open_findings"} for sent, _ in seen)
+    choices = [r["choice"] for r in events(store, "route")]
+    assert choices[2:] == ["REVISE", "REVISE", "STOP"]
+    assert json.loads(store.read(5, "route.json")) == {"choice": "STOP", "forced": True}
+    assert state.status == "INCOMPLETE" and state.refinements == 2
+
+
+def test_exhausted_refinements_record_a_forced_stop(tmp_path):
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[4] = {"markdown": "Final objection", "findings": [MAJOR]}
+    state = advance(store, Provider(outputs), Judge(), RunConfig(max_refinements=0))
     assert state.status == "INCOMPLETE"
-    assert json.loads(store.read(4, "route.json")) == {"choice": "STOP", "forced": False}
-    store.update(llm_token_limit=10_000_000)
-    resumed = Provider([])
-    state = advance(store, resumed, StopJudge(), RunConfig())
-    assert state.status == "INCOMPLETE" and state.refinements == 1
-    assert not resumed.inputs
+    assert json.loads(store.read(5, "route.json")) == {"choice": "STOP", "forced": True}
+    assert events(store, "route")[-1]["rule"] == "sole_option"
+
+
+class CountingStopJudge(Judge):
+    """Prefers STOP, and counts how often it is asked at all."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def decide(self, state, questions):
+        self.calls += 1
+        return {
+            key: Decision("STOP" if "STOP" in q.options else next(iter(q.options)), {}, 1.0, 1)
+            for key, q in questions.items()
+        }
+
+
+def test_final_check_without_an_open_fix_is_presented_without_the_judge(tmp_path):
+    store = store_for(tmp_path)
+    judge = CountingStopJudge()
+    state = advance(store, Provider(happy_outputs()), judge, RunConfig())
+    assert judge.calls == 0
+    final = events(store, "route")[-1]
+    assert (final["choice"], final["rule"], final["automatic"]) == ("PRESENT", "no_open_fix", True)
+    assert state.review_complete and state.approval == "pending"
+
+
+def test_critics_without_an_open_fix_check_without_the_judge(tmp_path):
+    store = store_for(tmp_path)
+    judge = CountingStopJudge()
+    advance(store, Provider(happy_outputs()), judge, RunConfig())
+    assert json.loads(store.read(4, "route.json")) == {"choice": "CHECK", "forced": False}
+    assert [(r["choice"], r["rule"]) for r in events(store, "route")] == [
+        ("DESIGN", "no_open_fix"),
+        ("CHECK", "no_open_fix"),
+        ("PRESENT", "no_open_fix"),
+    ]
+    assert judge.calls == 0
+
+
+def test_framing_question_without_a_block_designs_and_a_blocking_one_asks(tmp_path):
+    soft_dir, hard_dir = tmp_path / "soft", tmp_path / "hard"
+    soft_dir.mkdir()
+    hard_dir.mkdir()
+    judge = CountingStopJudge()
+    soft = {"markdown": "Brief", "question": "Which unit?", "options": ["A", "B"]}
+    store = store_for(soft_dir)
+    state = advance(store, Provider([soft, *happy_outputs()[1:]]), judge, RunConfig())
+    assert state.review_complete
+    assert events(store, "route")[0]["choice"] == "DESIGN"
+    store = store_for(hard_dir)
+    state = advance(store, Provider([soft | {"needs_input": True}]), judge, RunConfig())
+    assert state.status == "AWAITING_RESEARCHER" and state.question == "Which unit?"
+    assert events(store, "route")[0]["rule"] == "needs_input"
+    assert judge.calls == 0
 
 
 # ASK_RESEARCHER needs a real question
@@ -133,24 +229,23 @@ def test_whitespace_question_is_rejected(question):
 
 
 def test_no_route_offers_ask_for_a_whitespace_question(tmp_path, monkeypatch):
-    class Recording(Judge):
-        def __init__(self):
-            self.offered = []
+    offered = []
+    real_route = engine._route
 
-        def decide(self, state, questions):
-            self.offered += [list(q.options) for q in questions.values()]
-            return super().decide(state, questions)
+    def recording_route(store, judge, cfg, options, outputs):
+        offered.append(list(options))
+        return real_route(store, judge, cfg, options, outputs)
 
+    monkeypatch.setattr(engine, "_route", recording_route)
     real = engine._agent
 
     def blank_question(*args, **options):
         return real(*args, **options).model_copy(update={"question": "  "})
 
     monkeypatch.setattr(engine, "_agent", blank_question)
-    judge = Recording()
-    state = advance(store_for(tmp_path), Provider(happy_outputs()), judge, RunConfig())
+    state = advance(store_for(tmp_path), Provider(happy_outputs()), Judge(), RunConfig())
     assert state.review_complete
-    assert judge.offered and all("ASK_RESEARCHER" not in options for options in judge.offered)
+    assert offered and all("ASK_RESEARCHER" not in options for options in offered)
 
 
 # Revision and final-check inputs and outputs
@@ -208,30 +303,16 @@ def test_revision_question_goes_to_the_researcher_before_any_rejoinder(tmp_path)
     assert "Sham" in provider.documents(0)["researcher_responses"]
 
 
-class AskJudge:
-    """Asks the researcher whenever that route is legal, otherwise takes the first option."""
-
-    def decide(self, state, questions):
-        return {
-            key: Decision(
-                "ASK_RESEARCHER" if "ASK_RESEARCHER" in q.options else next(iter(q.options)),
-                {},
-                1.0,
-                tokens=1,
-            )
-            for key, q in questions.items()
-        }
-
-
 def test_answer_to_a_critic_question_resumes_at_revision(tmp_path):
     store = store_for(tmp_path)
     outputs = happy_outputs()[:4]
     outputs[2] |= {
         "findings": [MAJOR],
+        "needs_input": True,
         "question": "Which control?",
         "options": ["Sham", "Usual care"],
     }
-    state = advance(store, Provider(outputs), AskJudge(), RunConfig())
+    state = advance(store, Provider(outputs), Judge(), RunConfig())
     assert (state.status, state.stage) == ("AWAITING_RESEARCHER", 4)
     respond(store, action="ANSWER", text="Sham", researcher="R", revision=state.attempt)
     provider = Provider([*revised("Revised plan"), {"markdown": "Final review"}])
@@ -248,8 +329,12 @@ def test_answer_to_a_critic_question_resumes_at_revision(tmp_path):
 def test_answer_to_a_final_check_question_revises_with_its_objections(tmp_path):
     store = store_for(tmp_path)
     outputs = happy_outputs()
-    outputs[4] |= {"question": "Which margin?", "options": ["Three points", "Five points"]}
-    state = advance(store, Provider(outputs), AskJudge(), RunConfig())
+    outputs[4] |= {
+        "needs_input": True,
+        "question": "Which margin?",
+        "options": ["Three points", "Five points"],
+    }
+    state = advance(store, Provider(outputs), Judge(), RunConfig())
     assert (state.status, state.stage) == ("AWAITING_RESEARCHER", 5)
     respond(store, action="ANSWER", text="Three points", researcher="R", revision=state.attempt)
     provider = Provider([*revised("Revised plan"), {"markdown": "Final review"}])

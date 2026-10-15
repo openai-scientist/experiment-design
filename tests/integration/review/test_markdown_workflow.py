@@ -162,6 +162,13 @@ def test_clarification_preserves_plan_and_does_not_confirm_intent(tmp_path):
     assert any(e["kind"] == "clarification.answer" for e in store.events())
 
 
+def refinement_outputs():
+    """Brief, draft and critics where the methodologist leaves a fixable MAJOR: JEV must choose."""
+    outputs = happy_outputs()[:4]
+    outputs[2]["findings"] = [MAJOR]
+    return outputs
+
+
 def test_illegal_judge_choice_cannot_bypass_authority(tmp_path):
     class IllegalJudge:
         def decide(self, state, questions):
@@ -169,7 +176,7 @@ def test_illegal_judge_choice_cannot_bypass_authority(tmp_path):
 
     store = store_for(tmp_path)
     with pytest.raises(WorkflowError, match="illegal"):
-        advance(store, Provider([{"markdown": "Brief"}]), IllegalJudge(), RunConfig())
+        advance(store, Provider(refinement_outputs()), IllegalJudge(), RunConfig())
     assert store.state.status == "STOPPED"
     assert not store.state.review_complete
 
@@ -338,7 +345,7 @@ def test_manifest_survives_crash_before_checkpoint_without_provider_replay(
     monkeypatch.setattr(store, "complete", real_complete)
     state = advance(store, provider, judge, RunConfig())
     assert len(provider.starts) == 5
-    assert judge.calls == 3
+    assert judge.calls == 0  # every route here is decided by code rule
     assert state.review_complete
     assert state.plan_stage == 4
     assert store.read(7, "exp_plan.md") == "Draft"
@@ -511,12 +518,12 @@ def test_requested_changes_critics_receive_previously_presented_revision(tmp_pat
 def test_judge_invalid_usage_never_decreases_run_usage(tmp_path, tokens):
     class InvalidUsageJudge:
         def decide(self, state, questions):
-            return {"next": Decision("DESIGN", {}, 1, tokens=tokens)}
+            return {"next": Decision("REVISE", {}, 1, tokens=tokens)}
 
     store = store_for(tmp_path)
     with pytest.raises(WorkflowError, match="invalid token usage"):
-        advance(store, Provider([{"markdown": "Brief"}]), InvalidUsageJudge(), RunConfig())
-    assert store.state.llm_tokens == 5
+        advance(store, Provider(refinement_outputs()), InvalidUsageJudge(), RunConfig())
+    assert store.state.llm_tokens == 30  # the specialists only; the invalid JEV usage adds none
     assert store.state.jev_calls == 1
     assert not store.state.review_complete
 
@@ -530,9 +537,10 @@ def test_unknown_judge_usage_is_disclosed_and_call_bounded(tmp_path):
             }
 
     store = store_for(tmp_path)
-    state = advance(store, Provider(happy_outputs()), UnknownJudge(), RunConfig())
+    outputs = refinement_outputs() + revised("Revised plan") + [{"markdown": "Final review"}]
+    state = advance(store, Provider(outputs), UnknownJudge(), RunConfig())
     assert state.review_complete
-    assert state.jev_calls == 3
+    assert state.jev_calls == 1
     assert any(
         e["kind"] == "provider.usage"
         and e["data"].get("provider") == "jev"
@@ -680,19 +688,29 @@ CALC = {
 
 def test_critic_never_sees_peer_calculation_from_same_round(tmp_path):
     store = store_for(tmp_path)
-    judge = FailOnceJudge(fail_on=2)
+    judge = FailOnceJudge(fail_on=1)
     calls = [
         ("submit", {"markdown": "Brief"}),
         ("submit", {"markdown": "Draft"}),
         ("calculate", CALC),
-        ("submit", {"markdown": "Method"}),
+        ("submit", {"markdown": "Method", "findings": [MAJOR]}),
         ("submit", {"markdown": "Skeptic"}),
     ]
     with pytest.raises(WorkflowError, match="illegal"):
         advance(store, ToolProvider(calls), judge, RunConfig())
     calculations = [e for e in store.events() if e["kind"] == "calculation"]
     assert calculations[0]["data"]["result"]["status"] == "computed"
-    resumed = ToolProvider([("submit", {"markdown": t}) for t in ["Method", "Skeptic", "Final"]])
+    resumed = ToolProvider(
+        [
+            ("submit", {"markdown": "Method", "findings": [MAJOR]}),
+            ("submit", {"markdown": "Skeptic"}),
+        ]
+        + [
+            ("submit", {"markdown": t})
+            for t in ["Revised", "Method rejoinder", "Skeptic rejoinder"]
+        ]
+        + [("submit", {"markdown": "Final"})]
+    )
     advance(store, resumed, judge, RunConfig())
     assert resumed.task(0)["documents"] == resumed.task(1)["documents"]
     calculations = next(

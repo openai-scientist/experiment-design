@@ -111,7 +111,8 @@ def test_vendor_matches_management():
                 path.read_bytes().replace(b"\r\n", b"\n")
             ).hexdigest()
             for path in sorted(root.rglob("*"))
-            if path.is_file() and path.relative_to(root).as_posix() != "SOURCE"
+            if path.is_file()
+            and path.relative_to(root).as_posix() != "SOURCE"
             # ``pi/`` is the PI service's contract; engines do not vendor it.
             and path.relative_to(root).parts[0] != "pi"
         }

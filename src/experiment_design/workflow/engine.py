@@ -138,26 +138,80 @@ def _agent(
     return output
 
 
+_REFINE_QUESTION = Question(
+    "The plan has open MAJOR findings that require a change. Decide whether editing the "
+    "current plan fixes them, or whether the framing of the research must be redone first.",
+    {
+        "REVISE": (
+            "Every open finding can be fixed by editing the current plan (protocol, "
+            "measurements, controls, baselines, seeds, analysis, reporting) while the research "
+            "brief's framing of the question and hypotheses stays valid."
+        ),
+        "REFRAME": (
+            "At least one open finding shows the framing itself is wrong: as framed the design "
+            "cannot test a stated hypothesis, compares the wrong things, or uses the wrong unit "
+            "of analysis, so the research brief must be redone before any plan edit."
+        ),
+    },
+)
+
+
 def _route(
     store: RunStore, judge: Judge, cfg: RunConfig, options: list[str], outputs: list[AgentOutput]
 ) -> str:
+    """Pick the route by code rule; JEV only chooses between REVISE and REFRAME."""
     if len(options) == 1:
-        store.event("route", {"choice": options[0], "automatic": True})
+        store.event("route", {"choice": options[0], "automatic": True, "rule": "sole_option"})
         return options[0]
+    if "ASK_RESEARCHER" in options and any(o.needs_input and o.question.strip() for o in outputs):
+        store.event("route", {"choice": "ASK_RESEARCHER", "automatic": True, "rule": "needs_input"})
+        return "ASK_RESEARCHER"
+    for progress in ("DESIGN", "CHECK", "PRESENT"):
+        if progress in options:
+            store.event("route", {"choice": progress, "automatic": True, "rule": "no_open_fix"})
+            return progress
+    refinements = [o for o in ("REVISE", "REFRAME") if o in options]
+    if len(refinements) == 1:
+        store.event(
+            "route", {"choice": refinements[0], "automatic": True, "rule": "single_refinement"}
+        )
+        return refinements[0]
+    if refinements:
+        return _judge_refinement(store, judge, cfg, outputs)
+    if "STOP" in options:
+        store.event("route", {"choice": "STOP", "automatic": True, "rule": "no_progress_possible"})
+        return "STOP"
+    raise WorkflowError(f"No legal route for options {options}; this should be unreachable")
+
+
+def _judge_refinement(
+    store: RunStore, judge: Judge, cfg: RunConfig, outputs: list[AgentOutput]
+) -> str:
+    options = list(_REFINE_QUESTION.options)
+    open_findings = [
+        {
+            "id": f.id,
+            "severity": f.severity,
+            "category": f.category,
+            "issue": f.issue,
+            "consequence": f.consequence,
+            "suggestion": f.suggestion,
+        }
+        for o in outputs
+        for f in o.findings
+        if _major_fix(f)
+    ]
     if store.state.jev_calls >= cfg.jev_max_calls:
         raise WorkflowError("JEV call allowance exhausted")
     remaining = cfg.jev_max_calls - store.state.jev_calls
     if hasattr(judge, "max_attempts"):
         judge.max_attempts = min(3, remaining)
-    question = Question(
-        "Choose the next scientific action from the legal options.", {v: v for v in options}
-    )
     failure = None
     decisions = {}
     try:
         decisions = judge.decide(
-            {"stage": store.state.stage, "outputs": [o.model_dump() for o in outputs]},
-            {"next": question},
+            {"stage": store.state.stage, "open_findings": open_findings},
+            {"next": _REFINE_QUESTION},
         )
     except Exception as exc:
         failure = exc
@@ -202,7 +256,16 @@ def _route(
         raise WorkflowError("JEV returned a missing or illegal choice")
     if store.state.llm_tokens > store.state.llm_token_limit:
         raise WorkflowError("Run token allowance exceeded")
-    store.event("route", {"choice": decision.choice, "automatic": False})
+    store.event(
+        "route",
+        {
+            "choice": decision.choice,
+            "automatic": False,
+            "rule": "jev_refinement",
+            "probabilities": decision.probabilities,
+            "confidence": decision.confidence,
+        },
+    )
     return decision.choice
 
 
