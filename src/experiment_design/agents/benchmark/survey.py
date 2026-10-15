@@ -117,10 +117,15 @@ def survey(
     )
     visible = "\n".join([brief_md, hypothesis_md, *sources.values()])
     tasks = {task.casefold() for task in plan.tasks}
+    # A curated entry the hypotheses name is kept whatever the tasks: its verifiable source
+    # wins over the evidence card's (live: Defects4J was filtered out and stayed unverified).
+    named = {mention.name.strip().casefold() for mention in plan.mentions}
     registry = [
         entry
         for entry in pack.registry
-        if not tasks or tasks & {task.casefold() for task in entry.tasks}
+        if not tasks
+        or tasks & {task.casefold() for task in entry.tasks}
+        or entry.name.casefold() in named
     ] or list(pack.registry)
     candidates: list[Resource] = list(researcher)
     candidates += [

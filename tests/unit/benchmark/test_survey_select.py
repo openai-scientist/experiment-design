@@ -87,6 +87,38 @@ def test_survey_collects_every_origin_and_quotes_only_visible_urls(tmp_path):
     assert len({r.resource_id for r in found}) == len(found)
 
 
+def test_a_named_registry_entry_wins_whatever_the_tasks(tmp_path):
+    # Live: the tasks filter dropped Defects4J, so the paper URL won and it stayed unverified.
+    store = _store(tmp_path, evidence="Defects4J (https://arxiv.org/abs/2311.04532).\n")
+    plan = {
+        "queries": [],
+        "tasks": ["bug-detection"],
+        "mentions": [
+            {
+                "name": "Defects4J",
+                "kind": "benchmark",
+                "source_url": "https://arxiv.org/abs/2311.04532",
+            },
+            {"name": "EvoSuite", "kind": "baseline"},
+        ],
+    }
+    found = survey(
+        store,
+        ToolProvider([("submit", plan)]),
+        RunConfig(),
+        load_pack(Profile(domain="se")),
+        _hf(_hub),
+        "brief",
+        "## H1: a claim",
+        [],
+    )
+    by_name = {r.name: r for r in found}
+    assert by_name["Defects4J"].origin == "registry"
+    assert by_name["Defects4J"].source_url == "https://github.com/rjust/defects4j"
+    assert by_name["EvoSuite"].source_url == "https://github.com/EvoSuite/evosuite"
+    assert "HumanEval" not in by_name  # not named and not tagged with the tasks
+
+
 def test_mention_without_url_is_kept_without_url(tmp_path):
     store = _store(tmp_path)
     plan = PLAN | {"mentions": [{"name": "NoLink", "kind": "baseline"}]}
