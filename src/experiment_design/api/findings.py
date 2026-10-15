@@ -80,7 +80,7 @@ def review_findings(
     reviewer_model: str,
 ) -> ReviewFindings:
     if not store.valid(5):
-        if not store.valid(4):
+        if not store.valid(4) or store.tampered(5):
             raise WorkflowError("Current final review is absent or invalid")
         # Stopped after the critics: their findings are what stays open (live: a stop before
         # the final check reported no findings, so the ledger and the published plan lost five).

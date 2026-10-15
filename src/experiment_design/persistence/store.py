@@ -379,6 +379,21 @@ class RunStore:
             manifest["sources"] = filecache.read_json(self.path / "sources.json")["sources"]
         _json(self._artifact(stage, "manifest.json"), manifest)
 
+    def tampered(self, stage: int) -> bool:
+        """True when the stage was completed and one of its own outputs changed since; a stage
+        that is only stale (an input changed) or never completed is not tampered."""
+        try:
+            manifest = filecache.read_json(self._artifact(stage, "manifest.json"))
+        except (OSError, ValueError):
+            return False
+        try:
+            return any(
+                _hash(self._artifact(stage, name)) != digest
+                for name, digest in manifest["outputs"].items()
+            )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return True
+
     def valid(self, stage: int) -> bool:
         try:
             manifest = filecache.read_json(self._artifact(stage, "manifest.json"))
