@@ -59,7 +59,7 @@ def _words(text: str) -> str:
 
 def _closest_heading(section: str, headings: list[str]) -> str | None:
     """The one heading the section names: equal, else the only one containing it, else the
-    only close one. Only an equal heading may differ in its digits. Ambiguity gives None."""
+    only close one; the numbers must agree. Ambiguity gives None."""
     wanted = _words(section)
     if not wanted:
         return None
@@ -67,12 +67,16 @@ def _closest_heading(section: str, headings: list[str]) -> str | None:
     exact = [h for h, n in normal.items() if n == wanted]
     if exact:
         return exact[0] if len(exact) == 1 else None
-    # "Experiment 3: Foo" must never bind to "Experiment 1: Foo".
+    # The numbers must agree: "Experiment 1" never binds to "Experiment 10: Foo", and
+    # "Experiment 3: Foo" never to "Experiment 1: Foo".
     digits = re.findall(r"\d+", wanted)
-    normal = {h: n for h, n in normal.items() if re.findall(r"\d+", n) == digits}
-    contained = [h for h, n in normal.items() if wanted in n]
+    numbers = {h: re.findall(r"\d+", n) for h, n in normal.items()}
+    contained = [
+        h for h, n in normal.items() if wanted in n and numbers[h][: len(digits)] == digits
+    ]
     if contained:
         return contained[0] if len(contained) == 1 else None
+    normal = {h: n for h, n in normal.items() if numbers[h] == digits}
     ranked = sorted(
         ((difflib.SequenceMatcher(None, wanted, n).ratio(), h) for h, n in normal.items()),
         reverse=True,

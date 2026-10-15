@@ -96,12 +96,27 @@ def test_an_unmatched_or_ambiguous_section_stays_a_minor_finding(section):
     assert [f.severity for f in missing] == ["MINOR"]
 
 
+def test_a_number_never_binds_inside_a_longer_number():
+    index = valid_index()
+    index.experiments[0].plan_section = "Experiment 1"
+    plan = "# Plan\n## Experiment 10: Foo\n"
+    assert rebind_index(index, plan).experiments[0].plan_section == "Experiment 1"
+
+
 @pytest.mark.parametrize("section", ["Experiment 3: Foo", "## Experiment 3 Foo", "Experiment 3"])
 def test_a_section_never_binds_to_a_heading_with_other_numbers(section):
     plan = "# Plan\n## Experiment 1: Foo\n## Experiment 10: Foo\n"
     index = valid_index()
     index.experiments[0].plan_section = section
     assert rebind_index(index, plan).experiments[0].plan_section == section
+
+
+def test_a_short_section_binds_to_the_heading_that_starts_with_its_number():
+    plan = "# Plan\n## Experiment E1: Matched-budget Defects4J detection\n## Experiment E2: Other\n"
+    index = valid_index()
+    index.experiments[0].plan_section = "Experiment E1"
+    bound = rebind_index(index, plan).experiments[0].plan_section
+    assert bound == "## Experiment E1: Matched-budget Defects4J detection"
 
 
 def test_an_exact_numbered_heading_still_binds():
