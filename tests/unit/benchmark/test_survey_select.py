@@ -198,3 +198,31 @@ def test_additions_are_ignored_without_researcher_comment(tmp_path):
     submit = {"choices": [], "additions": [{"name": "X", "kind": "baseline"}]}
     chosen = select(store, ToolProvider([("submit", submit)]), RunConfig(), pack, found, "brief")
     assert not any(r.name == "X" for r in chosen)
+
+
+def test_a_mention_carries_the_hub_id_the_model_proposes_for_acquire_to_check(tmp_path):
+    store = _store(tmp_path)
+    plan = {
+        "queries": [],
+        "tasks": [],
+        "mentions": [
+            {"name": "Natural Questions Open", "kind": "benchmark",
+             "hf_repo_id": "google-research-datasets/nq_open"},
+            {"name": "Phi-2", "kind": "baseline", "hf_repo_id": "microsoft/phi-2"},
+            {"name": "Odd", "kind": "dataset", "hf_repo_id": "not a repo id"},
+        ],
+    }  # fmt: skip
+    found = survey(
+        store,
+        ToolProvider([("submit", plan)]),
+        RunConfig(),
+        load_pack(Profile(domain="ml")),
+        _hf(_hub),
+        "brief",
+        "## H1: a claim",
+        [],
+    )
+    by_name = {r.name: r for r in found}
+    assert by_name["Natural Questions Open"].hf_repo_id == "google-research-datasets/nq_open"
+    assert by_name["Phi-2"].hf_repo_id == "microsoft/phi-2"
+    assert by_name["Odd"].hf_repo_id is None

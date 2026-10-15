@@ -24,12 +24,22 @@ class Mention(Record):
     name: str
     kind: Literal["dataset", "benchmark", "baseline", "metric"]
     source_url: str | None = None
+    #: The model's guess of the Hub id ("owner/name"). Only a Hub lookup can verify it.
+    hf_repo_id: str | None = None
 
 
 class SurveyPlan(Record):
     queries: list[str] = Field(default_factory=list, max_length=5)
     tasks: list[str] = Field(default_factory=list)
     mentions: list[Mention] = Field(default_factory=list)
+
+
+_REPO_ID = re.compile(r"^[\w.-]+(?:/[\w.-]+)?$")
+
+
+def _repo_id(value: str | None) -> str | None:
+    value = (value or "").strip()
+    return value if _REPO_ID.match(value) else None
 
 
 def canonical(name: str) -> str:
@@ -124,6 +134,7 @@ def survey(
             source_url=mention.source_url
             if mention.source_url and mention.source_url in visible
             else None,
+            hf_repo_id=_repo_id(mention.hf_repo_id),
         )
         for mention in plan.mentions
         if mention.name.strip()

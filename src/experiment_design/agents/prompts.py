@@ -95,7 +95,9 @@ _ROLES = {
         "five short HuggingFace dataset search queries, the task keywords that describe the "
         "research, and the datasets, benchmarks, baselines and metrics named in the supplied "
         "sources or brief. Give a source_url only when it appears verbatim in the supplied "
-        "text. Do not invent resources, sizes, licenses or URLs. Submit using the schema tool."
+        "text. For each mention you know on the HuggingFace Hub, give its hf_repo_id "
+        "(owner/name, a model id for a baseline); the Hub checks it, so leave it empty when "
+        "unsure. Do not invent resources, sizes, licenses or URLs. Submit using the schema tool."
     ),
     "selector": (
         "Rank and select evaluation resources for the research brief from the supplied "

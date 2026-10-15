@@ -17,7 +17,12 @@ class HFClient:
     ):
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         self._client = httpx.Client(
-            base_url=base_url, headers=headers, timeout=timeout, transport=transport
+            base_url=base_url,
+            headers=headers,
+            timeout=timeout,
+            transport=transport,
+            # Renamed repos redirect (nq_open -> google-research-datasets/nq_open).
+            follow_redirects=True,
         )
 
     def __repr__(self) -> str:
