@@ -8,8 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from experiment_design.api.contract_models import EventClass, EventEnvelope, Phase
-from experiment_design.contracts import WorkflowError
-from experiment_design.persistence.store import _json
+from experiment_design.persistence import filecache
+from experiment_design.persistence.store import LogSnapshot, _json, forget_log, read_log
 
 _LOCKS: dict[Path, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -28,29 +28,21 @@ class EnvelopeLog:
         self._cursor = self.path.with_name("platform-cursor.json")
         self._lock = _lock_for(self.path)
 
-    def _read(self) -> list[EventEnvelope]:
-        if not self.path.exists():
-            return []
-        lines = self.path.read_bytes().splitlines(keepends=True)
-        events = []
-        for index, line in enumerate(lines):
-            try:
-                events.append(EventEnvelope.model_validate_json(line))
-            except ValueError as exc:
-                if index == len(lines) - 1 and not line.endswith(b"\n"):
-                    break  # a torn final append is dropped, never delivered
-                raise WorkflowError("Corrupt envelope log") from exc
-        return events
+    def _read(self) -> LogSnapshot | None:
+        return read_log(self.path, EventEnvelope.model_validate_json, "Corrupt envelope log")
 
     @property
     def last_seq(self) -> int:
         with self._lock:
-            events = self._read()
+            snapshot = self._read()
+        events = [] if snapshot is None else snapshot.all
         return events[-1].source_seq if events else 0
 
     def since(self, after_seq: int) -> list[EventEnvelope]:
         with self._lock:
-            return [event for event in self._read() if event.source_seq > after_seq]
+            snapshot = self._read()
+        events = [] if snapshot is None else snapshot.all
+        return [event.model_copy(deep=True) for event in events if event.source_seq > after_seq]
 
     def append(
         self,
@@ -65,7 +57,8 @@ class EnvelopeLog:
         payload: Mapping | None = None,
     ) -> EventEnvelope:
         with self._lock:
-            events = self._read()
+            snapshot = self._read()
+            events = [] if snapshot is None else snapshot.all
             envelope = EventEnvelope(
                 source_seq=(events[-1].source_seq if events else 0) + 1,
                 type=type,
@@ -81,24 +74,27 @@ class EnvelopeLog:
             line = json.dumps(envelope.model_dump(mode="json", by_alias=True), ensure_ascii=False)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             prefix = b""
-            if self.path.exists():
-                existing = self.path.read_bytes()
-                if existing and not existing.endswith(b"\n"):
-                    if len(events) == existing.count(b"\n") + 1:
-                        prefix = b"\n"  # a complete record that only lost its newline
-                    else:
-                        with self.path.open("r+b") as handle:  # drop the torn final append
-                            handle.truncate(existing.rfind(b"\n") + 1)
+            if snapshot is not None and snapshot.torn:
+                if snapshot.tail is not None:
+                    prefix = b"\n"  # a complete record that only lost its newline
+                else:
+                    with self.path.open("r+b") as handle:  # drop the torn final append
+                        handle.truncate(snapshot.offset)
+                    filecache.forget(self.path)
+                    forget_log(self.path)
+            data = prefix + line.encode("utf-8") + b"\n"
+            before = filecache.signature(self.path)
             with self.path.open("ab") as handle:
-                handle.write(prefix + line.encode("utf-8") + b"\n")
+                handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+            filecache.appended(self.path, before, data)
         return envelope
 
     @property
     def delivered_seq(self) -> int:
         try:
-            value = json.loads(self._cursor.read_text(encoding="utf-8"))["delivered_seq"]
+            value = filecache.read_json(self._cursor)["delivered_seq"]
         except (OSError, ValueError, KeyError, TypeError):
             return 0
         return value if isinstance(value, int) and value >= 0 else 0
