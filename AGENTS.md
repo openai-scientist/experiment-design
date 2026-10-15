@@ -57,8 +57,10 @@ CLI/config own researcher commands and configuration.
 
 Code enumerates the legal routes and picks one when a rule decides it: a sole option,
 a needed question, a progress route (DESIGN, CHECK, PRESENT) while no MAJOR fix is open,
-or a single legal refinement. JEV only chooses REVISE or REFRAME when both are legal.
-STOP is never judged while another route is legal. Agents choose HOW.
+or a single legal refinement; a defect found only by a code check is revised. JEV only
+chooses REVISE or REFRAME when both are legal. STOP is legal only when no other route is;
+`forced` records whether limits removed the refinements. A review stopped by its budget is
+never presented as complete. Agents choose HOW.
 Validate returned options; never claim JEV itself is deterministic. Rule-decided
 routes are labelled automatic and require no fabricated JEV call. Methodology is
 open-ended; calculator coverage is not an allowlist or universal power gate. A method

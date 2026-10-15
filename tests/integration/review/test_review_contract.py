@@ -164,13 +164,13 @@ def test_final_check_offers_revision_only_for_a_major_fix(tmp_path):
     evidence = AgentOutput(markdown="f", findings=[Finding.model_validate(EVIDENCE)])
     fix = AgentOutput(markdown="f", findings=[Finding.model_validate(FIX)])
     options, forced = engine._final_options(store, cfg, evidence, [])
-    assert options == ["PRESENT", "STOP"] and not forced
+    assert options == ["PRESENT"] and not forced
     options, _ = engine._final_options(store, cfg, fix, [])
     assert options == ["REVISE", "REFRAME"]  # a fixable MAJOR with refinements left is not stopped
     # A critic's maintained needs_evidence finding is no reason to revise either.
     maintained = AgentOutput(markdown="r", findings=[Finding.model_validate(EVIDENCE)])
     options, _ = engine._final_options(store, cfg, AgentOutput(markdown="f"), [maintained])
-    assert options == ["PRESENT", "STOP"]
+    assert options == ["PRESENT"]
 
 
 def test_stop_returns_only_when_no_refinement_is_left(tmp_path):
@@ -195,7 +195,7 @@ def test_a_code_check_on_the_draft_calls_for_a_revision_before_the_final_check(t
     assert options == ["REVISE", "REFRAME"]
     evidence = Finding.model_validate(EVIDENCE)
     options, _ = engine._critic_options(store, RunConfig(), quiet, quiet, False, [evidence])
-    assert options == ["CHECK", "STOP"]
+    assert options == ["CHECK"]
 
 
 def test_a_fixable_final_finding_is_revised_not_stopped(tmp_path):
@@ -218,11 +218,35 @@ def test_a_fixable_final_finding_is_revised_not_stopped(tmp_path):
     assert routes[-2:] == ["REVISE", "PRESENT"]
 
 
-def test_after_the_first_final_check_stop_is_the_judges_call_again(tmp_path):
+def test_a_later_final_check_with_refinements_left_offers_no_stop(tmp_path):
     store = store_for(tmp_path)
     fix = AgentOutput(markdown="f", findings=[Finding.model_validate(FIX)])
     options, forced = engine._final_options(store, RunConfig(), fix, [], first_check=False)
-    assert options == ["REVISE", "REFRAME", "STOP"] and not forced
+    assert options == ["REVISE", "REFRAME"] and not forced
+
+
+def test_a_limit_forced_stop_stays_forced_beside_an_optional_question(tmp_path):
+    store = store_for(tmp_path)
+    fix = Finding.model_validate(FIX)
+    asking = AgentOutput(markdown="f", findings=[fix], question="Which unit?", options=["a", "b"])
+    options, forced = engine._final_options(store, RunConfig(max_refinements=0), asking, [])
+    assert options == ["STOP"] and forced
+    quiet = AgentOutput(markdown="q")
+    options, forced = engine._critic_options(
+        store, RunConfig(max_refinements=0), asking, quiet, False
+    )
+    assert options == ["STOP"] and forced
+
+
+def test_a_final_check_stopped_by_its_budget_is_not_presented(tmp_path):
+    store = store_for(tmp_path)
+    unfinished = Finding.model_validate(EVIDENCE | {"id": "review-incomplete"})
+    final = AgentOutput(markdown="f", findings=[unfinished])
+    options, forced = engine._final_options(store, RunConfig(), final, [])
+    assert options == ["STOP"] and not forced
+    maintained = AgentOutput(markdown="r", findings=[unfinished])
+    options, _ = engine._final_options(store, RunConfig(), AgentOutput(markdown="f"), [maintained])
+    assert options == ["STOP"]
 
 
 def test_a_plan_with_only_major_needs_evidence_is_presented_with_its_limitations(tmp_path):
@@ -235,15 +259,15 @@ def test_a_plan_with_only_major_needs_evidence_is_presented_with_its_limitations
     assert store.read(7, "exp_plan.md") == "Draft"  # the reviewed plan bytes are unchanged
 
 
-def test_the_wire_finding_carries_the_kind_and_a_lone_evidence_finding_does_not_fail_the_review(
-    tmp_path,
-):
+def test_the_wire_finding_carries_the_kind_and_a_lone_evidence_finding_blocks_passed(tmp_path):
     store = store_for(tmp_path)
     advance(store, Provider(outputs(final=EVIDENCE)), Judge(), RunConfig())
     wire = review_findings(store, round=1, artifact_id="a1", reviewer_model="m")
     final = [f for f in wire.findings if f.finding_id.startswith("F1-")]
     assert [(f.severity.value, f.kind.value) for f in final] == [("blocking", "needs_evidence")]
-    assert wire.passed is True
+    # The contract ties passed to "no blocking finding"; the Platform carries a blocking
+    # needs_evidence finding as a known risk, so it does not refuse accept.
+    assert wire.passed is False
 
 
 def test_code_produced_resource_and_provenance_findings_are_needs_evidence():
@@ -269,3 +293,25 @@ def test_code_produced_resource_and_provenance_findings_are_needs_evidence():
     [finding] = validators.project_diversity(index, resources)
     assert finding.kind == "needs_evidence"
     assert Finding.model_fields["kind"].default == "fix"
+
+
+def test_a_code_check_alone_is_revised_without_the_judge(tmp_path):
+    class NoJudge:
+        def decide(self, state, questions):
+            raise AssertionError("the judge must not be asked")
+
+    store = store_for(tmp_path)
+    quiet = AgentOutput(markdown="q")
+    choice = engine._route(store, NoJudge(), RunConfig(), ["REVISE", "REFRAME"], [quiet, quiet])
+    assert choice == "REVISE"
+    routes = [e["data"] for e in store.events() if e["kind"] == "route"]
+    assert routes[-1]["rule"] == "code_check_fix"
+
+
+def test_a_blocking_question_is_asked_before_an_optional_one(tmp_path):
+    store = store_for(tmp_path)
+    soft = AgentOutput(markdown="m", question="Optional?", options=["a", "b"])
+    hard = AgentOutput(markdown="s", needs_input=True, question="Which unit?", options=["c", "d"])
+    engine._ask(store, [soft, hard])
+    assert store.state.question == "Which unit?"
+    assert store.state.question_options == ["c", "d"]

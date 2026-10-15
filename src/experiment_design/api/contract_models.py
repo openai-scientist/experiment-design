@@ -458,6 +458,13 @@ class ReviewFindings(Wire):
     findings: list[Finding]
     passed: bool
 
+    @model_validator(mode="after")
+    def passed_matches_findings(self) -> "ReviewFindings":
+        # The Platform's model enforces this; JSON Schema cannot express it.
+        if self.passed != (not any(f.severity == "blocking" for f in self.findings)):
+            raise ValueError("passed must match absence of blocking findings")
+        return self
+
 
 class RevisionItem(Wire):
     finding_id: str

@@ -184,7 +184,7 @@ def test_final_check_without_an_open_fix_is_presented_without_the_judge(tmp_path
     state = advance(store, Provider(happy_outputs()), judge, RunConfig())
     assert judge.calls == 0
     final = events(store, "route")[-1]
-    assert (final["choice"], final["rule"], final["automatic"]) == ("PRESENT", "no_open_fix", True)
+    assert (final["choice"], final["rule"], final["automatic"]) == ("PRESENT", "sole_option", True)
     assert state.review_complete and state.approval == "pending"
 
 
@@ -194,9 +194,9 @@ def test_critics_without_an_open_fix_check_without_the_judge(tmp_path):
     advance(store, Provider(happy_outputs()), judge, RunConfig())
     assert json.loads(store.read(4, "route.json")) == {"choice": "CHECK", "forced": False}
     assert [(r["choice"], r["rule"]) for r in events(store, "route")] == [
-        ("DESIGN", "no_open_fix"),
-        ("CHECK", "no_open_fix"),
-        ("PRESENT", "no_open_fix"),
+        ("DESIGN", "sole_option"),
+        ("CHECK", "sole_option"),
+        ("PRESENT", "sole_option"),
     ]
     assert judge.calls == 0
 
@@ -214,7 +214,7 @@ def test_framing_question_without_a_block_designs_and_a_blocking_one_asks(tmp_pa
     store = store_for(hard_dir)
     state = advance(store, Provider([soft | {"needs_input": True}]), judge, RunConfig())
     assert state.status == "AWAITING_RESEARCHER" and state.question == "Which unit?"
-    assert events(store, "route")[0]["rule"] == "needs_input"
+    assert events(store, "route")[0]["choice"] == "ASK_RESEARCHER"
     assert judge.calls == 0
 
 

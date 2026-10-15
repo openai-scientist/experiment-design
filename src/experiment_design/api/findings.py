@@ -107,7 +107,9 @@ def review_findings(
         reviewed_artifact_id=artifact_id,
         reviewer_model=reviewer_model,
         findings=[*original, *final],
-        passed=not any(f.severity == "blocking" and f.kind == "fix" for f in final),
+        # The contract's `passed` means no blocking finding of any kind; an open needs_evidence
+        # MAJOR blocks it too (the Platform rejected such a report as unreadable).
+        passed=not any(f.severity == "blocking" for f in final),
     )
 
 

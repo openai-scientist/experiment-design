@@ -176,6 +176,10 @@ def _route(
             "route", {"choice": refinements[0], "automatic": True, "rule": "single_refinement"}
         )
         return refinements[0]
+    if refinements and not any(_major_fix(f) for o in outputs for f in o.findings):
+        # Only a code check (seeds, index) is open: a mechanical defect is revised, not reframed.
+        store.event("route", {"choice": "REVISE", "automatic": True, "rule": "code_check_fix"})
+        return "REVISE"
     if refinements:
         return _judge_refinement(store, judge, cfg, outputs)
     if "STOP" in options:
@@ -270,10 +274,13 @@ def _judge_refinement(
 
 
 def _ask(store: RunStore, outputs: list[AgentOutput]) -> None:
-    questions = [o.question for o in outputs if o.question.strip()]
-    if not questions:
+    # A blocking question goes first: another output's optional question must not replace it.
+    asking = [o for o in outputs if o.needs_input and o.question.strip()] or [
+        o for o in outputs if o.question.strip()
+    ]
+    if not asking:
         raise WorkflowError("ASK_RESEARCHER requires a concrete agent question")
-    asking = [o for o in outputs if o.question.strip()]
+    questions = [o.question for o in asking]
     legacy_combined = len(asking) > 1 and not read_run_meta(store.path).get("platform_run_id")
     store.update(
         status="AWAITING_RESEARCHER",
@@ -518,12 +525,11 @@ def _critic_options(
         # chose STOP after three change requests, so none was ever revised).
         return available, False
     options += available
-    if method.question.strip() or skeptic.question.strip():
+    if any(o.needs_input and o.question.strip() for o in (method, skeptic)):
         options.append("ASK_RESEARCHER")
-    # The first critic round revises a fixable MAJOR rather than stopping on it (live: the judge
-    # chose STOP over an undeclared seed count and the plan shipped with it open). Later rounds
-    # leave STOP to the judge, so one forced revision per check is the most this rule costs.
-    if not (material and available and store.state.refinements == 0):
+    # STOP is legal only when no other route is (live: a judge offered STOP chose it over clean
+    # and fixable plans alike); `forced` says whether limits removed the refinements.
+    if not options:
         options.append("STOP")
     return options, options == ["STOP"] and revisable and available != paths
 
@@ -557,17 +563,20 @@ def _final_options(
     first_check: bool = True,
 ) -> tuple[list[str], bool]:
     fixable = any(_major_fix(f) for o in [final, *maintained] for f in o.findings)
-    material = final.needs_input or fixable
+    # A review stopped by its budget did not inspect the plan: it cannot be presented as
+    # reviewed complete.
+    unfinished = any(f.id == "review-incomplete" for o in [final, *maintained] for f in o.findings)
+    material = final.needs_input or fixable or unfinished
     options = [] if material else ["PRESENT"]
     paths = ["REVISE", "REFRAME"]
     # MAJOR needs_evidence findings alone do not call for a revision: the plan is presented
     # with them listed under Limitations.
     available = [path for path in paths if fixable and _can_refine(store, cfg, path)]
     options += available
-    if final.question.strip():
+    if final.needs_input and final.question.strip():
         options.append("ASK_RESEARCHER")
-    # The first final check revises a fixable MAJOR it finds rather than stopping on it.
-    if not (fixable and available and first_check):
+    # STOP is legal only when no other route is; `forced` says whether limits caused that.
+    if not options:
         options.append("STOP")
     return options, options == ["STOP"] and fixable and available != paths
 
@@ -949,11 +958,8 @@ def _advance(
                 *(["reframe_objections"] if "reframe_objections" in workspace else []),
             )
             output = _agent(store, llm, cfg, "framing", 2, "research_brief", workspace, required)
-            options = (
-                ["ASK_RESEARCHER", "STOP"]
-                if output.needs_input
-                else ["DESIGN", "STOP"] + (["ASK_RESEARCHER"] if output.question.strip() else [])
-            )
+            # Framing never stops a run: an untestable hypothesis becomes a finding downstream.
+            options = ["ASK_RESEARCHER"] if output.needs_input else ["DESIGN"]
             route = _route(store, judge, cfg, options, [output])
             store.write(2, "route.json", json.dumps({"choice": route}))
             store.complete(
