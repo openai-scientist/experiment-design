@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import Field
 
 from experiment_design.agents.benchmark.models import Resource
-from experiment_design.agents.benchmark.survey import resource_id
+from experiment_design.agents.benchmark.survey import hub_repo_id, resource_id
 from experiment_design.agents.structured import structured_call
 from experiment_design.config import RunConfig
 from experiment_design.contracts import Record
@@ -25,6 +25,8 @@ class Choice(Record):
 class Addition(Record):
     name: str
     kind: Literal["dataset", "benchmark", "baseline", "metric"]
+    #: A Hub id lets acquire verify the addition; without one it stays unknown.
+    hf_repo_id: str | None = None
 
 
 class Selection(Record):
@@ -90,11 +92,13 @@ def select(
         for addition in selection.additions:
             rid = resource_id(addition.kind, addition.name)
             if rid not in by_id and rid not in chosen and addition.name.strip():
+                hub_id = hub_repo_id(addition.hf_repo_id)
                 chosen[rid] = Resource(
                     resource_id=rid,
                     kind=addition.kind,
                     name=addition.name,
-                    origin="researcher",
+                    origin="hf_hub" if hub_id else "researcher",
+                    hf_repo_id=hub_id,
                     status="unknown",
                     reasons=["requested by the researcher; not yet verified"],
                 )

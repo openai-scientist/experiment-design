@@ -94,7 +94,8 @@ _ROLES = {
         "Survey evaluation resources for the research brief and hypotheses. Submit at most "
         "five short HuggingFace dataset search queries, the task keywords that describe the "
         "research, and the datasets, benchmarks, baselines and metrics named in the supplied "
-        "sources or brief. Give a source_url only when it appears verbatim in the supplied "
+        "sources or brief; a public dataset used to evaluate the hypotheses is a benchmark. "
+        "Give a source_url only when it appears verbatim in the supplied "
         "text. For each mention you know on the HuggingFace Hub, give its hf_repo_id "
         "(owner/name, a model id for a baseline); the Hub checks it, so leave it empty when "
         "unsure. Do not invent resources, sizes, licenses or URLs. Submit using the schema tool."
@@ -105,7 +106,8 @@ _ROLES = {
         "For each selected resource give rank (1 is best), a one-sentence rationale, the "
         "hypothesis IDs it serves and its benchmark contamination risk (low, medium, high or "
         "unknown when you cannot tell). When researcher comments ask for a resource that is "
-        "not a candidate, list it in additions with its kind. Do not claim a resource is "
+        "not a candidate, list it in additions with its kind and, when you know it, its "
+        "HuggingFace hf_repo_id (owner/name). Do not claim a resource is "
         "verified. Submit using the schema tool."
     ),
     "indexer": (

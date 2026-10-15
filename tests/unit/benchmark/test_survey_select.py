@@ -226,3 +226,28 @@ def test_a_mention_carries_the_hub_id_the_model_proposes_for_acquire_to_check(tm
     assert by_name["Natural Questions Open"].hf_repo_id == "google-research-datasets/nq_open"
     assert by_name["Phi-2"].hf_repo_id == "microsoft/phi-2"
     assert by_name["Odd"].hf_repo_id is None
+
+
+def test_a_requested_addition_with_a_hub_id_is_left_for_acquire_to_verify(tmp_path):
+    store = _store(tmp_path)
+    selection = {
+        "choices": [],
+        "additions": [
+            {"name": "Wikipedia", "kind": "dataset", "hf_repo_id": "wikimedia/wikipedia"},
+            {"name": "BM25", "kind": "baseline"},
+        ],
+    }
+    chosen = select(
+        store,
+        ToolProvider([("submit", selection)]),
+        RunConfig(),
+        load_pack(Profile(domain="ml")),
+        [],
+        "brief",
+        comments="Verify the retrieval corpus.",
+    )
+    by_name = {r.name: r for r in chosen}
+    assert by_name["Wikipedia"].origin == "hf_hub"
+    assert by_name["Wikipedia"].hf_repo_id == "wikimedia/wikipedia"
+    assert by_name["BM25"].origin == "researcher"
+    assert by_name["BM25"].hf_repo_id is None

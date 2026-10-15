@@ -37,7 +37,7 @@ class SurveyPlan(Record):
 _REPO_ID = re.compile(r"^[\w.-]+(?:/[\w.-]+)?$")
 
 
-def _repo_id(value: str | None) -> str | None:
+def hub_repo_id(value: str | None) -> str | None:
     value = (value or "").strip()
     return value if _REPO_ID.match(value) else None
 
@@ -134,7 +134,7 @@ def survey(
             source_url=mention.source_url
             if mention.source_url and mention.source_url in visible
             else None,
-            hf_repo_id=_repo_id(mention.hf_repo_id),
+            hf_repo_id=hub_repo_id(mention.hf_repo_id),
         )
         for mention in plan.mentions
         if mention.name.strip()
