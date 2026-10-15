@@ -13,7 +13,7 @@ Python 3.12+, uv, PowerShell, repository root:
 
 - Dependencies: `uv sync --locked`
 - CLI: `uv run exd --help`
-- Full deterministic checks: `uv run pytest -q`
+- Full deterministic checks (parallel, ~2 min): `uv run --with pytest-xdist pytest -q -p no:cacheprovider -n 8`; never run the full suite serially
 - Focused publication checks: `uv run pytest tests/e2e tests/integration/publication -q`
 - Style: `uv run ruff check .` and `uv run ruff format --check .`
 
