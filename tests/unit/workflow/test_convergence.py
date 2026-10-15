@@ -111,3 +111,18 @@ def test_severity_adjustments_lists_each_demotion():
     text = severity_adjustments(out)
     assert "## Severity adjustments" in text and "F1: MAJOR → MINOR [unchanged]" in text
     assert severity_adjustments(_output(_finding("F2", anchor="Design"))) == ""
+
+
+def test_design_flaws_are_not_deferred_to_execution():
+    out = _output(
+        _finding("F1", due="later", category="leakage"),
+        _finding("F2", due="later", category="control"),
+        _finding("F3", due="later", category="baseline"),
+        _finding("F4", severity="MINOR", due="later", category="statistics"),
+    )
+    due_later(out)
+    assert [f.severity for f in out.findings] == ["MAJOR", "MAJOR", "MAJOR", "MINOR"]
+    assert out.findings[0].issue == "Issue F1"
+    # A finding that was MINOR already is not listed as a demotion.
+    assert out.findings[3].issue == "Issue F4"
+    assert severity_adjustments(out) == ""

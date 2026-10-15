@@ -42,9 +42,11 @@ def _matches(anchor: str, paths: set[str]) -> set[str]:
 def due_later(output: AgentOutput) -> None:
     """Findings about execution-time evidence never block a plan."""
     for finding in output.findings:
-        if finding.due == "later":
+        # A design flaw cannot wait for execution.
+        if finding.due == "later" and finding.category not in {"leakage", "baseline", "control"}:
+            was_major = finding.severity == "MAJOR"
             finding.severity = "MINOR"
-            if not finding.issue.startswith("[for execution] "):
+            if was_major and not finding.issue.startswith("[for execution] "):
                 finding.issue = "[for execution] " + finding.issue
 
 

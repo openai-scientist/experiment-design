@@ -149,3 +149,17 @@ def test_envelope_reset_when_file_replaced(tmp_path):
     assert log.last_seq == 2
     log.path.write_bytes(log.path.read_bytes().splitlines(keepends=True)[0])
     assert log.last_seq == 1
+
+
+def test_the_log_cache_keeps_the_most_recently_used_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_module, "_LOGS", store_module.OrderedDict())
+    paths = []
+    for n in range(store_module._LOG_LIMIT + 1):
+        path = tmp_path / f"{n}.jsonl"
+        path.write_bytes(b'{"n": 1}\n')
+        paths.append(path.resolve())
+        store_module.read_log(path, json.loads, "corrupt")
+        if n == 1:
+            store_module.read_log(paths[0], json.loads, "corrupt")  # use the oldest again
+    assert len(store_module._LOGS) == store_module._LOG_LIMIT
+    assert paths[0] in store_module._LOGS and paths[1] not in store_module._LOGS

@@ -59,17 +59,20 @@ def _words(text: str) -> str:
 
 def _closest_heading(section: str, headings: list[str]) -> str | None:
     """The one heading the section names: equal, else the only one containing it, else the
-    only close one. Ambiguity gives None."""
+    only close one. Only an equal heading may differ in its digits. Ambiguity gives None."""
     wanted = _words(section)
     if not wanted:
         return None
     normal = {h: _words(h) for h in headings}
-    for hit in (
-        [h for h, n in normal.items() if n == wanted],
-        [h for h, n in normal.items() if wanted in n],
-    ):
-        if hit:
-            return hit[0] if len(hit) == 1 else None
+    exact = [h for h, n in normal.items() if n == wanted]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    # "Experiment 3: Foo" must never bind to "Experiment 1: Foo".
+    digits = re.findall(r"\d+", wanted)
+    normal = {h: n for h, n in normal.items() if re.findall(r"\d+", n) == digits}
+    contained = [h for h, n in normal.items() if wanted in n]
+    if contained:
+        return contained[0] if len(contained) == 1 else None
     ranked = sorted(
         ((difflib.SequenceMatcher(None, wanted, n).ratio(), h) for h, n in normal.items()),
         reverse=True,

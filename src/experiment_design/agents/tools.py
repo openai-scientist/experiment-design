@@ -103,7 +103,11 @@ def _usage_ceiling(llm: object, attempts: list[dict]) -> int | None:
 
 
 def _incomplete(store: RunStore, task: str, role: str, budget: str) -> AgentOutput:
-    """A review past its task allowance ends with one MINOR finding; the workflow goes on."""
+    """A review past its task allowance ends with one MAJOR needs_evidence finding.
+
+    The review must not read as a clean pass, but the plan has no defect to revise; the workflow
+    goes on.
+    """
     issue = f"review incomplete: {role} exceeded its {budget} budget"
     store.event("agent.accepted", {"task": task, "incomplete": budget})
     return AgentOutput(
@@ -111,7 +115,8 @@ def _incomplete(store: RunStore, task: str, role: str, budget: str) -> AgentOutp
         findings=[
             Finding(
                 id="review-incomplete",
-                severity="MINOR",
+                severity="MAJOR",
+                kind="needs_evidence",
                 issue=issue,
                 consequence="The plan was not fully inspected by this review.",
                 suggestion="Treat this review as partial; repeat it if the plan is still in doubt.",

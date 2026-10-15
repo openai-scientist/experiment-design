@@ -118,3 +118,31 @@ def test_resource_shortfall_findings_need_evidence_not_a_plan_edit(tmp_path):
     findings = json.loads(store.read(5, "deterministic_findings.json"))
     shortfalls = [f for f in findings if f["id"].startswith("shortfall-")]
     assert shortfalls and all(f["kind"] == "needs_evidence" for f in shortfalls)
+
+
+def test_a_run_without_a_stage_3_index_skips_the_early_code_checks(tmp_path):
+    source = tmp_path / "hypotheses.md"
+    source.write_text("## H1: First claim\n", encoding="utf-8")
+    cfg = ExdConfig(
+        llm=LLMConfig(base_url="http://fake", model="fake"), runs_root=tmp_path / "runs"
+    )
+    store = start_run([source], cfg)
+    state = advance(store, EndlessProvider(), Judge(), cfg.run, hold_at_review=True)
+    assert state.status == "PENDING_REVIEW"
+    assert not (store.path / "stage-03" / "index.json").exists()
+    # A run made before the index existed, resumed with a profile and stage 4 to decide again.
+    store.update(profile=Profile(domain="ml", research_type="comparative_benchmark"))
+    (store.path / "stage-04" / "manifest.json").unlink()
+    advance(store, EndlessProvider(), Judge(), cfg.run, hold_at_review=True)
+
+
+def test_early_code_checks_wait_until_stage_4_is_decided(tmp_path, monkeypatch):
+    store, cfg = profiled_store(tmp_path)
+    state = reach_review(store, EndlessProvider(), cfg)
+    assert state.status == "PENDING_REVIEW"
+
+    def fail(*args, **kwargs):
+        raise AssertionError("early code checks ran on a decided stage 4")
+
+    monkeypatch.setattr("experiment_design.workflow.engine._deterministic_findings", fail)
+    advance(store, EndlessProvider(), Judge(), cfg, hold_at_review=True)

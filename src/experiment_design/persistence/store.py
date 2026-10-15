@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -58,7 +59,8 @@ class LogSnapshot:
         return self.signature[0] > self.offset
 
 
-_LOGS: dict[Path, LogSnapshot] = {}
+_LOG_LIMIT = 64
+_LOGS: OrderedDict[Path, LogSnapshot] = OrderedDict()
 
 
 def forget_log(path: Path) -> None:
@@ -81,6 +83,7 @@ def read_log(path: Path, parse: Callable[[bytes], object], corrupt: str) -> LogS
     signature = (status.st_size, status.st_mtime_ns, status.st_ino)
     previous = _LOGS.get(key)
     if previous is not None and previous.signature == signature:
+        _LOGS.move_to_end(key)
         return previous
     start, records = 0, ()
     if (
@@ -106,6 +109,9 @@ def read_log(path: Path, parse: Callable[[bytes], object], corrupt: str) -> LogS
             tail = record
     snapshot = LogSnapshot(signature, offset, tuple(parsed), tail)
     _LOGS[key] = snapshot
+    _LOGS.move_to_end(key)
+    while len(_LOGS) > _LOG_LIMIT:
+        _LOGS.popitem(last=False)
     return snapshot
 
 

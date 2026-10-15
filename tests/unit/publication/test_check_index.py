@@ -94,3 +94,18 @@ def test_an_unmatched_or_ambiguous_section_stays_a_minor_finding(section):
     assert fixed.experiments[0].plan_section == section
     missing = [f for f in check_index(fixed, plan, ["H1"]) if f.issue.startswith("Section missing")]
     assert [f.severity for f in missing] == ["MINOR"]
+
+
+@pytest.mark.parametrize("section", ["Experiment 3: Foo", "## Experiment 3 Foo", "Experiment 3"])
+def test_a_section_never_binds_to_a_heading_with_other_numbers(section):
+    plan = "# Plan\n## Experiment 1: Foo\n## Experiment 10: Foo\n"
+    index = valid_index()
+    index.experiments[0].plan_section = section
+    assert rebind_index(index, plan).experiments[0].plan_section == section
+
+
+def test_an_exact_numbered_heading_still_binds():
+    plan = "# Plan\n## Experiment 1: Foo\n## Experiment 3: Foo\n"
+    index = valid_index()
+    index.experiments[0].plan_section = "experiment 3 foo"
+    assert rebind_index(index, plan).experiments[0].plan_section == "## Experiment 3: Foo"

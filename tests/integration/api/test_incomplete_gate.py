@@ -269,3 +269,17 @@ def test_reviewer_failure_on_re_review_fails_the_run_instead_of_hanging(tmp_path
     state = manager.state(run_id)
     assert state.phase is Phase.failed
     assert state.open_gate is None
+
+
+def test_an_invalid_final_review_is_reported_as_an_error_not_raised(tmp_path, monkeypatch):
+    def invalid(*args, **kwargs):
+        raise WorkflowError("Current final review is absent or invalid")
+
+    monkeypatch.setattr("experiment_design.api.runs.review_findings", invalid)
+    manager, platform, run_id = _incomplete(tmp_path)
+    _wait(manager, run_id, Phase.awaiting_researcher, gate=True)
+    assert manager.wait_idle(run_id) and manager.flush(run_id)
+    done = [e for e in platform.events["sr1"] if e.type == "review.completed"]
+    assert done[-1].payload["passed"] is False
+    assert "final review is invalid" in done[-1].payload["error"]
+    assert "run.failed" not in _types(platform)

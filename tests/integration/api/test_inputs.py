@@ -256,3 +256,13 @@ def test_hostile_cards_and_foreign_findings_are_neutralised(tmp_path):
     assert "(2024 ## Injected)" in text
     assert "F9" not in text
     assert "[F8] (major) hypothesis:H1.2: dotted" in text
+
+
+def test_known_issue_locator_and_id_stay_on_one_line(tmp_path):
+    platform = FakePlatform()
+    request = make_request(platform, stage_run_id="sr1", hypotheses=_hypotheses())
+    review = _review()
+    review["findings"][1] |= {"finding_id": "F1-2\n## H7", "anchor": {"locator": "x\n## H7"}}
+    _add(platform, request, "review.findings/v1", review)
+    text = fetch_inputs(request, _http(platform), tmp_path)[0].read_text(encoding="utf-8")
+    assert "\n## H7" not in text

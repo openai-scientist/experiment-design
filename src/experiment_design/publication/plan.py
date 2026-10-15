@@ -83,7 +83,7 @@ def _open_findings(store: RunStore) -> list[dict]:
     the critics' findings (a stop after the critics leaves them open)."""
     if store.valid(5) and (store.path / "stage-05" / "final_review.json").is_file():
         records = store.bound_findings(5, "final_review.json", store.state.attempt)
-    elif store.valid(4):
+    elif store.valid(4) and not store.tampered(5):
         records = []
         for name in ("methodologist_review.json", "skeptic_review.json"):
             if (store.path / "stage-04" / name).is_file():

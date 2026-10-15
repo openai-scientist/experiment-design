@@ -148,3 +148,14 @@ def test_github_resource_without_revision_names_the_github_lookup():
     out = validate(resource)
     assert out.status == "unknown"
     assert out.reasons == ["the GitHub lookup gave no revision"]
+
+
+def test_github_reason_is_not_added_when_a_hub_lookup_was_made():
+    github = "https://github.com/org/data"
+    hub = _run(
+        _resource(source_url=github), lambda request: httpx.Response(200, json={"id": "owner/data"})
+    )
+    assert not any("GitHub" in reason for reason in hub.reasons)
+    assert hub.reasons
+    plain = validate(_resource(hf_repo_id=None, source_url=github))
+    assert plain.reasons == ["the GitHub lookup gave no revision"]

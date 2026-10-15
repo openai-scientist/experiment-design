@@ -509,7 +509,7 @@ def _previous_final(store: RunStore) -> tuple[list[Finding], str] | None:
             )
             plan = (archive / "stage-04" / "revised_plan.md").read_text(encoding="utf-8")
             return [Finding.model_validate(f) for f in raw["findings"]], plan
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             continue
     return None
 
@@ -955,9 +955,15 @@ def _advance(
         redecide = False
         # Code checks (seeds, index) run on the draft too, so the first revision fixes them
         # instead of the final check finding them after the revision loop.
+        # They matter only when stage 4 is about to be (re)decided; a run made before the index
+        # existed has none.
+        stage4_open = not store.valid(4) or _forced_stop(store, 4)
         early = (
             _deterministic_findings(store, 3, "draft_plan.md")
-            if store.state.profile is not None and not changes_requested
+            if stage4_open
+            and store.state.profile is not None
+            and not changes_requested
+            and (store.path / "stage-03" / "index.json").is_file()
             else []
         )
         if store.valid(4) and _forced_stop(store, 4):
@@ -1194,10 +1200,16 @@ def _advance(
                 store.update(status="INCOMPLETE", review_complete=False)
                 return store.state
             store.update(stage=6, review_complete=True, status="PENDING_REVIEW")
+            unfinished = any(
+                f.id == "review-incomplete"
+                for o in [final, *_maintained(store, review_names)]
+                for f in o.findings
+            )
             store.write(
                 6,
                 "researcher_review.md",
-                "Scientific review: reviewed complete. Researcher acceptance: pending.\n\n"
+                f"Scientific review: {'incomplete' if unfinished else 'reviewed complete'}. "
+                "Researcher acceptance: pending.\n\n"
                 + store.read(store.state.plan_stage, store.state.plan_name)
                 + _open_evidence(final, _maintained(store, review_names)),
             )

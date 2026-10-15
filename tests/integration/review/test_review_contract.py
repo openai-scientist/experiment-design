@@ -32,24 +32,24 @@ def run(role, store, provider, **limits):
     )
 
 
-def test_a_reviewer_over_its_turn_cap_ends_with_one_minor_finding(tmp_path):
+def test_a_reviewer_over_its_turn_cap_ends_with_one_major_evidence_finding(tmp_path):
     store = store_for(tmp_path)
     turns = [[("search", {"query": "title"})]] * 5
     output = run("skeptic", store, Scripted(turns), task_max_turns=2)
-    assert [(f.severity, f.issue) for f in output.findings] == [
-        ("MINOR", "review incomplete: skeptic exceeded its turns budget")
+    assert [(f.severity, f.kind, f.issue) for f in output.findings] == [
+        ("MAJOR", "needs_evidence", "review incomplete: skeptic exceeded its turns budget")
     ]
     assert any(e["kind"] == "agent.accepted" for e in store.events())
 
 
-def test_a_reviewer_over_its_token_cap_ends_with_one_minor_finding(tmp_path):
+def test_a_reviewer_over_its_token_cap_ends_with_one_major_evidence_finding(tmp_path):
     store = store_for(tmp_path)
     turns = [[("search", {"query": "title"})]] * 5  # 5 tokens a turn
     output = run("final_check", store, Scripted(turns), task_max_turns=10, task_max_tokens=8)
     assert [f.issue for f in output.findings] == [
         "review incomplete: final_check exceeded its tokens budget"
     ]
-    assert output.findings[0].severity == "MINOR"
+    assert (output.findings[0].severity, output.findings[0].kind) == ("MAJOR", "needs_evidence")
 
 
 @pytest.mark.parametrize("limits", [{"task_max_turns": 2}, {"task_max_tokens": 8}])

@@ -20,7 +20,7 @@ def validate(resource: Resource) -> Resource:
     reasons = list(resource.reasons)
     if resource.kind == "baseline" and resource.source_url:
         return resource.model_copy(update={"status": "cited"})
-    if (resource.source_url or "").startswith("https://github.com/"):
+    if (resource.source_url or "").startswith("https://github.com/") and not resource.hf_repo_id:
         reasons.append("the GitHub lookup gave no revision")
     else:
         if not reasons:

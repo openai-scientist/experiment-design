@@ -133,8 +133,8 @@ def _known_issues(
             match = _HYPOTHESIS_ANCHOR.match(locator)
             if match is None or any(match[1] == i or match[1].startswith(i + ".") for i in ids):
                 issues.append(
-                    f"- [{finding['finding_id']}] ({finding['severity']}) "
-                    f"{locator}: {_trim(finding['issue'])}"
+                    f"- [{_trim(finding['finding_id'])}] ({finding['severity']}) "
+                    f"{_trim(locator)}: {_trim(finding['issue'])}"
                 )
     except (KeyError, TypeError, AttributeError) as exc:
         _LOGGER.warning("Skipping malformed %s input: %r", REVIEW_FINDINGS, exc)

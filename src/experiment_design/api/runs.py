@@ -653,7 +653,18 @@ class RunManager:
             error = "Reviewer failed after two retries"
         elif store.state.status == "INCOMPLETE" and not store.valid(5) and not store.valid(4):
             error = "The run stopped before any review existed"
-        if error:
+        report = None
+        if not error:
+            try:
+                report = review_findings(
+                    store,
+                    round=store.state.attempt,
+                    artifact_id=artifact_id,
+                    reviewer_model=run.cfg.review_llm.model,
+                )
+            except WorkflowError as exc:
+                error = f"The final review is invalid: {exc}"
+        if report is None:
             self._emit(
                 run,
                 "review.completed",
@@ -665,12 +676,6 @@ class RunManager:
                 },
             )
             return
-        report = review_findings(
-            store,
-            round=store.state.attempt,
-            artifact_id=artifact_id,
-            reviewer_model=run.cfg.review_llm.model,
-        )
         if store.state.status == "INCOMPLETE":
             report = report.model_copy(update={"passed": False})
         body = report.model_dump_json(by_alias=True).encode()
