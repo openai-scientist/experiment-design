@@ -17,6 +17,7 @@ from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.llm import LLMClient
 
 _SOURCE_CHARS = 4000
+_EVIDENCE_LINE = re.compile(r"^\s+- (?:Data|Metrics): (.+)$", re.MULTILINE)
 _DATASET_SOURCE = re.compile(r"(?:^|/)(?:\d+[-_.]?)?dataset-[^/]*\.json$")
 
 
@@ -81,6 +82,11 @@ def researcher_resources(sources: Mapping[str, str]) -> list[Resource]:
     return found
 
 
+def evidence_resources(hypothesis_md: str) -> list[str]:
+    """Data and metrics lines of the hypothesis evidence; they may name resources to consider."""
+    return list(dict.fromkeys(_EVIDENCE_LINE.findall(hypothesis_md)))
+
+
 def survey(
     store: RunStore,
     llm: LLMClient,
@@ -101,7 +107,12 @@ def survey(
         llm,
         cfg,
         "surveyor",
-        {"brief": brief_md, "hypotheses": hypothesis_md, "sources": sources},
+        {
+            "brief": brief_md,
+            "hypotheses": hypothesis_md,
+            "sources": sources,
+            "Resources named in the hypothesis evidence": evidence_resources(hypothesis_md),
+        },
         SurveyPlan,
     )
     visible = "\n".join([brief_md, hypothesis_md, *sources.values()])

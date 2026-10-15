@@ -15,6 +15,7 @@ CONTRACT_VERSION = "1.2.0"
 
 # Schema IDs
 I2H_HYPOTHESES = "i2h.hypotheses/v1"
+I2H_EVIDENCE = "i2h.evidence/v1"
 EXD_EXP_PLAN = "exd.exp_plan/v1"
 PLATFORM_DATASET = "platform.dataset/v1"
 EXD_RESOURCES = "exd.resources/v1"

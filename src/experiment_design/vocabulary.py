@@ -4,7 +4,9 @@ from experiment_design.api.contract_models import (
     EXD_EXP_PLAN,
     EXD_EXPERIMENT_INDEX,
     EXD_RESOURCES,
+    I2H_EVIDENCE,
     I2H_HYPOTHESES,
+    REVIEW_FINDINGS,
 )
 
 STEPS: tuple[tuple[str, str], ...] = (
@@ -43,7 +45,7 @@ REVIEW_ROLES = frozenset(
 
 INTEGRATIONS: tuple[str, ...] = ("typesafe",)
 OPTIONAL_INTEGRATIONS: tuple[str, ...] = ("huggingface",)
-INPUT_SCHEMAS: tuple[str, ...] = (I2H_HYPOTHESES,)
+INPUT_SCHEMAS: tuple[str, ...] = (I2H_HYPOTHESES, I2H_EVIDENCE, REVIEW_FINDINGS)
 OUTPUT_SCHEMAS: tuple[tuple[str, bool], ...] = (
     (EXD_EXP_PLAN, True),
     (EXD_RESOURCES, False),

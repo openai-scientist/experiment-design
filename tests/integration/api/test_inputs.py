@@ -1,4 +1,6 @@
 import hashlib
+import json
+import logging
 
 import httpx
 import pytest
@@ -122,3 +124,102 @@ def test_malformed_guidance_rejected(tmp_path, guidance):
     request.inputs.params["guidance"] = guidance
     with pytest.raises(InputError, match="guidance"):
         fetch_inputs(request, _http(platform), tmp_path / "bad")
+
+
+def _hypotheses():
+    return [
+        {"id": "H1", "statement": "S1", "evidence_refs": ["card-p-1", "card-p-9"]},
+        {"id": "H2", "statement": "S2"},
+    ]
+
+
+def _add(platform, request, schema, body, *, raw=None):
+    content = raw if raw is not None else json.dumps(body).encode()
+    request.inputs.artifacts.append(platform.add_artifact(content, schema_id=schema))
+
+
+def _evidence():
+    long = "x" * 600
+    return {
+        "schema_version": "i2h.evidence/v1",
+        "cards": [
+            {
+                "card_id": "card-p-1",
+                "paper_id": "p-1",
+                "title": "Repair study",
+                "year": 2024,
+                "doi": "10.1/abc",
+                "data": "Defects4J",
+                "metrics": "pass@1",
+                "findings": long,
+                "limitations": "",
+                "hypothesis_ids": ["H1"],
+            }
+        ],
+    }
+
+
+def _review():
+    def finding(fid, severity, locator):
+        return {
+            "finding_id": fid,
+            "anchor": {"locator": locator},
+            "severity": severity,
+            "issue": f"issue {fid}",
+            "author": "reviewer",
+        }
+
+    return {
+        "findings": [
+            finding("F1-1", "blocking", "hypothesis:H1.criteria"),
+            finding("F1-2", "major", "document:hypotheses"),
+            finding("F1-3", "minor", "hypothesis:H1"),
+            finding("F1-4", "blocking", "hypothesis:H2"),
+        ]
+    }
+
+
+def test_evidence_is_rendered_under_the_citing_hypothesis(tmp_path):
+    platform = FakePlatform()
+    request = make_request(platform, stage_run_id="sr1", hypotheses=_hypotheses())
+    _add(platform, request, "i2h.evidence/v1", _evidence())
+    text = fetch_inputs(request, _http(platform), tmp_path)[0].read_text(encoding="utf-8")
+    h1, h2 = text.index("## H1"), text.index("## H2")
+    assert h1 < text.index("### Evidence") < h2
+    assert "- Repair study (2024) — 10.1/abc" in text
+    assert "  - Data: Defects4J" in text and "  - Metrics: pass@1" in text
+    assert "x" * 600 not in text and text.count("### Evidence") == 1
+
+
+def test_known_issues_list_blocking_and_major_for_selected_hypotheses(tmp_path):
+    platform = FakePlatform()
+    request = make_request(platform, stage_run_id="sr1", hypotheses=_hypotheses(), selection=["H1"])
+    _add(platform, request, "review.findings/v1", _review())
+    request.inputs.params["guidance"] = ["Be brief"]
+    text = fetch_inputs(request, _http(platform), tmp_path)[0].read_text(encoding="utf-8")
+    issues = text[text.index("## Known issues from hypothesis review") :]
+    assert "[F1-1] (blocking) hypothesis:H1.criteria: issue F1-1" in issues
+    assert "[F1-2] (major) document:hypotheses: issue F1-2" in issues
+    assert "F1-3" not in text and "F1-4" not in text
+    assert text.index("## Known issues") < text.index("## Research lead brief")
+
+
+def test_malformed_or_tampered_optional_inputs_are_skipped_with_a_warning(tmp_path, caplog):
+    platform = FakePlatform()
+    plain = fetch_inputs(
+        make_request(platform, stage_run_id="sr0", hypotheses=_hypotheses()),
+        _http(platform),
+        tmp_path / "plain",
+    )[0]
+    request = make_request(platform, stage_run_id="sr1", hypotheses=_hypotheses())
+    _add(platform, request, "i2h.evidence/v1", {"cards": [{"title": "no id"}]})
+    _add(platform, request, "review.findings/v1", None, raw=b"not json")
+    tampered = platform.add_artifact(b"{}", schema_id="i2h.evidence/v1")
+    platform.hosted[tampered.artifact_id] = b'{"cards": []}'
+    request.inputs.artifacts.append(tampered)
+    with caplog.at_level(logging.WARNING):
+        path = fetch_inputs(request, _http(platform), tmp_path / "bad")[0]
+    assert path.read_bytes() == plain.read_bytes()
+    assert (
+        len([r for r in caplog.records if "optional" in r.message or "malformed" in r.message]) == 3
+    )
