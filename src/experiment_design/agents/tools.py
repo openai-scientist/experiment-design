@@ -366,6 +366,9 @@ def run_specialist(
     attempts_used = len(prior)
     contract_rejections = 0
     ref_rejections = 0
+    # Live: a rejoinder issued the same read nine times in one turn and its next prompt
+    # passed the task token ceiling. A repeated identical read returns a pointer instead.
+    reads_done: dict[str, str] = {}
     for turn in range(len(prior), cfg.task_max_turns):
         if (
             task_tokens >= cfg.task_max_tokens
@@ -559,7 +562,12 @@ def run_specialist(
                     else:
                         submission = output
                         result = {"accepted": True}
+                elif call.name == "read" and (
+                    earlier := reads_done.get(json.dumps(args, sort_keys=True))
+                ):
+                    result = {"repeated": f"Same read as call {earlier}; its result is above."}
                 elif call.name == "read":
+                    reads_done[json.dumps(args, sort_keys=True)] = call.id
                     if "names" in args:
                         result = {
                             "documents": [

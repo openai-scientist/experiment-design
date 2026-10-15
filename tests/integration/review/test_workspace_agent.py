@@ -121,6 +121,21 @@ def test_read_and_search_results(tmp_path):
     assert "query" in blank["error"]
 
 
+def test_a_repeated_identical_read_returns_a_pointer_not_the_text_again(tmp_path):
+    store = store_for(tmp_path)
+    same = {"name": "doc", "start_line": 1}
+    turns = [
+        [("read", same), ("read", same), ("read", {"name": "doc", "start_line": 2})],
+        [("read", same), ("submit", {"markdown": "done"})],
+    ]
+    _, provider = specialist(store, turns)
+    first, again, other, later, _ = tool_results(store)
+    assert first["start_line"] == 1 and other["start_line"] == 2
+    assert again == later == {"repeated": "Same read as call 1-0-read; its result is above."}
+    repeated = [m for m in provider.inputs[-1] if m.get("tool_call_id") == "1-1-read"]
+    assert "Title line" not in repeated[0]["content"]
+
+
 def test_no_check_tool_and_calculate_only_for_computing_roles(tmp_path):
     names = {}
     for role in ("framing", "design"):
