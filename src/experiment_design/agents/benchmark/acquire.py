@@ -1,18 +1,29 @@
 """Fetch real Hub metadata for a resource. Nothing is downloaded and nothing is guessed."""
 
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from experiment_design.agents.benchmark.github import GitHubClient, GitHubUnavailable
 from experiment_design.agents.benchmark.hf import HFClient, HFUnavailable
 from experiment_design.agents.benchmark.models import Resource
 
 _HUB = "https://huggingface.co"
+_GITHUB_REPO = re.compile(r"^https://github\.com/([^/\s]+)/([^/\s#?]+)")
 
 
-def acquire(resource: Resource, hf: HFClient, now: Callable[[], datetime]) -> Resource:
+def acquire(
+    resource: Resource,
+    hf: HFClient,
+    now: Callable[[], datetime],
+    github: GitHubClient | None = None,
+) -> Resource:
     repo_id = resource.hf_repo_id or (resource.name if resource.origin == "hf_hub" else None)
     if repo_id is None:
-        return resource
+        match = _GITHUB_REPO.match(resource.source_url or "")
+        if match is None or github is None:
+            return resource
+        return _acquire_github(resource, github, now, match[1], match[2].removesuffix(".git"))
     is_model = resource.kind == "baseline"
     try:
         info = hf.model_info(repo_id) if is_model else hf.dataset_info(repo_id)
@@ -58,3 +69,39 @@ def _split_names(card: dict) -> list[str]:
             if isinstance(split, dict) and isinstance(split.get("name"), str):
                 names[split["name"]] = None
     return list(names)
+
+
+def _acquire_github(
+    resource: Resource, github: GitHubClient, now: Callable[[], datetime], owner: str, name: str
+) -> Resource:
+    try:
+        repo = github.repo(owner, name)
+        if repo is None:
+            return resource.model_copy(
+                update={
+                    "status": "not_found",
+                    "reasons": [*resource.reasons, f"GitHub repository '{owner}/{name}' not found"],
+                }
+            )
+        release = github.latest_release(owner, name)
+        revision = release.get("tag_name") if release else None
+        if not isinstance(revision, str) or not revision:
+            branch = repo.get("default_branch")
+            commit = github.commit(owner, name, branch) if isinstance(branch, str) else None
+            revision = commit.get("sha") if commit else None
+    except GitHubUnavailable as exc:
+        return resource.model_copy(
+            update={"reasons": [*resource.reasons, f"GitHub unavailable: {exc}"]}
+        )
+    license_ = repo.get("license")
+    spdx = license_.get("spdx_id") if isinstance(license_, dict) else None
+    moment = now().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return resource.model_copy(
+        update={
+            "revision": revision if isinstance(revision, str) and revision else None,
+            "license": spdx
+            if isinstance(spdx, str) and spdx != "NOASSERTION"
+            else resource.license,
+            "retrieved_at": moment,
+        }
+    )
