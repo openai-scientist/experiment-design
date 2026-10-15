@@ -438,3 +438,16 @@ def test_reviser_sees_only_persistent_finding_ids(tmp_path):
     records = json.loads(provider.documents(4)["revision_findings"])
     assert [r["finding_id"] for r in records] == ["F1-1"]
     assert all("id" not in r for r in records)
+
+
+def test_final_merge_drops_model_findings_that_repeat_a_deterministic_one():
+    from experiment_design.contracts import Finding
+
+    def make(fid, issue):
+        return Finding(id=fid, severity="MAJOR", issue=issue, consequence="c", suggestion="s")
+
+    det = [make("F2-5", "No  code check"), make("F2-6", "Other gap")]
+    model = [make("F2-3", "no code CHECK"), make("F2-6", "different text"), make("F2-9", "Own")]
+    merged = engine._merge_deterministic(model, det)
+    assert [f.id for f in merged] == ["F2-9", "F2-5", "F2-6"]
+    assert merged[2].issue == "Other gap"

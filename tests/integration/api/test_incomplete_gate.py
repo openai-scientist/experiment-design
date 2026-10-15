@@ -89,7 +89,7 @@ def test_a_stop_before_the_final_review_reports_the_critics_findings(tmp_path):
     _wait(manager, run_id, Phase.published)
     assert manager.wait_idle(run_id)
     plan = (manager._runs[run_id].store.path / "stage-07" / "exp_plan.md").read_text("utf-8")
-    assert "## Finding còn mở" in plan and "No control arm" in plan
+    assert "## Open findings" in plan and "No control arm" in plan
 
 
 @pytest.mark.parametrize("mode", ["auto", "light"])
@@ -129,7 +129,7 @@ def test_approve_incomplete_records_open_findings(tmp_path):
     assert publication["scientific_status"] == "incomplete"
     assert "No control arm" in [f["issue"] for f in publication["open_findings"]]
     plan = (run_dir / "stage-07" / "exp_plan.md").read_text(encoding="utf-8")
-    assert "## Finding còn mở" in plan and "No control arm" in plan
+    assert "## Open findings" in plan and "No control arm" in plan
     (primary,) = [a for a in platform.artifacts["sr1"] if a.meta.primary]
     assert primary.content == plan.encode("utf-8")
     assert primary.meta.metadata["review_passed"] is False

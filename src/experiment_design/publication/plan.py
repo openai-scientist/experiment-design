@@ -106,17 +106,17 @@ def _open_findings_section(findings: list[dict]) -> str:
     lines = [
         "",
         "",
-        "## Finding còn mở",
+        "## Open findings",
         "",
-        "Review độc lập chưa đạt khi researcher chấp nhận plan này.",
+        "The independent review was not satisfied when the researcher accepted this plan.",
     ]
     if not findings:
-        lines.append("Không có finding cụ thể nào được ghi nhận.")
+        lines.append("No specific finding was recorded.")
     for finding in findings:
         lines.append(
             f"- {finding['finding_id']} ({finding['severity']}): {finding['issue']}"
-            + (f" Hệ quả: {finding['consequence']}" if finding["consequence"] else "")
-            + (f" Đề xuất: {finding['suggestion']}" if finding["suggestion"] else "")
+            + (f" Consequence: {finding['consequence']}" if finding["consequence"] else "")
+            + (f" Suggestion: {finding['suggestion']}" if finding["suggestion"] else "")
         )
     return "\n".join(lines) + "\n"
 

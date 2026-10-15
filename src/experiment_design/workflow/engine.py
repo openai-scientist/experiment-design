@@ -330,6 +330,18 @@ def _resource_notes(store: RunStore, document: str) -> str:
     )
 
 
+def _merge_deterministic(model: list[Finding], deterministic: Sequence[Finding]) -> list[Finding]:
+    """Keep the code's verdict: drop a model finding that repeats a deterministic one."""
+
+    def norm(text: str) -> str:
+        return " ".join(text.split()).casefold()
+
+    ids = {f.id for f in deterministic}
+    issues = {norm(f.issue) for f in deterministic}
+    kept = [f for f in model if f.id not in ids and norm(f.issue) not in issues]
+    return [*kept, *deterministic]
+
+
 def _deterministic_findings(
     store: RunStore, stage: int | None = None, plan_name: str | None = None
 ) -> list[Finding]:
@@ -1153,8 +1165,7 @@ def _advance(
                     converge_final(final, prior, earlier[1], inputs["plan"])
                 if adjustments := severity_adjustments(final):
                     store.write(5, "final_review.md", final.markdown.rstrip() + adjustments)
-                seen = {(f.id, f.issue) for f in final.findings}
-                final.findings.extend(f for f in deterministic if (f.id, f.issue) not in seen)
+                final.findings = _merge_deterministic(final.findings, deterministic)
                 store.write(5, "final_review.json", _metadata(final))
             maintained = _maintained(store, review_names)
             options, forced = _final_options(
