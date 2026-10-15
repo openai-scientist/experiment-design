@@ -84,6 +84,12 @@ implementation detail is not supplied, propose a concrete, justified default and
 question. Treat ambiguity that would force a downstream agent to guess as a material gap;
 a clearly labelled, reasonable proposal is not such a gap.
 """
+_DUE = (
+    " Set due to 'later' on a finding whose subject exists only when the plan is executed "
+    "(actual dataset hashes or downloads, running a dry run, measured costs, results of "
+    "executing the plan); the plan only has to say how that evidence will be obtained. "
+    "Otherwise leave due as 'now'. "
+)
 _ROLES = {
     "profile_inference": (
         "Infer the research type from the hypotheses and brief: comparative_benchmark, "
@@ -98,7 +104,8 @@ _ROLES = {
         "Give a source_url only when it appears verbatim in the supplied "
         "text. For each mention you know on the HuggingFace Hub, give its hf_repo_id "
         "(owner/name, a model id for a baseline); the Hub checks it, so leave it empty when "
-        "unsure. Do not invent resources, sizes, licenses or URLs. Submit using the schema tool."
+        "unsure. Consider first the resources listed under 'Resources named in the hypothesis "
+        "evidence'. Do not invent resources, sizes, licenses or URLs. Submit using the schema tool."
     ),
     "selector": (
         "Rank and select evaluation resources for the research brief from the supplied "
@@ -175,7 +182,12 @@ _ROLES = {
         "stated hypothesis keeps its claim and decision rule. Report remaining "
         "material defects, including objections the critics still maintain, as MAJOR "
         "findings. Minor disclosed uncertainty need not block completeness. Do not infer "
-        "approval or execution permission. "
+        "approval or execution permission. When previous_final_findings and "
+        "plan_diff_since_last_final are supplied, this plan answers a researcher change request: "
+        "give one resolution {finding_id, status: resolved|maintained, reason} for every "
+        "previous finding (ids P1, P2, ...) and report each maintained one again as a MAJOR "
+        "finding with the same anchor. Raise a new MAJOR finding only on a section the "
+        "plan_diff_since_last_final changed; anything else you notice there is MINOR. "
     ),
     "clarification": (
         "Explain the researcher question about the unchanged plan. Do not revise the "
@@ -219,6 +231,8 @@ def prompt(role: str, pack: Pack | None = None) -> str:
             "{finding_id, outcome: fixed|rebutted|not_fixed, note} for every revision_findings "
             "entry. Rebutted and not_fixed require grounds in note. Never infer resolution."
         )
+    if role in REVIEW_ROLES:
+        text += _DUE
     if pack is None:
         return text
     additions = [pack.role_addenda.get(role, "")]

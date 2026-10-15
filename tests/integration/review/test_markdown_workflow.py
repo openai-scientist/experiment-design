@@ -920,3 +920,44 @@ def test_a_change_request_is_revised_even_when_the_judge_would_stop(tmp_path):
     )
     advance(store, provider, StopJudge(), RunConfig())
     assert store.read(4, "revised_plan.md").startswith("Second revision")
+
+
+PLAN_V1 = "# Plan\n## Design\nold design\n## Analysis\nsame\n"
+PLAN_V2 = "# Plan\n## Design\nnew design\n## Analysis\nsame\n"
+
+
+def test_final_check_after_a_change_request_is_convergent(tmp_path):
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[1] = {"markdown": PLAN_V1}
+    outputs[2]["findings"] = [MAJOR]
+    outputs[4:4] = revised(PLAN_V1)
+    outputs[-1] = {"markdown": "Final", "findings": [MAJOR | {"id": "m", "severity": "MINOR"}]}
+    advance(store, Provider(outputs), Judge(), RunConfig())
+    respond(
+        store, action="REQUEST_CHANGES", text="Change", researcher="R", revision=store.state.attempt
+    )
+    late = MAJOR | {"id": "late", "anchor": "Analysis", "issue": "Late find"}
+    provider = Provider(
+        [{"markdown": t} for t in ["Method", "Skeptic"]]
+        + revised(PLAN_V2)
+        + [{"markdown": "Final", "findings": [late], "resolutions": []}]
+    )
+    state = advance(store, provider, Judge(), RunConfig())
+    final = json.loads(store.read(5, "final_review.json"))["findings"][0]
+    assert (final["severity"], final["issue"]) == ("MINOR", "[unchanged] Late find")
+    assert state.review_complete
+    documents = provider.documents(6)
+    assert json.loads(documents["previous_final_findings"]) == []
+    assert "+new design" in documents["plan_diff_since_last_final"]
+
+
+def test_findings_about_execution_time_evidence_never_block(tmp_path):
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[2]["findings"] = [MAJOR | {"due": "later", "issue": "Dataset hash unknown"}]
+    state = advance(store, Provider(outputs), Judge(), RunConfig())
+    saved = json.loads(store.read(4, "methodologist_review.json"))["findings"][0]
+    assert saved["severity"] == "MINOR"
+    assert saved["issue"] == "[for execution] Dataset hash unknown"
+    assert state.review_complete

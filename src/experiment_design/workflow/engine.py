@@ -3,11 +3,13 @@
 import difflib
 import hashlib
 import json
+import os
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+from experiment_design.agents.benchmark.github import GitHubClient
 from experiment_design.agents.benchmark.hf import HFClient
 from experiment_design.agents.benchmark.step import STEP_KEY as RESOURCES_STEP
 from experiment_design.agents.benchmark.step import run_resources
@@ -35,6 +37,7 @@ from experiment_design.publication.experiment_index import (
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.vocabulary import REVIEW_ROLES
+from experiment_design.workflow.convergence import converge_final, due_later, previous_majors
 
 # The input may hold several hypotheses; the path is unchanged so old runs resume.
 HYPOTHESES_INPUT = "stage-01/hypothesis.md"
@@ -121,6 +124,8 @@ def _agent(
         required,
         pack=load_pack(store.state.profile) if store.state.profile is not None else None,
     )
+    if role in REVIEW_ROLES:
+        due_later(output)
     store.write(stage, name + ".md", output.markdown)
     store.write(stage, name + ".json", _metadata(output))
     return output
@@ -268,6 +273,7 @@ def _resources_gate(
     if not exists or decision is not None:
         store.event("step.entered", {"step_key": RESOURCES_STEP})
         hf = HFClient(token=(integrations or {}).get("huggingface"))
+        github = GitHubClient(token=os.environ.get("GITHUB_TOKEN"))
         try:
             run_resources(
                 store,
@@ -275,10 +281,12 @@ def _resources_gate(
                 cfg,
                 load_pack(store.state.profile),
                 hf,
+                github=github,
                 comments=decision["text"] if decision is not None else "",
             )
         finally:
             hf.close()
+            github.close()
     _ask_review(
         store,
         step_key=RESOURCES_STEP,
@@ -437,6 +445,24 @@ def _final_options(
         options.append("ASK_RESEARCHER")
     options.append("STOP")
     return options, options == ["STOP"] and available != paths
+
+
+def _previous_final(store: RunStore) -> tuple[list[Finding], str] | None:
+    """The final findings and plan the researcher saw, when a change request led to this check."""
+    replies = [
+        e["data"]
+        for e in store.events()
+        if e["kind"] == "researcher.response" and "review_of" not in e["data"]
+    ]
+    if not replies or replies[-1]["action"] != "REQUEST_CHANGES":
+        return None
+    archive = store.path / "attempts" / str(replies[-1]["revision"])
+    try:
+        raw = json.loads((archive / "stage-05" / "final_review.json").read_text(encoding="utf-8"))
+        plan = (archive / "stage-04" / "revised_plan.md").read_text(encoding="utf-8")
+        return [Finding.model_validate(f) for f in raw["findings"]], plan
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 def _plan(store: RunStore, stage: int, name: str) -> None:
@@ -1022,6 +1048,21 @@ def _advance(
                     inputs["deterministic_findings"] = text
                 for name in review_names:
                     inputs[name] = store.read(4, name + ".md")
+                earlier = _previous_final(store)
+                prior = previous_majors(earlier[0]) if earlier else []
+                convergent = []
+                if earlier:
+                    inputs["previous_final_findings"] = json.dumps(
+                        prior, ensure_ascii=False, indent=2
+                    )
+                    inputs["plan_diff_since_last_final"] = _plan_diff(earlier[1], inputs["plan"])
+                    store.write(
+                        5, "previous_final_findings.json", inputs["previous_final_findings"]
+                    )
+                    store.write(
+                        5, "plan_diff_since_last_final.md", inputs["plan_diff_since_last_final"]
+                    )
+                    convergent = ["previous_final_findings", "plan_diff_since_last_final"]
                 needed = _with_replies(
                     inputs,
                     HYPOTHESES_INPUT,
@@ -1029,6 +1070,7 @@ def _advance(
                     "plan",
                     *(n for n in review_names if n != "response"),
                     *(["deterministic_findings"] if store.state.profile is not None else []),
+                    *convergent,
                 )
                 final = _agent(
                     store,
@@ -1041,6 +1083,8 @@ def _advance(
                     needed,
                     review_llm=review_llm,
                 )
+                if earlier:
+                    converge_final(final, prior, earlier[1], inputs["plan"])
                 seen = {(f.id, f.issue) for f in final.findings}
                 final.findings.extend(f for f in deterministic if (f.id, f.issue) not in seen)
                 store.write(5, "final_review.json", _metadata(final))
@@ -1057,7 +1101,12 @@ def _advance(
                 ]
                 + [(4, name + ".md") for name in review_names],
                 ["final_review.md", "final_review.json", "route.json"]
-                + (["deterministic_findings.json"] if store.state.profile is not None else []),
+                + (["deterministic_findings.json"] if store.state.profile is not None else [])
+                + [
+                    name
+                    for name in ("previous_final_findings.json", "plan_diff_since_last_final.md")
+                    if (store.path / "stage-05" / name).is_file()
+                ],
             )
         else:
             final = _load(store, 5, "final_review")

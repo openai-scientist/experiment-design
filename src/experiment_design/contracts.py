@@ -53,6 +53,14 @@ class Finding(Record):
     anchor: str = ""
     category: Literal[*FINDING_CATEGORIES] = "other"
     evidence_refs: list[str] = Field(default_factory=list)
+    # "later": the subject exists only when the plan is executed; never blocks the plan.
+    due: Literal["now", "later"] = "now"
+
+
+class Resolution(Record):
+    finding_id: str
+    status: Literal["resolved", "maintained"]
+    reason: str
 
 
 class RevisionDisposition(Record):
@@ -76,6 +84,7 @@ class AgentOutput(Record):
     options: list[str] = Field(default_factory=list)
     default: int = Field(default=1, ge=1, le=4)
     responses: list[RevisionDisposition] = Field(default_factory=list)
+    resolutions: list[Resolution] = Field(default_factory=list)
 
     @field_validator("markdown")
     @classmethod
