@@ -1,5 +1,6 @@
 """Atomic filesystem checkpoints and checksum-bound stage manifests."""
 
+import copy
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from typing import Literal
@@ -17,9 +19,95 @@ from pydantic import ValidationError
 from experiment_design.contracts import RunState, WorkflowError
 from experiment_design.vocabulary import ACTIVITY_TYPES
 
+_HASHES: dict[tuple[str, int, int, int], str] = {}
+_HASHES_LOCK = threading.Lock()
+
 
 def _hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """SHA-256 of a file, memoised until its size, mtime or inode changes."""
+    status = path.stat()
+    key = (str(path.resolve()), status.st_size, status.st_mtime_ns, status.st_ino)
+    with _HASHES_LOCK:
+        cached = _HASHES.get(key)
+    if cached is not None:
+        return cached
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with _HASHES_LOCK:
+        _HASHES[key] = digest
+    return digest
+
+
+@dataclass(frozen=True)
+class LogSnapshot:
+    """A parsed append-only log: ``records`` come from complete lines, ``tail`` from an
+    unterminated final line that still parses (None when absent or torn)."""
+
+    signature: tuple[int, int, int]
+    offset: int  # end of the last newline-terminated line
+    records: tuple
+    tail: object | None
+
+    @property
+    def all(self) -> list:
+        return [*self.records, *([] if self.tail is None else [self.tail])]
+
+    @property
+    def torn(self) -> bool:
+        """Bytes follow the last complete line."""
+        return self.signature[0] > self.offset
+
+
+_LOGS: dict[Path, LogSnapshot] = {}
+
+
+def forget_log(path: Path) -> None:
+    _LOGS.pop(path.resolve(), None)
+
+
+def read_log(path: Path, parse: Callable[[bytes], object], corrupt: str) -> LogSnapshot | None:
+    """Incrementally parse a JSONL file; None when it does not exist.
+
+    Same signature returns the cache. A grown file with the same inode parses only the new
+    bytes. Anything else re-reads the file. A torn final line is dropped; a corrupt earlier
+    record raises ``WorkflowError``.
+    """
+    key = path.resolve()
+    try:
+        status = path.stat()
+    except FileNotFoundError:
+        _LOGS.pop(key, None)
+        return None
+    signature = (status.st_size, status.st_mtime_ns, status.st_ino)
+    previous = _LOGS.get(key)
+    if previous is not None and previous.signature == signature:
+        return previous
+    start, records = 0, ()
+    if (
+        previous is not None
+        and previous.signature[2] == status.st_ino
+        and previous.offset <= status.st_size
+        and previous.signature[0] <= status.st_size
+    ):
+        start, records = previous.offset, previous.records
+    with path.open("rb") as handle:
+        handle.seek(start)
+        lines = handle.read().splitlines(keepends=True)
+    parsed, tail, offset = list(records), None, start
+    for index, line in enumerate(lines):
+        try:
+            record = parse(line)
+        except ValueError as exc:
+            if index == len(lines) - 1 and not line.endswith(b"\n"):
+                break  # a torn final append is dropped, never delivered
+            raise WorkflowError(corrupt) from exc
+        if line.endswith(b"\n"):
+            parsed.append(record)
+            offset += len(line)
+        else:
+            tail = record
+    snapshot = LogSnapshot(signature, offset, tuple(parsed), tail)
+    _LOGS[key] = snapshot
+    return snapshot
 
 
 _REPLACE_TRIES = 5
@@ -51,6 +139,17 @@ def _atomic(path: Path, data: bytes) -> None:
 
 def _json(path: Path, data: dict) -> None:
     _atomic(path, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
+
+
+def _parse_event(line: bytes) -> dict:
+    entry = json.loads(line)
+    if not isinstance(entry, dict) or not {"kind", "data", "timestamp"} <= entry.keys():
+        raise ValueError("Malformed event record")
+    return entry
+
+
+def _read_events(path: Path) -> LogSnapshot | None:
+    return read_log(path, _parse_event, "Corrupt event journal")
 
 
 # A store change: ('event', kind, data) after the journal write, or ('state', old, new)
@@ -358,16 +457,17 @@ class RunStore:
 
     def event(self, kind: str, data: dict) -> None:
         path = self.path / "events.jsonl"
-        records = self.events()  # a corrupt middle record is an integrity error before appending
+        snapshot = _read_events(
+            path
+        )  # a corrupt middle record is an integrity error before appending
         prefix = b""
-        if path.exists():
-            existing = path.read_bytes()
-            if existing and not existing.endswith(b"\n"):
-                if len(records) == existing.count(b"\n") + 1:
-                    prefix = b"\n"  # complete record that only lost its newline
-                else:
-                    with path.open("r+b") as handle:  # drop the torn final append
-                        handle.truncate(existing.rfind(b"\n") + 1)
+        if snapshot is not None and snapshot.torn:
+            if snapshot.tail is not None:
+                prefix = b"\n"  # complete record that only lost its newline
+            else:
+                with path.open("r+b") as handle:  # drop the torn final append
+                    handle.truncate(snapshot.offset)
+                forget_log(path)
         entry = {"kind": kind, "data": data, "timestamp": datetime.now(UTC).isoformat()}
         line = prefix + (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
         with path.open("ab") as handle:
@@ -401,22 +501,8 @@ class RunStore:
         )
 
     def events(self) -> list[dict]:
-        path = self.path / "events.jsonl"
-        if not path.exists():
-            return []
-        lines = path.read_bytes().splitlines(keepends=True)
-        result = []
-        for index, line in enumerate(lines):
-            try:
-                entry = json.loads(line)
-                if not isinstance(entry, dict) or not {"kind", "data", "timestamp"} <= entry.keys():
-                    raise ValueError("Malformed event record")
-                result.append(entry)
-            except (ValueError, UnicodeDecodeError) as exc:
-                if index == len(lines) - 1 and not line.endswith(b"\n"):
-                    break
-                raise WorkflowError("Corrupt event journal") from exc
-        return result
+        snapshot = _read_events(self.path / "events.jsonl")
+        return [] if snapshot is None else copy.deepcopy(snapshot.all)
 
     def sources(self) -> dict[str, str]:
         if not self.valid(1):
