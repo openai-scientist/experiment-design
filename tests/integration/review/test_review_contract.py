@@ -79,7 +79,7 @@ def test_the_same_documents_named_again_in_one_turn_are_sent_once(tmp_path):
     assert all(set(r) == {"repeated"} for r in rest[:2])
 
 
-def test_a_503_is_zero_tokens_and_not_unknown_usage(tmp_path, monkeypatch):
+def test_a_503_is_charged_conservatively_not_booked_as_zero(tmp_path, monkeypatch):
     monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", lambda _: None)
     store = store_for(tmp_path)
     calls = []
@@ -117,7 +117,8 @@ def test_a_503_is_zero_tokens_and_not_unknown_usage(tmp_path, monkeypatch):
         llm.close()
     assert output.markdown == "done"
     assert store.state.usage_unknown is False
-    assert store.state.llm_tokens == 15
+    # The two 503s may have been billed upstream: each is charged the ceiling, not zero.
+    assert store.state.llm_tokens > 15
 
 
 # --- R1 fix class -------------------------------------------------------------------------
