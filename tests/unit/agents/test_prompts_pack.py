@@ -35,3 +35,12 @@ def test_reviewers_mark_an_input_conflict_as_unfixable_by_revision(role):
     assert "conflict between the supplied inputs" in text
     assert "fewer supplied hypotheses than the research_brief requires" in text
     assert "conflict between the supplied inputs" not in prompt("design", None)
+
+
+@pytest.mark.parametrize("role", ["design", "methodologist", "skeptic", "final_check"])
+def test_designers_and_reviewers_share_one_rule_for_analysis_decisions(role):
+    # Live 2026-10-16: the designer labelled a confirmatory gate and the bootstrap seed
+    # "Proposal — confirm before launch" while reviewers and the PI's Critic required them
+    # frozen; the plan was revised three times and the run stopped.
+    text = " ".join(prompt(role, None).split())
+    assert "is not an implementation detail: the plan fixes it with a concrete value" in text

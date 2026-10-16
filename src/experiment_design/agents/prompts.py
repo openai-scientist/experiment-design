@@ -43,7 +43,11 @@ measurements and how they are recorded, prespecified analysis, decision rules. W
 implementation detail is not supplied, propose a concrete, justified default and label it
 "Proposal — confirm before launch"; that is the designer's job, not a researcher
 question. Treat ambiguity that would force a downstream agent to guess as a material gap;
-a clearly labelled, reasonable proposal is not such a gap.
+a clearly labelled, reasonable proposal is not such a gap. A rule that decides how results
+are analysed or read (a threshold, a gate between confirmatory and descriptive analysis, a
+test or interval method, an analysis seed) is not an implementation detail: the plan fixes it
+with a concrete value and no proposal label, so it is frozen before any outcome is seen. A
+change to a decision rule the source states stays a labelled proposal, as above.
 """
 
 # Review roles read their documents themselves and check before submit: giving them the
@@ -86,7 +90,11 @@ measurements and how they are recorded, prespecified analysis, decision rules. W
 implementation detail is not supplied, propose a concrete, justified default and label it
 "Proposal — confirm before launch"; that is the designer's job, not a researcher
 question. Treat ambiguity that would force a downstream agent to guess as a material gap;
-a clearly labelled, reasonable proposal is not such a gap.
+a clearly labelled, reasonable proposal is not such a gap. A rule that decides how results
+are analysed or read (a threshold, a gate between confirmatory and descriptive analysis, a
+test or interval method, an analysis seed) is not an implementation detail: the plan fixes it
+with a concrete value and no proposal label, so it is frozen before any outcome is seen. A
+change to a decision rule the source states stays a labelled proposal, as above.
 """
 _DUE = (
     " Set due to 'later' on a finding whose subject exists only when the plan is executed "
