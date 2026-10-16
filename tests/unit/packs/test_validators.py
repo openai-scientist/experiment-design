@@ -78,3 +78,15 @@ def test_duplicate_split_names_are_flagged():
     index, resources = scenario()
     resources["resources"][0]["splits"] = ["train", "test", "test"]
     assert VALIDATORS["split_overlap"](index, resources)[0].category == "leakage"
+
+
+@pytest.mark.parametrize(
+    "control",
+    ["qualifying failure must reproduce in three clean reruns", "Re-run each failing test"],
+)
+def test_a_rerun_rule_counts_as_flaky_test_handling(control):
+    # Live 2026-10-16: a plan with a three-rerun rule but no word "flaky" was revised until the
+    # engine stopped.
+    index, resources = scenario()
+    index.experiments[0].controls = [control]
+    assert VALIDATORS["flaky_tests"](index, resources) == []

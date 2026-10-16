@@ -47,6 +47,16 @@ def canonical(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
 
 
+_VERSION = re.compile(r"v?\d+(-\d+)*")
+
+
+def names_entry(mention: str, entry: str) -> bool:
+    """A mention names a registry entry by its name, or by its name and a version
+    ("Defects4J v2.0" names "Defects4J"; "CIFAR-10-C" does not name "CIFAR-10")."""
+    m, e = canonical(mention), canonical(entry)
+    return m == e or (m.startswith(e + "-") and _VERSION.fullmatch(m[len(e) + 1 :]) is not None)
+
+
 def resource_id(kind: str, name: str) -> str:
     return f"{kind}:{canonical(name)}"
 
@@ -119,13 +129,13 @@ def survey(
     tasks = {task.casefold() for task in plan.tasks}
     # A curated entry the hypotheses name is kept whatever the tasks: its verifiable source
     # wins over the evidence card's (live: Defects4J was filtered out and stayed unverified).
-    named = {mention.name.strip().casefold() for mention in plan.mentions}
+    named = [mention.name for mention in plan.mentions if mention.name.strip()]
     registry = [
         entry
         for entry in pack.registry
         if not tasks
         or tasks & {task.casefold() for task in entry.tasks}
-        or entry.name.casefold() in named
+        or any(names_entry(name, entry.name) for name in named)
     ] or list(pack.registry)
     candidates: list[Resource] = list(researcher)
     candidates += [

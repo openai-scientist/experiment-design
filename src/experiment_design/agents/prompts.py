@@ -133,6 +133,9 @@ _ROLES = {
     "selector": (
         "Rank and select evaluation resources for the research brief from the supplied "
         "candidates only. Use the exact resource_id of each candidate; never add a candidate. "
+        "When a registry candidate and an evidence_card candidate name the same resource (one "
+        "may add a version, such as 'Defects4J' and 'Defects4J v2.0'), select the registry one, "
+        "whose source can be verified, and give the version in its rationale. "
         "For each selected resource give rank (1 is best), a one-sentence rationale, the "
         "hypothesis IDs it serves and its benchmark contamination risk (low, medium, high or "
         "unknown when you cannot tell). When researcher comments ask for a resource that is "

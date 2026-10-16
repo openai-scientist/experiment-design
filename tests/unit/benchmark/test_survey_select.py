@@ -283,3 +283,36 @@ def test_a_requested_addition_with_a_hub_id_is_left_for_acquire_to_verify(tmp_pa
     assert by_name["Wikipedia"].hf_repo_id == "wikimedia/wikipedia"
     assert by_name["BM25"].origin == "researcher"
     assert by_name["BM25"].hf_repo_id is None
+
+
+def test_a_versioned_mention_keeps_its_registry_entry(tmp_path):
+    # Live 2026-10-16: the evidence named "Defects4J v2.0", the exact-name match missed the
+    # registry entry, and the plan had no verified benchmark.
+    store = _store(tmp_path, evidence="Defects4J v2.0 is the standard benchmark.\n")
+    plan = {
+        "queries": [],
+        "tasks": ["code-generation"],  # matches other entries, so only the name keeps Defects4J
+        "mentions": [{"name": "Defects4J v2.0", "kind": "benchmark"}],
+    }
+    found = survey(
+        store,
+        ToolProvider([("submit", plan)]),
+        RunConfig(),
+        load_pack(Profile(domain="se")),
+        _hf(_hub),
+        "brief",
+        "## H1: a claim",
+        [],
+    )
+    by_name = {r.name: r for r in found}
+    assert by_name["Defects4J"].origin == "registry"
+    assert by_name["Defects4J v2.0"].origin == "evidence_card"  # versions stay distinct
+
+
+def test_a_version_suffix_is_not_a_different_name():
+    from experiment_design.agents.benchmark.survey import names_entry
+
+    assert names_entry("Defects4J v2.0", "Defects4J")
+    assert names_entry("defects4j", "Defects4J")
+    assert not names_entry("CIFAR-10-C", "CIFAR-10")
+    assert not names_entry("Defects4J-dissection", "Defects4J")
