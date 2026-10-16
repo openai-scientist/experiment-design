@@ -110,3 +110,14 @@ def test_a_dropped_zenodo_connection_is_retried_once():
     out = _run(_resource("https://zenodo.org/records/1"), handler)
     assert len(calls) == 2
     assert out.status == "verified" and out.license == "cc-by-4.0"
+
+
+def test_a_concept_doi_is_pinned_to_the_record_it_resolves_to():
+    latest = RECORD | {"id": 9999999, "doi": "10.5281/zenodo.9999999"}
+
+    out = _run(
+        _resource("https://doi.org/10.5281/zenodo.2535966"),
+        lambda request: httpx.Response(200, json=latest),
+    )
+    assert out.revision == "zenodo:9999999 (doi 10.5281/zenodo.9999999, version v1)"
+    assert out.source_url == "https://zenodo.org/records/9999999"

@@ -159,6 +159,10 @@ def _acquire_zenodo(
     metadata = record.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
     doi, version = record.get("doi"), metadata.get("version")
+    # A concept DOI redirects to its latest version: pin the record actually returned.
+    returned = record.get("id")
+    if isinstance(returned, int | str) and not isinstance(returned, bool) and str(returned):
+        record_id = str(returned)
     revision = f"zenodo:{record_id}"
     details = [f"{label} {value}" for label, value in (("doi", doi), ("version", version)) if value]
     if details:
