@@ -87,6 +87,38 @@ def test_survey_collects_every_origin_and_quotes_only_visible_urls(tmp_path):
     assert len({r.resource_id for r in found}) == len(found)
 
 
+def test_a_named_registry_entry_wins_whatever_the_tasks(tmp_path):
+    # Live: the tasks filter dropped Defects4J, so the paper URL won and it stayed unverified.
+    store = _store(tmp_path, evidence="Defects4J (https://arxiv.org/abs/2311.04532).\n")
+    plan = {
+        "queries": [],
+        "tasks": ["bug-detection"],
+        "mentions": [
+            {
+                "name": "Defects4J",
+                "kind": "benchmark",
+                "source_url": "https://arxiv.org/abs/2311.04532",
+            },
+            {"name": "EvoSuite", "kind": "baseline"},
+        ],
+    }
+    found = survey(
+        store,
+        ToolProvider([("submit", plan)]),
+        RunConfig(),
+        load_pack(Profile(domain="se")),
+        _hf(_hub),
+        "brief",
+        "## H1: a claim",
+        [],
+    )
+    by_name = {r.name: r for r in found}
+    assert by_name["Defects4J"].origin == "registry"
+    assert by_name["Defects4J"].source_url == "https://github.com/rjust/defects4j"
+    assert by_name["EvoSuite"].source_url == "https://github.com/EvoSuite/evosuite"
+    assert "HumanEval" not in by_name  # not named and not tagged with the tasks
+
+
 def test_mention_without_url_is_kept_without_url(tmp_path):
     store = _store(tmp_path)
     plan = PLAN | {"mentions": [{"name": "NoLink", "kind": "baseline"}]}
@@ -198,3 +230,89 @@ def test_additions_are_ignored_without_researcher_comment(tmp_path):
     submit = {"choices": [], "additions": [{"name": "X", "kind": "baseline"}]}
     chosen = select(store, ToolProvider([("submit", submit)]), RunConfig(), pack, found, "brief")
     assert not any(r.name == "X" for r in chosen)
+
+
+def test_a_mention_carries_the_hub_id_the_model_proposes_for_acquire_to_check(tmp_path):
+    store = _store(tmp_path)
+    plan = {
+        "queries": [],
+        "tasks": [],
+        "mentions": [
+            {"name": "Natural Questions Open", "kind": "benchmark",
+             "hf_repo_id": "google-research-datasets/nq_open"},
+            {"name": "Phi-2", "kind": "baseline", "hf_repo_id": "microsoft/phi-2"},
+            {"name": "Odd", "kind": "dataset", "hf_repo_id": "not a repo id"},
+        ],
+    }  # fmt: skip
+    found = survey(
+        store,
+        ToolProvider([("submit", plan)]),
+        RunConfig(),
+        load_pack(Profile(domain="ml")),
+        _hf(_hub),
+        "brief",
+        "## H1: a claim",
+        [],
+    )
+    by_name = {r.name: r for r in found}
+    assert by_name["Natural Questions Open"].hf_repo_id == "google-research-datasets/nq_open"
+    assert by_name["Phi-2"].hf_repo_id == "microsoft/phi-2"
+    assert by_name["Odd"].hf_repo_id is None
+
+
+def test_a_requested_addition_with_a_hub_id_is_left_for_acquire_to_verify(tmp_path):
+    store = _store(tmp_path)
+    selection = {
+        "choices": [],
+        "additions": [
+            {"name": "Wikipedia", "kind": "dataset", "hf_repo_id": "wikimedia/wikipedia"},
+            {"name": "BM25", "kind": "baseline"},
+        ],
+    }
+    chosen = select(
+        store,
+        ToolProvider([("submit", selection)]),
+        RunConfig(),
+        load_pack(Profile(domain="ml")),
+        [],
+        "brief",
+        comments="Verify the retrieval corpus.",
+    )
+    by_name = {r.name: r for r in chosen}
+    assert by_name["Wikipedia"].origin == "hf_hub"
+    assert by_name["Wikipedia"].hf_repo_id == "wikimedia/wikipedia"
+    assert by_name["BM25"].origin == "researcher"
+    assert by_name["BM25"].hf_repo_id is None
+
+
+def test_a_versioned_mention_keeps_its_registry_entry(tmp_path):
+    # Live 2026-10-16: the evidence named "Defects4J v2.0", the exact-name match missed the
+    # registry entry, and the plan had no verified benchmark.
+    store = _store(tmp_path, evidence="Defects4J v2.0 is the standard benchmark.\n")
+    plan = {
+        "queries": [],
+        "tasks": ["code-generation"],  # matches other entries, so only the name keeps Defects4J
+        "mentions": [{"name": "Defects4J v2.0", "kind": "benchmark"}],
+    }
+    found = survey(
+        store,
+        ToolProvider([("submit", plan)]),
+        RunConfig(),
+        load_pack(Profile(domain="se")),
+        _hf(_hub),
+        "brief",
+        "## H1: a claim",
+        [],
+    )
+    by_name = {r.name: r for r in found}
+    assert by_name["Defects4J"].origin == "registry"
+    assert by_name["Defects4J v2.0"].origin == "evidence_card"  # versions stay distinct
+
+
+def test_a_version_suffix_is_not_a_different_name():
+    from experiment_design.agents.benchmark.survey import names_entry
+
+    assert names_entry("Defects4J v2.0", "Defects4J")
+    assert names_entry("defects4j", "Defects4J")
+    assert not names_entry("CIFAR-10-C", "CIFAR-10")
+    assert not names_entry("Defects4J-dissection", "Defects4J")

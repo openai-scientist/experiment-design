@@ -35,6 +35,10 @@ class LLMError(RuntimeError):
     pass
 
 
+# Backoff multipliers of retry_base_delay: 2, 5, 15, 30 s at the default, about 52 s in all.
+_BACKOFF = (1.0, 2.5, 7.5, 15.0)
+
+
 class LLMClient:
     def __init__(
         self,
@@ -96,8 +100,11 @@ class LLMClient:
             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
                 # Timeouts and dropped connections are transient; usage stays unknown.
                 code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                # A 4xx other than 408 was rejected before processing: usage is known zero.
-                usage = 0 if code is not None and 400 <= code < 500 and code != 408 else None
+                # A timeout, a dropped connection or a gateway timeout (504, 524: the provider
+                # may have billed the completion) may hide processed work: usage is unknown.
+                # Any other error response did no work: zero, so an outage of retried 503s
+                # does not use up the review's token cap (R6, live).
+                usage = None if code is None or code in (408, 504, 524) else 0
                 timed_out = isinstance(exc, httpx.TimeoutException) or code == 408
                 self._report(started, "timeout" if timed_out else "error", usage, usage)
                 self.last_attempts.append(
@@ -117,7 +124,7 @@ class LLMClient:
                 )
                 if not retryable or attempt == self.max_attempts - 1:
                     raise LLMError(f"LLM request failed: {exc}") from exc
-                time.sleep(self.cfg.retry_base_delay * 2**attempt)
+                time.sleep(self.cfg.retry_base_delay * _BACKOFF[min(attempt, len(_BACKOFF) - 1)])
                 continue
             try:
                 body = response.json()

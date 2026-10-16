@@ -93,7 +93,7 @@ def test_complete_retries_429_then_succeeds(monkeypatch):
     try:
         assert llm.complete([], []).tokens_out == 7
         assert len(requests) == 3
-        assert sleeps == [2.0, 4.0]
+        assert sleeps == [2.0, 5.0]
     finally:
         llm.close()
 
@@ -186,9 +186,19 @@ def test_llm_retry_attempts_can_be_capped(monkeypatch):
 
 @pytest.mark.parametrize(
     "status,known",
-    [(400, True), (401, True), (404, True), (408, False), (500, False), (503, False)],
+    [
+        (400, True),
+        (401, True),
+        (404, True),
+        (408, False),
+        (500, True),
+        (502, True),
+        (503, True),
+        (504, False),
+        (524, False),
+    ],
 )
-def test_rejected_request_usage_is_zero_only_for_4xx_except_408(monkeypatch, status, known):
+def test_only_timeouts_have_unknown_usage(monkeypatch, status, known):
     monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", lambda _: None)
     llm = client(lambda _: httpx.Response(status), retries=0)
     try:
@@ -239,3 +249,43 @@ def test_dropped_connection_is_retried_with_unknown_usage(monkeypatch):
     assert [a["status"] for a in llm.last_attempts] == ["error", "success"]
     assert llm.last_attempts[0]["tokens_in"] is None
     assert llm.last_attempts[0]["error_type"] == "RemoteProtocolError"
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 524])
+def test_http_5xx_status_backs_off_to_about_a_minute(monkeypatch, status):
+    sleeps, calls = [], []
+    monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", sleeps.append)
+
+    def handler(_):
+        calls.append(1)
+        return httpx.Response(status) if len(calls) < 5 else httpx.Response(200, json=response())
+
+    llm = LLMClient(
+        LLMConfig(base_url="https://provider.example/v1", model="tool-model"),
+        "test-key",
+        httpx.MockTransport(handler),
+    )
+    try:
+        assert llm.complete([], []).tokens_out == 7
+        errors = llm.last_attempts[:-1]
+        assert len(errors) == 4
+        usage = None if status == 524 else 0
+        assert all(a["tokens_in"] == usage and a["tokens_out"] == usage for a in errors)
+        assert sleeps == [2.0, 5.0, 15.0, 30.0]
+    finally:
+        llm.close()
+
+
+def test_timeout_keeps_usage_unknown(monkeypatch):
+    monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", lambda _: None)
+
+    def handler(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    llm = client(handler, retries=0)
+    try:
+        with pytest.raises(LLMError):
+            llm.complete([], [])
+        assert llm.last_attempts[0]["tokens_in"] is None
+    finally:
+        llm.close()

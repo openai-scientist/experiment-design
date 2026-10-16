@@ -72,12 +72,20 @@ EXD_SERVICE_KEY=<secret> uv run exd-api
 | `EXD_SERVICE_KEY` | Required. Clients send it in the `X-Service-Key` header. |
 | `EXD_CONFIG` | Path to the config file. Default `exd.yaml`. |
 | `EXD_PORT` | Listen port. Default `8000`. |
+| `GITHUB_TOKEN` | Optional. Raises the GitHub API rate limit when verifying GitHub-hosted resources. |
 
 Routes (`src/experiment_design/api/contract_models.py`): `GET /health`,
 `GET /capabilities`, `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events`,
 `POST /runs/{id}/gates/{gate_id}`, `POST /runs/{id}/pause`, `/resume` and `/cancel`.
 The management repository owns the contract. A copy of its schemas and examples is in
 `tests/contract/vendor/`; `vendor/SOURCE` names the management commit.
+
+Inputs: `i2h.hypotheses/v1` (required), `i2h.evidence/v1` and `review.findings/v1` (optional).
+Evidence cards are rendered under the hypotheses that cite them. Blocking and major review
+findings on the selected hypotheses become a "Known issues" list. A malformed optional input is
+skipped with a warning. After any earlier final check (researcher or system revision), the final check must
+resolve each earlier MAJOR finding and may raise a new MAJOR only on a section the revision
+changed. Findings about evidence that exists only at execution time never block a plan.
 
 ## Test
 
@@ -86,3 +94,12 @@ uv run pytest -q          # deterministic tests, no network
 uv run pytest -m live     # opt-in; calls real providers and needs the keys above
 uv run ruff check .
 ```
+
+For quick feedback while editing, run
+`uv run python scripts/affected_tests.py --files tests/unit/api/test_observability.py --run`
+or choose an owner with `--lane unit-api --run`. Run automatic affected checks with
+`uv run python scripts/affected_tests.py --run`, and pre-push checks with
+`uv run python scripts/affected_tests.py --base origin/main --run`.
+Omit `--run` to inspect the JSON plan. Shared changes and missing dependency/diff
+evidence select the full suite. Full tests and style checks remain required before
+handoff; [the testing guide](docs/testing.md) explains the selection policy and CI gate.

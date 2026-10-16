@@ -66,7 +66,7 @@ def test_index_mismatch_cannot_be_dropped_by_final_checker(tmp_path):
             response = super().complete(messages, tools)
             if "experiments" in tools[0]["function"]["parameters"].get("properties", {}):
                 body = json.loads(response.tool_calls[0].arguments)
-                body["experiments"][0]["plan_section"] = "## Absent"
+                body["experiments"][0]["hypothesis_ids"] = ["H1"]  # H2 left without an experiment
                 response = response.model_copy(
                     update={
                         "tool_calls": [
@@ -82,3 +82,67 @@ def test_index_mismatch_cannot_be_dropped_by_final_checker(tmp_path):
     assert any(f["severity"] == "MAJOR" and f["category"] == "reproducibility" for f in findings)
     with pytest.raises(WorkflowError):
         publish(store)
+
+
+def test_index_heading_and_hash_mismatches_are_repaired_by_code_not_reviewed(tmp_path):
+    from experiment_design.runtime.llm import ToolCall
+
+    store, cfg = profiled_store(tmp_path)
+
+    class LooseIndex(EndlessProvider):
+        def complete(self, messages, tools):
+            response = super().complete(messages, tools)
+            if "experiments" in tools[0]["function"]["parameters"].get("properties", {}):
+                body = json.loads(response.tool_calls[0].arguments)
+                section = body["experiments"][0]["plan_section"]
+                # Live: the extracted index dropped the heading marks and the case.
+                body["experiments"][0]["plan_section"] = section.lstrip("# ").upper()
+                body["plan_sha256"] = "stale"
+                call = ToolCall(id="loose", name="submit", arguments=json.dumps(body))
+                response = response.model_copy(update={"tool_calls": [call]})
+            return response
+
+    state = reach_review(store, LooseIndex(), cfg)
+    assert state.status == "PENDING_REVIEW"
+    plan = store.read(state.plan_stage, state.plan_name)
+    index = json.loads(store.read(state.plan_stage, "index.json"))
+    assert index["experiments"][0]["plan_section"] in plan.splitlines()
+    assert index["plan_sha256"] == hashlib.sha256(plan.encode()).hexdigest()
+    findings = json.loads(store.read(5, "deterministic_findings.json"))
+    assert not [f for f in findings if f["anchor"] == "Experiment index"]
+
+
+def test_resource_shortfall_findings_need_evidence_not_a_plan_edit(tmp_path):
+    store, cfg = profiled_store(tmp_path)
+    reach_review(store, EndlessProvider(), cfg)
+    findings = json.loads(store.read(5, "deterministic_findings.json"))
+    shortfalls = [f for f in findings if f["id"].startswith("shortfall-")]
+    assert shortfalls and all(f["kind"] == "needs_evidence" for f in shortfalls)
+
+
+def test_a_run_without_a_stage_3_index_skips_the_early_code_checks(tmp_path):
+    source = tmp_path / "hypotheses.md"
+    source.write_text("## H1: First claim\n", encoding="utf-8")
+    cfg = ExdConfig(
+        llm=LLMConfig(base_url="http://fake", model="fake"), runs_root=tmp_path / "runs"
+    )
+    store = start_run([source], cfg)
+    state = advance(store, EndlessProvider(), Judge(), cfg.run, hold_at_review=True)
+    assert state.status == "PENDING_REVIEW"
+    assert not (store.path / "stage-03" / "index.json").exists()
+    # A run made before the index existed, resumed with a profile and stage 4 to decide again.
+    store.update(profile=Profile(domain="ml", research_type="comparative_benchmark"))
+    (store.path / "stage-04" / "manifest.json").unlink()
+    advance(store, EndlessProvider(), Judge(), cfg.run, hold_at_review=True)
+
+
+def test_early_code_checks_wait_until_stage_4_is_decided(tmp_path, monkeypatch):
+    store, cfg = profiled_store(tmp_path)
+    state = reach_review(store, EndlessProvider(), cfg)
+    assert state.status == "PENDING_REVIEW"
+
+    def fail(*args, **kwargs):
+        raise AssertionError("early code checks ran on a decided stage 4")
+
+    monkeypatch.setattr("experiment_design.workflow.engine._deterministic_findings", fail)
+    advance(store, EndlessProvider(), Judge(), cfg, hold_at_review=True)

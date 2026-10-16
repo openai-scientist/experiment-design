@@ -4,6 +4,7 @@ The contract is shared as documents (``tests/contract/vendor``), never as code. 
 ignore unknown fields, except secret-bearing and telemetry models, which reject them.
 """
 
+import re
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -11,10 +12,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.4.0"
 
 # Schema IDs
 I2H_HYPOTHESES = "i2h.hypotheses/v1"
+I2H_EVIDENCE = "i2h.evidence/v1"
 EXD_EXP_PLAN = "exd.exp_plan/v1"
 PLATFORM_DATASET = "platform.dataset/v1"
 EXD_RESOURCES = "exd.resources/v1"
@@ -168,6 +170,19 @@ class Capabilities(Wire):
     reuses_prior_run: bool = False
     profiles: list[ResearchProfile]
 
+    @model_validator(mode="after")
+    def platform_capability_rules(self) -> "Capabilities":
+        # The Platform's model enforces this; JSON Schema cannot express it.
+        if not any(p.domain is None and p.research_type is None for p in self.profiles):
+            raise ValueError("profiles must include base")
+        if sum(output.primary for output in self.output_schemas) != 1:
+            raise ValueError("output_schemas must contain exactly one primary")
+        if any(not a.startswith(self.engine_key + ".") for a in self.activity_types):
+            raise ValueError("activity_types must use engine_key prefix")
+        if set(self.integrations) & set(self.optional_integrations):
+            raise ValueError("integrations and optional_integrations must not overlap")
+        return self
+
 
 class Health(Wire):
     status: Literal["ok", "degraded", "down"]
@@ -284,6 +299,17 @@ class Gate(Wire):
     artifact_ids: list[str] = Field(default_factory=list)
     opened_at: datetime
 
+    @model_validator(mode="after")
+    def options_match_kind(self) -> "Gate":
+        # The Platform's model enforces this; JSON Schema cannot express it.
+        if self.kind is GateKind.question:
+            ids = [option.option_id for option in self.options]
+            if not 2 <= len(ids) <= 4 or self.default_option_id not in ids:
+                raise ValueError("question requires 2-4 options and a default in those options")
+        elif self.options or not self.artifact_ids:
+            raise ValueError("artifact_review requires artifact_ids and no options")
+        return self
+
 
 class RunState(Wire):
     engine_run_id: str
@@ -295,6 +321,13 @@ class RunState(Wire):
     failure: FailureInfo | None = None
     last_source_seq: int = Field(default=0, ge=0)
     cost_usd: Decimal = Decimal(0)
+
+    @model_validator(mode="after")
+    def failure_matches_phase(self) -> "RunState":
+        # The Platform's model enforces this; JSON Schema cannot express it.
+        if (self.phase is Phase.failed) != (self.failure is not None):
+            raise ValueError("failure is required exactly when phase is failed")
+        return self
 
 
 class Anchor(Wire):
@@ -385,10 +418,15 @@ class EventEnvelope(Wire):
     @model_validator(mode="after")
     def conditions_of_the_event_type(self) -> "EventEnvelope":
         """The conditions the schema attaches to each type (allOf), checked on the way out."""
+        # The Platform's model enforces these; JSON Schema cannot express them.
         if self.event_class is EventClass.activity:
-            if not (self.step_key and self.actor and self.summary and self.summary.strip()):
+            if self.type in EVENT_PAYLOADS or not ACTIVITY_TYPE.fullmatch(self.type):
+                raise ValueError("activity type requires an engine prefix")
+            if not all(v and v.strip() for v in (self.step_key, self.actor, self.summary)):
                 raise ValueError("an activity needs step_key, actor and summary")
             return self
+        if self.type not in EVENT_PAYLOADS:
+            raise ValueError("unknown lifecycle type")
         payload_model = EVENT_PAYLOADS.get(self.type)
         if payload_model is not None:
             payload_model.model_validate(self.payload)
@@ -413,6 +451,7 @@ EVENT_PAYLOADS: dict[str, type[BaseModel]] = {
     "run.cancelled": EmptyPayload,
     "run.cost": RunCost,
 }
+ACTIVITY_TYPE = re.compile(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_.]*")
 PHASE_REQUIRED = frozenset({"run.phase_changed", "run.gate_opened"})
 FIXED_PHASE = {
     "run.published": Phase.published,
@@ -457,11 +496,25 @@ class ReviewFindings(Wire):
     findings: list[Finding]
     passed: bool
 
+    @model_validator(mode="after")
+    def passed_matches_findings(self) -> "ReviewFindings":
+        # The Platform's model enforces this; JSON Schema cannot express it.
+        if self.passed != (not any(f.severity == "blocking" for f in self.findings)):
+            raise ValueError("passed must match absence of blocking findings")
+        return self
+
 
 class RevisionItem(Wire):
     finding_id: str
     outcome: Literal["fixed", "rebutted", "not_fixed"]
     note: str | None = None
+
+    @model_validator(mode="after")
+    def note_unless_fixed(self) -> "RevisionItem":
+        # The Platform's model enforces this; JSON Schema cannot express it.
+        if self.outcome != "fixed" and not (self.note and self.note.strip()):
+            raise ValueError("rebutted and not_fixed require a note")
+        return self
 
 
 class RevisionResponse(Wire):

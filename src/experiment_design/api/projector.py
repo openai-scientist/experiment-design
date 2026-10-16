@@ -92,7 +92,40 @@ class Projector:
                 )
 
 
+#: Display names shared in style with i2h (contract 1.2.0 adds a shared actor_kind).
+_PERSONAS = {
+    "framing": "strategist",
+    "clarification": "strategist",
+    "profile_inference": "strategist",
+    "design": "designer",
+    "revision": "reviser",
+    "methodologist_rejoinder": "methodologist",
+    "skeptic_rejoinder": "skeptic",
+    "final_check": "reviewer",
+    "indexer": "reporter",
+    "surveyor": "librarian",
+    "selector": "librarian",
+    "jev": "coordinator",
+    "acquirer": "system",
+    "validator": "system",
+    "calculator": "system",
+    "workflow": "system",
+    "stage": "system",
+}
+
+
+def persona(actor: str) -> str:
+    return _PERSONAS.get(actor, actor)
+
+
 def _activity(kind: str, data: dict) -> dict | None:
+    activity = _raw_activity(kind, data)
+    if activity:
+        activity = {**activity, "actor": persona(activity["actor"])}
+    return activity
+
+
+def _raw_activity(kind: str, data: dict) -> dict | None:
     if kind == "activity":
         return data
     payload = {}

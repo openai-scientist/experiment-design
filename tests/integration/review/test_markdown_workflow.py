@@ -162,6 +162,13 @@ def test_clarification_preserves_plan_and_does_not_confirm_intent(tmp_path):
     assert any(e["kind"] == "clarification.answer" for e in store.events())
 
 
+def refinement_outputs():
+    """Brief, draft and critics where the methodologist leaves a fixable MAJOR: JEV must choose."""
+    outputs = happy_outputs()[:4]
+    outputs[2]["findings"] = [MAJOR]
+    return outputs
+
+
 def test_illegal_judge_choice_cannot_bypass_authority(tmp_path):
     class IllegalJudge:
         def decide(self, state, questions):
@@ -169,7 +176,7 @@ def test_illegal_judge_choice_cannot_bypass_authority(tmp_path):
 
     store = store_for(tmp_path)
     with pytest.raises(WorkflowError, match="illegal"):
-        advance(store, Provider([{"markdown": "Brief"}]), IllegalJudge(), RunConfig())
+        advance(store, Provider(refinement_outputs()), IllegalJudge(), RunConfig())
     assert store.state.status == "STOPPED"
     assert not store.state.review_complete
 
@@ -250,7 +257,7 @@ def test_reframe_allowance_preserves_history_and_bounds_loop(tmp_path):
 
     store = store_for(tmp_path)
     output = [
-        {"markdown": t}
+        {"markdown": t} | ({"findings": [MAJOR]} if t == "Method1" else {})  # a fix to reframe for
         for t in [
             "Brief1",
             "Draft1",
@@ -338,7 +345,7 @@ def test_manifest_survives_crash_before_checkpoint_without_provider_replay(
     monkeypatch.setattr(store, "complete", real_complete)
     state = advance(store, provider, judge, RunConfig())
     assert len(provider.starts) == 5
-    assert judge.calls == 3
+    assert judge.calls == 0  # every route here is decided by code rule
     assert state.review_complete
     assert state.plan_stage == 4
     assert store.read(7, "exp_plan.md") == "Draft"
@@ -471,7 +478,12 @@ def test_final_check_revision_transmits_original_final_objections(tmp_path):
     outputs = happy_outputs()
     outputs[-1] = {"markdown": "Final objection: missing blinding", "findings": [MAJOR]}
     outputs += revised("Blinded plan", recommended_action="Added blinding")
-    outputs.append({"markdown": "Fresh inspection"})
+    outputs.append(
+        {
+            "markdown": "Fresh inspection",
+            "resolutions": [{"finding_id": "P1", "status": "resolved", "reason": "fixed"}],
+        }
+    )
     provider = Provider(outputs)
     state = advance(store, provider, Judge(), RunConfig())
     assert state.review_complete
@@ -506,12 +518,12 @@ def test_requested_changes_critics_receive_previously_presented_revision(tmp_pat
 def test_judge_invalid_usage_never_decreases_run_usage(tmp_path, tokens):
     class InvalidUsageJudge:
         def decide(self, state, questions):
-            return {"next": Decision("DESIGN", {}, 1, tokens=tokens)}
+            return {"next": Decision("REVISE", {}, 1, tokens=tokens)}
 
     store = store_for(tmp_path)
     with pytest.raises(WorkflowError, match="invalid token usage"):
-        advance(store, Provider([{"markdown": "Brief"}]), InvalidUsageJudge(), RunConfig())
-    assert store.state.llm_tokens == 10
+        advance(store, Provider(refinement_outputs()), InvalidUsageJudge(), RunConfig())
+    assert store.state.llm_tokens == 30  # the specialists only; the invalid JEV usage adds none
     assert store.state.jev_calls == 1
     assert not store.state.review_complete
 
@@ -525,9 +537,10 @@ def test_unknown_judge_usage_is_disclosed_and_call_bounded(tmp_path):
             }
 
     store = store_for(tmp_path)
-    state = advance(store, Provider(happy_outputs()), UnknownJudge(), RunConfig())
+    outputs = refinement_outputs() + revised("Revised plan") + [{"markdown": "Final review"}]
+    state = advance(store, Provider(outputs), UnknownJudge(), RunConfig())
     assert state.review_complete
-    assert state.jev_calls == 3
+    assert state.jev_calls == 1
     assert any(
         e["kind"] == "provider.usage"
         and e["data"].get("provider") == "jev"
@@ -566,7 +579,7 @@ def stop_after(monkeypatch, store, stage, on_call):
     return real_complete
 
 
-def test_resume_after_failed_step_keeps_requested_change_plan(tmp_path):
+def test_resume_after_failed_step_keeps_requested_change_plan(tmp_path, monkeypatch):
     store = store_for(tmp_path)
     outputs = happy_outputs()
     outputs[2]["findings"] = [MAJOR]
@@ -579,20 +592,16 @@ def test_resume_after_failed_step_keeps_requested_change_plan(tmp_path):
         researcher="R",
         revision=store.state.attempt,
     )
-    judge = FailOnceJudge()
-    first = Provider([{"markdown": "Method"}, {"markdown": "Skeptic"}])
-    with pytest.raises(WorkflowError, match="illegal"):
-        advance(store, first, judge, RunConfig())
-    assert store.state.status == "STOPPED"
-    resumed = Provider(
-        [{"markdown": t} for t in ["Method", "Skeptic"]]
-        + revised("Second revision")
-        + [{"markdown": "Final"}]
-    )
-    state = advance(store, resumed, judge, RunConfig())
-    assert resumed.documents(0)["plan"] == "Previously revised plan"
-    assert "Change measurement" in resumed.documents(0)["researcher_responses"]
-    assert state.refinements == 2
+    # A change request routes to REVISE without the judge; the revised stage fails to save.
+    real_complete = stop_after(monkeypatch, store, 4, on_call=1)
+    first = Provider([{"markdown": t} for t in ["Method", "Skeptic"]] + revised("Second revision"))
+    with pytest.raises(WorkflowError, match="simulated"):
+        advance(store, first, Judge(), RunConfig())
+    assert first.documents(0)["plan"] == "Previously revised plan"
+    assert "Change measurement" in first.documents(0)["researcher_responses"]
+    monkeypatch.setattr(store, "complete", real_complete)
+    resumed = Provider([{"markdown": "Final"}])
+    advance(store, resumed, Judge(), RunConfig())
     assert store.read(7, "exp_plan.md") == "Second revision"
 
 
@@ -608,7 +617,14 @@ def test_resume_after_failed_revision_keeps_plan_and_objections(tmp_path, monkey
         advance(store, Provider(outputs), Judge(), RunConfig())
     refinements = store.state.refinements
     monkeypatch.setattr(store, "complete", real_complete)
-    resumed = Provider([{"markdown": "Fresh final"}])
+    resumed = Provider(
+        [
+            {
+                "markdown": "Fresh final",
+                "resolutions": [{"finding_id": "P1", "status": "resolved", "reason": "fixed"}],
+            }
+        ]
+    )
     state = advance(store, resumed, Judge(), RunConfig())
     # The accepted revision and both rejoinders are not replayed; only the final check runs.
     assert len(resumed.starts) == 1
@@ -626,7 +642,7 @@ def test_failed_clarification_keeps_review_and_resumes_explanation(tmp_path):
     respond(store, action="CLARIFY", text="Why this?", researcher="R", revision=store.state.attempt)
     bad = Provider([{"markdown": "x", "findings": [MAJOR | {"evidence_refs": ["fake"]}]}])
     with pytest.raises(WorkflowError):
-        advance(store, bad, Judge(), RunConfig(task_max_turns=2))
+        advance(store, bad, Judge(), RunConfig(task_max_turns=1))
     assert store.state.status == "STOPPED"
     assert store.state.review_complete
     state = advance(store, Provider([{"markdown": "Because"}]), Judge(), RunConfig())
@@ -672,19 +688,29 @@ CALC = {
 
 def test_critic_never_sees_peer_calculation_from_same_round(tmp_path):
     store = store_for(tmp_path)
-    judge = FailOnceJudge(fail_on=2)
+    judge = FailOnceJudge(fail_on=1)
     calls = [
         ("submit", {"markdown": "Brief"}),
         ("submit", {"markdown": "Draft"}),
         ("calculate", CALC),
-        ("submit", {"markdown": "Method"}),
+        ("submit", {"markdown": "Method", "findings": [MAJOR]}),
         ("submit", {"markdown": "Skeptic"}),
     ]
     with pytest.raises(WorkflowError, match="illegal"):
         advance(store, ToolProvider(calls), judge, RunConfig())
     calculations = [e for e in store.events() if e["kind"] == "calculation"]
     assert calculations[0]["data"]["result"]["status"] == "computed"
-    resumed = ToolProvider([("submit", {"markdown": t}) for t in ["Method", "Skeptic", "Final"]])
+    resumed = ToolProvider(
+        [
+            ("submit", {"markdown": "Method", "findings": [MAJOR]}),
+            ("submit", {"markdown": "Skeptic"}),
+        ]
+        + [
+            ("submit", {"markdown": t})
+            for t in ["Revised", "Method rejoinder", "Skeptic rejoinder"]
+        ]
+        + [("submit", {"markdown": "Final"})]
+    )
     advance(store, resumed, judge, RunConfig())
     assert resumed.task(0)["documents"] == resumed.task(1)["documents"]
     calculations = next(
@@ -704,7 +730,10 @@ class ReframeJudge:
 def test_reframe_objections_reach_framing_and_survive_crash(tmp_path):
     store = store_for(tmp_path)
     first = [{"markdown": t} for t in ["Brief1", "Draft1", "Method1", "Skeptic1"]]
-    first.append({"markdown": "Brief2", "findings": [MAJOR | {"evidence_refs": ["fake"]}]})
+    first[2]["findings"] = [MAJOR]  # a fix to reframe for
+    # Reframed framing keeps submitting an invalid output (a question flag with no question)
+    # until its two turns run out; critics need both turns to read and submit.
+    first += [{"markdown": "Brief2", "needs_input": True}] * 2
     with pytest.raises(WorkflowError, match="allowance"):
         advance(store, Provider(first), ReframeJudge(), RunConfig(task_max_turns=2))
     resumed = Provider(
@@ -891,3 +920,139 @@ def test_provider_attempt_event_stores_digest_not_messages(tmp_path):
     canonical = json.dumps(sent, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     assert data["messages_sha256"] == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     assert data["message_count"] == len(sent) == 2
+
+
+def test_a_change_request_is_revised_even_when_the_judge_would_stop(tmp_path):
+    class StopJudge:
+        def decide(self, state, questions):
+            return {
+                key: Decision(
+                    "STOP" if "STOP" in q.options else next(iter(q.options)), {}, 1.0, tokens=1
+                )
+                for key, q in questions.items()
+            }
+
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[2]["findings"] = [MAJOR]
+    outputs[4:4] = revised("Previously revised plan")
+    advance(store, Provider(outputs), Judge(), RunConfig())
+    respond(
+        store,
+        action="REQUEST_CHANGES",
+        text="Change measurement",
+        researcher="R",
+        revision=store.state.attempt,
+    )
+    provider = Provider(
+        [{"markdown": t} for t in ["Method", "Skeptic"]]
+        + revised("Second revision")
+        + [{"markdown": "Final"}]
+    )
+    advance(store, provider, StopJudge(), RunConfig())
+    assert store.read(4, "revised_plan.md").startswith("Second revision")
+
+
+PLAN_V1 = "# Plan\n## Design\nold design\n## Analysis\nsame\n"
+PLAN_V2 = "# Plan\n## Design\nnew design\n## Analysis\nsame\n"
+
+
+def test_final_check_after_a_change_request_is_convergent(tmp_path):
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[1] = {"markdown": PLAN_V1}
+    outputs[2]["findings"] = [MAJOR]
+    outputs[4:4] = revised(PLAN_V1)
+    outputs[-1] = {"markdown": "Final", "findings": [MAJOR | {"id": "m", "severity": "MINOR"}]}
+    advance(store, Provider(outputs), Judge(), RunConfig())
+    respond(
+        store, action="REQUEST_CHANGES", text="Change", researcher="R", revision=store.state.attempt
+    )
+    late = MAJOR | {"id": "late", "anchor": "Analysis", "issue": "Late find"}
+    provider = Provider(
+        [{"markdown": t} for t in ["Method", "Skeptic"]]
+        + revised(PLAN_V2)
+        + [{"markdown": "Final", "findings": [late], "resolutions": []}]
+    )
+    state = advance(store, provider, Judge(), RunConfig())
+    final = json.loads(store.read(5, "final_review.json"))["findings"][0]
+    assert (final["severity"], final["issue"]) == ("MINOR", "[unchanged] Late find")
+    assert "late: MAJOR → MINOR [unchanged]" in store.read(5, "final_review.md")
+    assert state.review_complete
+    documents = provider.documents(6)
+    assert json.loads(documents["previous_final_findings"]) == []
+    assert "+new design" in documents["plan_diff_since_last_final"]
+
+
+def test_findings_about_execution_time_evidence_never_block(tmp_path):
+    store = store_for(tmp_path)
+    outputs = happy_outputs()
+    outputs[2]["findings"] = [MAJOR | {"due": "later", "issue": "Dataset hash unknown"}]
+    state = advance(store, Provider(outputs), Judge(), RunConfig())
+    saved = json.loads(store.read(4, "methodologist_review.json"))["findings"][0]
+    assert saved["severity"] == "MINOR"
+    assert saved["issue"] == "[for execution] Dataset hash unknown"
+    assert state.review_complete
+
+
+def test_previous_final_is_the_latest_archived_final_check(tmp_path):
+    from types import SimpleNamespace
+
+    from experiment_design.workflow.engine import _previous_final
+
+    store = SimpleNamespace(path=tmp_path, events=list)
+    assert _previous_final(store) is None
+    for number, plan in ((1, "old"), (2, "newer")):
+        (tmp_path / "attempts" / str(number) / "stage-05").mkdir(parents=True)
+        (tmp_path / "attempts" / str(number) / "stage-04").mkdir()
+        (tmp_path / "attempts" / str(number) / "stage-05" / "final_review.json").write_text(
+            json.dumps({"findings": []}), encoding="utf-8"
+        )
+        (tmp_path / "attempts" / str(number) / "stage-04" / "revised_plan.md").write_text(
+            plan, encoding="utf-8"
+        )
+    (tmp_path / "attempts" / "3" / "stage-04").mkdir(parents=True)
+    assert _previous_final(store) == ([], "newer")
+
+
+def test_previous_final_does_not_carry_across_a_reframe(tmp_path):
+    from types import SimpleNamespace
+
+    from experiment_design.workflow.engine import _previous_final
+
+    for number in (1, 2):
+        archive = tmp_path / "attempts" / str(number)
+        (archive / "stage-05").mkdir(parents=True)
+        (archive / "stage-04").mkdir()
+        (archive / "stage-05" / "final_review.json").write_text(
+            json.dumps({"findings": [MAJOR]}), encoding="utf-8"
+        )
+        (archive / "stage-04" / "revised_plan.md").write_text(f"plan {number}", encoding="utf-8")
+    reframe = {"kind": "reframe.objections", "data": {"attempt": 1, "objections": {}}}
+    store = SimpleNamespace(path=tmp_path, events=lambda: [reframe])
+    # Attempt 1 was reframed away; attempt 2 was checked after the new framing.
+    assert _previous_final(store)[1] == "plan 2"
+    reframe["data"]["attempt"] = 2
+    assert _previous_final(store) is None
+
+
+def test_previous_final_leaves_out_the_findings_code_checks_itself(tmp_path):
+    from types import SimpleNamespace
+
+    from experiment_design.workflow.engine import _previous_final
+
+    archive = tmp_path / "attempts" / "1"
+    (archive / "stage-05").mkdir(parents=True)
+    (archive / "stage-04").mkdir()
+    code = MAJOR | {"id": "seed-E1", "issue": "Fewer than three seeds"}
+    out_of_budget = MAJOR | {"id": "review-incomplete", "issue": "Ran out"}
+    findings = [MAJOR, code, out_of_budget]
+    (archive / "stage-05" / "final_review.json").write_text(
+        json.dumps({"findings": findings}), encoding="utf-8"
+    )
+    (archive / "stage-05" / "deterministic_findings.json").write_text(
+        json.dumps([code]), encoding="utf-8"
+    )
+    (archive / "stage-04" / "revised_plan.md").write_text("plan", encoding="utf-8")
+    kept, _ = _previous_final(SimpleNamespace(path=tmp_path, events=list))
+    assert [f.id for f in kept] == [MAJOR["id"]]

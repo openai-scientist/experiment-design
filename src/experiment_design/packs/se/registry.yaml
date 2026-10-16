@@ -6,7 +6,7 @@
   hf_repo_id: princeton-nlp/SWE-bench
 - name: Defects4J
   kind: benchmark
-  tasks: [program-repair, defect-detection, fault-localization]
+  tasks: [program-repair, defect-detection, fault-localization, test-generation]
   source_url: https://github.com/rjust/defects4j
 - name: HumanEval
   kind: benchmark
@@ -21,3 +21,7 @@
   kind: benchmark
   tasks: [clone-detection]
   source_url: https://github.com/clonebench/BigCloneBench
+- name: EvoSuite
+  kind: baseline
+  tasks: [test-generation]
+  source_url: https://github.com/EvoSuite/evosuite

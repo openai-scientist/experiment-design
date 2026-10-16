@@ -72,14 +72,24 @@ def test_incomplete_opens_gate(tmp_path):
     assert "run.failed" not in _types(platform)
 
 
-def test_incomplete_without_final_review_reports_the_error(tmp_path):
+def test_a_stop_before_the_final_review_reports_the_critics_findings(tmp_path):
     manager, platform, run_id = _incomplete(tmp_path, role="methodologist")
-    _wait(manager, run_id, Phase.awaiting_researcher, gate=True)
+    gate = _wait(manager, run_id, Phase.awaiting_researcher, gate=True).open_gate
     assert manager.wait_idle(run_id) and manager.flush(run_id)
     assert not manager._runs[run_id].store.valid(5)
     done = [e for e in platform.events["sr1"] if e.type == "review.completed"]
-    assert done[-1].payload["passed"] is False and done[-1].payload["error"]
-    assert not [a for a in platform.artifacts["sr1"] if a.meta.schema_id == "review.findings/v1"]
+    assert done[-1].payload["passed"] is False and not done[-1].payload.get("error")
+    (report,) = [a for a in platform.artifacts["sr1"] if a.meta.schema_id == "review.findings/v1"]
+    findings = json.loads(report.content)["findings"]
+    assert [(f["severity"], f["kind"]) for f in findings] == [("blocking", "fix")]
+    assert "No control arm" in findings[0]["issue"]
+    manager.answer(
+        run_id, gate.gate_id, GateAnswer(action="approve", actor="user", decided_by="u1")
+    )
+    _wait(manager, run_id, Phase.published)
+    assert manager.wait_idle(run_id)
+    plan = (manager._runs[run_id].store.path / "stage-07" / "exp_plan.md").read_text("utf-8")
+    assert "## Open findings" in plan and "No control arm" in plan
 
 
 @pytest.mark.parametrize("mode", ["auto", "light"])
@@ -119,7 +129,7 @@ def test_approve_incomplete_records_open_findings(tmp_path):
     assert publication["scientific_status"] == "incomplete"
     assert "No control arm" in [f["issue"] for f in publication["open_findings"]]
     plan = (run_dir / "stage-07" / "exp_plan.md").read_text(encoding="utf-8")
-    assert "## Finding còn mở" in plan and "No control arm" in plan
+    assert "## Open findings" in plan and "No control arm" in plan
     (primary,) = [a for a in platform.artifacts["sr1"] if a.meta.primary]
     assert primary.content == plan.encode("utf-8")
     assert primary.meta.metadata["review_passed"] is False
@@ -158,7 +168,7 @@ def test_cli_incomplete_guard_unchanged(tmp_path):
 
 
 class BadFinalCheck(EndlessProvider):
-    """final_check always submits a malformed finding, so the reviewer fails after one retry."""
+    """final_check always submits a malformed finding, so the reviewer fails after two retries."""
 
     def complete(self, messages, tools):
         response = super().complete(messages, tools)
@@ -201,3 +211,75 @@ def test_comment_after_reviewer_failure_is_accepted(tmp_path):
     events = manager._runs[run_id].store.events()
     actions = [e["data"]["action"] for e in events if e["kind"] == "researcher.response"]
     assert actions[-1] == "REQUEST_CHANGES"
+
+
+class SkepticBreaksLater(EndlessProvider):
+    """skeptic submits a malformed finding once ``broken`` is set."""
+
+    broken = False
+
+    def complete(self, messages, tools):
+        response = super().complete(messages, tools)
+        task = json.loads(messages[1]["content"])
+        call = response.tool_calls[0] if response.tool_calls else None
+        if (
+            SkepticBreaksLater.broken
+            and call
+            and call.name == "submit"
+            and "Role: skeptic." in task.get("task", "")
+        ):
+            call.arguments = json.dumps(json.loads(call.arguments) | {"findings": [{"id": "x"}]})
+            return LLMResponse(content=None, tool_calls=[call], tokens_in=1, tokens_out=1)
+        return response
+
+
+def test_reviewer_failure_on_re_review_fails_the_run_instead_of_hanging(tmp_path):
+    def factory(cfg, key, review_role, on_call):
+        record = lambda: on_call({"role": review_role.value, "model": cfg.model, "outcome": "ok"})  # noqa: E731
+        return SkepticBreaksLater(record)
+
+    SkepticBreaksLater.broken = False
+    manager, platform, _ = _manager(tmp_path, llm_factory=factory)
+    run_id = manager.create(
+        make_request(platform, stage_run_id="sr1", mode="copilot")
+    ).engine_run_id
+    assert manager.wait_idle(run_id)
+    state = manager.state(run_id)
+    while "-s6-" not in state.open_gate.gate_id:
+        gate = state.open_gate
+        if gate.kind is GateKind.question:
+            answer = GateAnswer(
+                action="answer", option_id=gate.default_option_id, actor="user", decided_by="u1"
+            )
+        else:
+            answer = GateAnswer(action="approve", actor="user", decided_by="u1")
+        manager.answer(run_id, gate.gate_id, answer)
+        assert manager.wait_idle(run_id)
+        state = manager.state(run_id)
+    SkepticBreaksLater.broken = True
+    try:
+        manager.answer(
+            run_id,
+            state.open_gate.gate_id,
+            GateAnswer(action="comment", actor="user", decided_by="u2", findings=[FINDING]),
+        )
+        assert manager.wait_idle(run_id)
+    finally:
+        SkepticBreaksLater.broken = False
+    state = manager.state(run_id)
+    assert state.phase is Phase.failed
+    assert state.open_gate is None
+
+
+def test_an_invalid_final_review_is_reported_as_an_error_not_raised(tmp_path, monkeypatch):
+    def invalid(*args, **kwargs):
+        raise WorkflowError("Current final review is absent or invalid")
+
+    monkeypatch.setattr("experiment_design.api.runs.review_findings", invalid)
+    manager, platform, run_id = _incomplete(tmp_path)
+    _wait(manager, run_id, Phase.awaiting_researcher, gate=True)
+    assert manager.wait_idle(run_id) and manager.flush(run_id)
+    done = [e for e in platform.events["sr1"] if e.type == "review.completed"]
+    assert done[-1].payload["passed"] is False
+    assert "final review is invalid" in done[-1].payload["error"]
+    assert "run.failed" not in _types(platform)

@@ -80,12 +80,21 @@ from experiment_design.workflow.engine import (
 )
 
 logger = logging.getLogger("experiment_design.api")
+_STOPPED_STATUSES = {"STOPPED", "USAGE_UNKNOWN", "REJECTED", "CANCELLED", "FAILED"}
 
 LlmFactory = Callable[[LLMConfig, str, ModelRole, Callable[[dict], None]], Any]
 JudgeFactory = Callable[[JevConfig, str], Judge]
 
 STAGE_KEY = "experiment_plan"
-_DEFAULT_ANSWER = "Proceed with the recommended default."
+# Auto and light runs have no researcher to answer: a model-written default option could add a
+# requirement that then steers the whole plan (auto run e526ff44), so none is picked.
+_DEFAULT_ANSWER = (
+    "No researcher can answer in this mode. Do not add a requirement because of this question. "
+    "Keep the plan's current choice; where none exists, take the option that adds the fewest new "
+    "requirements: a rule that decides how results are analysed or read gets that value in the "
+    'plan, marked "(set by design)"; any other detail is labelled "Proposal — confirm before '
+    'launch". List this question under Limitations as open for the researcher.'
+)
 _CANCEL_WAIT_SECONDS = 5.0
 
 
@@ -504,8 +513,12 @@ class RunManager:
                     self._interrupted(run, exc.kind)
                 except StageClosed:
                     self._stage_closed(run)
-                except WorkflowError:
-                    pass  # advance stopped the run; the projector announced run.failed
+                except WorkflowError as exc:
+                    # advance stops the run itself and the projector announces run.failed;
+                    # any other WorkflowError would leave the run waiting with no gate.
+                    if run.store.state.status not in _STOPPED_STATUSES:
+                        logger.exception("workflow error in run %s", run.engine_run_id)
+                        self._fail(run, "internal_error", str(exc))
                 except (LLMError, JudgeError, CallbackError, ConfigError) as exc:
                     self._fail(run, _failure_code(exc), _failure_message(exc))
                 except Exception:  # a dead worker thread would leave the run stuck RUNNING
@@ -616,10 +629,9 @@ class RunManager:
         respond(
             run.store,
             action="ANSWER",
-            text="" if state.question_options else _DEFAULT_ANSWER,
+            text=_DEFAULT_ANSWER,
             researcher="system",
             revision=state.attempt,
-            option=state.question_default if state.question_options else None,
         )
         return True
 
@@ -645,10 +657,21 @@ class RunManager:
         store = run.store
         error = None
         if store.state.status == "REVIEW_ERROR":
-            error = "Reviewer failed after one retry"
-        elif store.state.status == "INCOMPLETE" and not store.valid(5):
-            error = "The run stopped before a final review existed"
-        if error:
+            error = "Reviewer failed after two retries"
+        elif store.state.status == "INCOMPLETE" and not store.valid(5) and not store.valid(4):
+            error = "The run stopped before any review existed"
+        report = None
+        if not error:
+            try:
+                report = review_findings(
+                    store,
+                    round=store.state.attempt,
+                    artifact_id=artifact_id,
+                    reviewer_model=run.cfg.review_llm.model,
+                )
+            except WorkflowError as exc:
+                error = f"The final review is invalid: {exc}"
+        if report is None:
             self._emit(
                 run,
                 "review.completed",
@@ -660,14 +683,6 @@ class RunManager:
                 },
             )
             return
-        report = review_findings(
-            store,
-            round=store.state.attempt,
-            artifact_id=artifact_id,
-            reviewer_model=run.cfg.review_llm.model,
-        )
-        if store.state.status == "INCOMPLETE":
-            report = report.model_copy(update={"passed": False})
         body = report.model_dump_json(by_alias=True).encode()
         report_id = self._upload_artifact(run, "review.findings/v1", "review_findings.json", body)
         self._emit(

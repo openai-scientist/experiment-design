@@ -4,11 +4,13 @@ from collections.abc import Callable
 from datetime import datetime
 
 from experiment_design.agents.benchmark.acquire import acquire
+from experiment_design.agents.benchmark.github import GitHubClient
 from experiment_design.agents.benchmark.hf import HFClient
 from experiment_design.agents.benchmark.models import Resource, ResourcesDoc
 from experiment_design.agents.benchmark.select import select
 from experiment_design.agents.benchmark.survey import researcher_resources, survey
 from experiment_design.agents.benchmark.validate import check_minimums, validate
+from experiment_design.agents.benchmark.zenodo import ZenodoClient
 from experiment_design.config import RunConfig
 from experiment_design.packs import Pack
 from experiment_design.persistence.store import RunStore
@@ -61,6 +63,8 @@ def run_resources(
     pack: Pack,
     hf: HFClient,
     *,
+    github: GitHubClient | None = None,
+    zenodo: ZenodoClient | None = None,
     comments: str = "",
     now: Callable[[], datetime] = datetime.now,
 ) -> ResourcesDoc:
@@ -82,7 +86,7 @@ def run_resources(
     announce("surveyed", "surveyor", candidates)
     chosen = select(store, llm, cfg, pack, candidates, brief, comments, hypotheses)
     announce("selected", "selector", chosen)
-    fetched = [acquire(resource, hf, now) for resource in chosen]
+    fetched = [acquire(resource, hf, now, github, zenodo) for resource in chosen]
     announce("acquired", "acquirer", fetched)
     checked = [validate(resource) for resource in fetched]
     announce("validated", "validator", checked)

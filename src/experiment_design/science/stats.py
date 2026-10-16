@@ -12,9 +12,6 @@ import json
 import math
 from collections.abc import Callable
 
-import numpy as np
-from scipy.stats import bootstrap, nct, norm, t
-
 from experiment_design.contracts import CalculationRequest, CalculationResult, Quantity
 from experiment_design.science.power import normalize
 
@@ -104,6 +101,8 @@ def _paired(request: CalculationRequest, result: CalculationResult) -> None:
         ]
     )
 
+    from scipy.stats import nct, t  # lazy: scipy.stats dominates import time
+
     def at(count: int) -> float:
         critical = t.isf(alpha / (2 if two_sided else 1), count - 1)
         nc = standardized * math.sqrt(count)
@@ -151,6 +150,8 @@ def _mcnemar(request: CalculationRequest, result: CalculationResult) -> None:
         difference *= 1 if request.direction == "increase" else -1
     variance = total - difference**2
     _require(variance > 0, "Connor approximation requires positive alternative variance")
+    from scipy.stats import norm  # lazy: scipy.stats dominates import time
+
     critical = norm.isf(alpha / (2 if two_sided else 1)) * math.sqrt(total)
 
     def at(count: int) -> float:
@@ -219,6 +220,8 @@ def _a12(request: CalculationRequest, result: CalculationResult) -> None:
         (request.a12 is None) != (request.effect is None),
         "supply exactly one of a12 or standardized effect",
     )
+    from scipy.stats import norm  # lazy: scipy.stats dominates import time
+
     if request.a12 is not None:
         probability = _probability(result, "a12", request.a12)
         _require(0 < probability < 1, "finite normal-shift d needs a12 strictly inside (0, 1)")
@@ -267,6 +270,9 @@ def _bootstrap(request: CalculationRequest, result: CalculationResult) -> None:
         request.random_seed is not None and request.random_seed >= 0,
         "explicit nonnegative random_seed required",
     )
+    import numpy as np
+    from scipy.stats import bootstrap  # lazy: scipy.stats dominates import time
+
     with np.errstate(over="ignore", invalid="ignore"):
         ci = bootstrap(
             (np.asarray(request.values),),

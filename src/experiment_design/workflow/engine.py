@@ -3,14 +3,17 @@
 import difflib
 import hashlib
 import json
+import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from experiment_design.agents.benchmark.github import GitHubClient
 from experiment_design.agents.benchmark.hf import HFClient
 from experiment_design.agents.benchmark.step import STEP_KEY as RESOURCES_STEP
 from experiment_design.agents.benchmark.step import run_resources
+from experiment_design.agents.benchmark.zenodo import ZenodoClient
 from experiment_design.agents.prompts import snapshot
 from experiment_design.agents.tools import run_specialist
 from experiment_design.api.contract_models import EXD_RESOURCES
@@ -31,10 +34,17 @@ from experiment_design.publication.experiment_index import (
     ExperimentIndex,
     check_index,
     extract_index,
+    rebind_index,
 )
 from experiment_design.runtime.jev import Judge, Question
 from experiment_design.runtime.llm import LLMClient
 from experiment_design.vocabulary import REVIEW_ROLES
+from experiment_design.workflow.convergence import (
+    converge_final,
+    due_later,
+    previous_majors,
+    severity_adjustments,
+)
 
 # The input may hold several hypotheses; the path is unchanged so old runs resume.
 HYPOTHESES_INPUT = "stage-01/hypothesis.md"
@@ -121,31 +131,91 @@ def _agent(
         required,
         pack=load_pack(store.state.profile) if store.state.profile is not None else None,
     )
+    if role in REVIEW_ROLES:
+        due_later(output)
     store.write(stage, name + ".md", output.markdown)
     store.write(stage, name + ".json", _metadata(output))
     return output
 
 
+_REFINE_QUESTION = Question(
+    "The plan has open MAJOR findings that require a change. Decide whether editing the "
+    "current plan fixes them, or whether the framing of the research must be redone first.",
+    {
+        "REVISE": (
+            "Every open finding can be fixed by editing the current plan (protocol, "
+            "measurements, controls, baselines, seeds, analysis, reporting) while the research "
+            "brief's framing of the question and hypotheses stays valid."
+        ),
+        "REFRAME": (
+            "At least one open finding shows the framing itself is wrong: as framed the design "
+            "cannot test a stated hypothesis, compares the wrong things, or uses the wrong unit "
+            "of analysis, so the research brief must be redone before any plan edit."
+        ),
+    },
+)
+
+
 def _route(
     store: RunStore, judge: Judge, cfg: RunConfig, options: list[str], outputs: list[AgentOutput]
 ) -> str:
+    """Pick the route by code rule; JEV only chooses between REVISE and REFRAME."""
     if len(options) == 1:
-        store.event("route", {"choice": options[0], "automatic": True})
+        store.event("route", {"choice": options[0], "automatic": True, "rule": "sole_option"})
         return options[0]
+    if "ASK_RESEARCHER" in options and any(o.needs_input and o.question.strip() for o in outputs):
+        store.event("route", {"choice": "ASK_RESEARCHER", "automatic": True, "rule": "needs_input"})
+        return "ASK_RESEARCHER"
+    for progress in ("DESIGN", "CHECK", "PRESENT"):
+        if progress in options:
+            store.event("route", {"choice": progress, "automatic": True, "rule": "no_open_fix"})
+            return progress
+    refinements = [o for o in ("REVISE", "REFRAME") if o in options]
+    if len(refinements) == 1:
+        store.event(
+            "route", {"choice": refinements[0], "automatic": True, "rule": "single_refinement"}
+        )
+        return refinements[0]
+    if refinements and not any(_major_fix(f) for o in outputs for f in o.findings):
+        # Only a code check (seeds, index) is open: a mechanical defect is revised, not reframed.
+        store.event("route", {"choice": "REVISE", "automatic": True, "rule": "code_check_fix"})
+        return "REVISE"
+    if refinements:
+        return _judge_refinement(store, judge, cfg, outputs)
+    if "STOP" in options:
+        store.event("route", {"choice": "STOP", "automatic": True, "rule": "no_progress_possible"})
+        return "STOP"
+    raise WorkflowError(f"No legal route for options {options}; this should be unreachable")
+
+
+def _judge_refinement(
+    store: RunStore, judge: Judge, cfg: RunConfig, outputs: list[AgentOutput]
+) -> str:
+    options = list(_REFINE_QUESTION.options)
+    open_findings = [
+        {
+            "id": f.id,
+            "severity": f.severity,
+            "category": f.category,
+            "issue": f.issue,
+            "consequence": f.consequence,
+            "suggestion": f.suggestion,
+        }
+        for o in outputs
+        for f in o.findings
+        if _major_fix(f)
+    ]
     if store.state.jev_calls >= cfg.jev_max_calls:
         raise WorkflowError("JEV call allowance exhausted")
     remaining = cfg.jev_max_calls - store.state.jev_calls
     if hasattr(judge, "max_attempts"):
         judge.max_attempts = min(3, remaining)
-    question = Question(
-        "Choose the next scientific action from the legal options.", {v: v for v in options}
-    )
     failure = None
     decisions = {}
     try:
         decisions = judge.decide(
-            {"stage": store.state.stage, "outputs": [o.model_dump() for o in outputs]},
-            {"next": question},
+            {"stage": store.state.stage, "open_findings": open_findings},
+            {"next": _REFINE_QUESTION},
         )
     except Exception as exc:
         failure = exc
@@ -190,15 +260,27 @@ def _route(
         raise WorkflowError("JEV returned a missing or illegal choice")
     if store.state.llm_tokens > store.state.llm_token_limit:
         raise WorkflowError("Run token allowance exceeded")
-    store.event("route", {"choice": decision.choice, "automatic": False})
+    store.event(
+        "route",
+        {
+            "choice": decision.choice,
+            "automatic": False,
+            "rule": "jev_refinement",
+            "probabilities": decision.probabilities,
+            "confidence": decision.confidence,
+        },
+    )
     return decision.choice
 
 
 def _ask(store: RunStore, outputs: list[AgentOutput]) -> None:
-    questions = [o.question for o in outputs if o.question.strip()]
-    if not questions:
+    # A blocking question goes first: another output's optional question must not replace it.
+    asking = [o for o in outputs if o.needs_input and o.question.strip()] or [
+        o for o in outputs if o.question.strip()
+    ]
+    if not asking:
         raise WorkflowError("ASK_RESEARCHER requires a concrete agent question")
-    asking = [o for o in outputs if o.question.strip()]
+    questions = [o.question for o in asking]
     legacy_combined = len(asking) > 1 and not read_run_meta(store.path).get("platform_run_id")
     store.update(
         status="AWAITING_RESEARCHER",
@@ -268,6 +350,8 @@ def _resources_gate(
     if not exists or decision is not None:
         store.event("step.entered", {"step_key": RESOURCES_STEP})
         hf = HFClient(token=(integrations or {}).get("huggingface"))
+        github = GitHubClient(token=os.environ.get("GITHUB_TOKEN"))
+        zenodo = ZenodoClient()
         try:
             run_resources(
                 store,
@@ -275,10 +359,14 @@ def _resources_gate(
                 cfg,
                 load_pack(store.state.profile),
                 hf,
+                github=github,
+                zenodo=zenodo,
                 comments=decision["text"] if decision is not None else "",
             )
         finally:
             hf.close()
+            github.close()
+            zenodo.close()
     _ask_review(
         store,
         step_key=RESOURCES_STEP,
@@ -291,7 +379,9 @@ def _resources_gate(
 
 
 def _index_plan(store: RunStore, llm: LLMClient, cfg: RunConfig, stage: int, document: str) -> None:
-    index = extract_index(store, llm, cfg, document, store.read(1, "hypothesis.md"))
+    index = rebind_index(
+        extract_index(store, llm, cfg, document, store.read(1, "hypothesis.md")), document
+    )
     if store.state.profile and store.state.profile.research_type:
         for experiment in index.experiments:
             if experiment.type == "base":
@@ -310,13 +400,29 @@ def _resource_notes(store: RunStore, document: str) -> str:
     )
 
 
-def _deterministic_findings(store: RunStore) -> list[Finding]:
-    index = ExperimentIndex.model_validate_json(store.read(store.state.plan_stage, "index.json"))
+def _merge_deterministic(model: list[Finding], deterministic: Sequence[Finding]) -> list[Finding]:
+    """Keep the code's verdict: drop a model finding that repeats a deterministic one."""
+
+    def norm(text: str) -> str:
+        return " ".join(text.split()).casefold()
+
+    ids = {f.id for f in deterministic}
+    issues = {norm(f.issue) for f in deterministic}
+    kept = [f for f in model if f.id not in ids and norm(f.issue) not in issues]
+    return [*kept, *deterministic]
+
+
+def _deterministic_findings(
+    store: RunStore, stage: int | None = None, plan_name: str | None = None
+) -> list[Finding]:
+    stage = stage or store.state.plan_stage
+    plan = store.read(stage, plan_name or store.state.plan_name)
+    # Heading and hash mismatches are mechanical: code repairs them before any check.
+    index = rebind_index(ExperimentIndex.model_validate_json(store.read(stage, "index.json")), plan)
     try:
         resources = json.loads(store.read(3, "resources.json"))
     except FileNotFoundError:
         resources = {}
-    plan = store.read(store.state.plan_stage, store.state.plan_name)
     ids = re.findall(r"^## (H\d+)\b", store.read(1, "hypothesis.md"), re.M)
     findings = check_index(index, plan, ids) + validators.run(
         load_pack(store.state.profile), index, resources
@@ -331,6 +437,7 @@ def _deterministic_findings(store: RunStore) -> list[Finding]:
                 issue=shortfall,
                 consequence="Resource minimum is not established",
                 suggestion="Disclose the shortfall",
+                kind="needs_evidence",
             )
         )
     store.activity(
@@ -373,27 +480,58 @@ def _forced_stop(store: RunStore, stage: int) -> bool:
     return route["choice"] == "STOP" and route.get("forced") is True
 
 
+def _major_fix(finding: Finding) -> bool:
+    return finding.severity == "MAJOR" and finding.kind == "fix"
+
+
+def _open_evidence(final: AgentOutput, maintained: list[AgentOutput]) -> str:
+    """Limitations section for MAJOR findings that only evidence or a lookup can resolve."""
+    items = [
+        f"- {f.issue}"
+        for o in [final, *maintained]
+        for f in o.findings
+        if f.severity == "MAJOR" and f.kind == "needs_evidence"
+    ]
+    if not items:
+        return ""
+    return "\n\n## Limitations (open, need evidence)\n" + "\n".join(items) + "\n"
+
+
 def _critic_options(
     store: RunStore,
     cfg: RunConfig,
     method: AgentOutput,
     skeptic: AgentOutput,
     changes_requested: bool,
+    deterministic: Sequence[Finding] = (),
 ) -> tuple[list[str], bool]:
     """Legal routes after the critics, and whether STOP stands alone only because of limits."""
-    material = any(f.severity == "MAJOR" for o in [method, skeptic] for f in o.findings)
+    # A code check on the draft calls for a revision only when one is left; otherwise the
+    # final check reports it as before.
+    material = any(_major_fix(f) for o in [method, skeptic] for f in o.findings) or (
+        any(_major_fix(f) for f in deterministic) and _can_refine(store, cfg, "REVISE")
+    )
     options = (
         []
         if material or changes_requested or method.needs_input or skeptic.needs_input
         else ["CHECK"]
     )
     paths = ["REVISE"] if changes_requested else ["REVISE", "REFRAME"]
-    available = [path for path in paths if _can_refine(store, cfg, path)]
+    # A revision is offered only for an open MAJOR fix finding (or a researcher's request).
+    revisable = material or changes_requested
+    available = [path for path in paths if revisable and _can_refine(store, cfg, path)]
+    if changes_requested and available:
+        # The researcher asked for changes: the judge does not overrule them (live: the judge
+        # chose STOP after three change requests, so none was ever revised).
+        return available, False
     options += available
-    if method.question.strip() or skeptic.question.strip():
+    if any(o.needs_input and o.question.strip() for o in (method, skeptic)):
         options.append("ASK_RESEARCHER")
-    options.append("STOP")
-    return options, options == ["STOP"] and available != paths
+    # STOP is legal only when no other route is (live: a judge offered STOP chose it over clean
+    # and fixable plans alike); `forced` says whether limits removed the refinements.
+    if not options:
+        options.append("STOP")
+    return options, options == ["STOP"] and revisable and available != paths
 
 
 def _final_review_names(store: RunStore) -> list[str]:
@@ -418,21 +556,65 @@ def _maintained(store: RunStore, review_names: list[str]) -> list[AgentOutput]:
 
 
 def _final_options(
-    store: RunStore, cfg: RunConfig, final: AgentOutput, maintained: list[AgentOutput]
+    store: RunStore,
+    cfg: RunConfig,
+    final: AgentOutput,
+    maintained: list[AgentOutput],
+    first_check: bool = True,
 ) -> tuple[list[str], bool]:
-    material = (
-        final.needs_input
-        or any(f.severity == "MAJOR" for f in final.findings)
-        or any(f.severity == "MAJOR" for o in maintained for f in o.findings)
-    )
+    fixable = any(_major_fix(f) for o in [final, *maintained] for f in o.findings)
+    # A review stopped by its budget did not inspect the plan: it cannot be presented as
+    # reviewed complete.
+    unfinished = any(f.id == "review-incomplete" for o in [final, *maintained] for f in o.findings)
+    material = final.needs_input or fixable or unfinished
     options = [] if material else ["PRESENT"]
     paths = ["REVISE", "REFRAME"]
-    available = [path for path in paths if _can_refine(store, cfg, path)]
+    # MAJOR needs_evidence findings alone do not call for a revision: the plan is presented
+    # with them listed under Limitations.
+    available = [path for path in paths if fixable and _can_refine(store, cfg, path)]
     options += available
-    if final.question.strip():
+    if final.needs_input and final.question.strip():
         options.append("ASK_RESEARCHER")
-    options.append("STOP")
-    return options, options == ["STOP"] and available != paths
+    # STOP is legal only when no other route is; `forced` says whether limits caused that.
+    if not options:
+        options.append("STOP")
+    return options, options == ["STOP"] and fixable and available != paths
+
+
+def _previous_final(store: RunStore) -> tuple[list[Finding], str] | None:
+    """The model's findings and plan of the most recent archived final check, if any.
+
+    Code re-checks its own findings every round, so they and `review-incomplete` are left out.
+    A reframe discards the framing, so a final check archived at or before one does not carry.
+    """
+    root = store.path / "attempts"
+    reframed = max(
+        (e["data"]["attempt"] for e in store.events() if e["kind"] == "reframe.objections"),
+        default=0,
+    )
+    numbers = sorted(
+        (n for d in root.glob("*") if d.name.isdigit() and (n := int(d.name)) > reframed),
+        reverse=True,
+    )
+    for number in numbers:
+        archive = root / str(number)
+        try:
+            raw = json.loads(
+                (archive / "stage-05" / "final_review.json").read_text(encoding="utf-8")
+            )
+            plan = (archive / "stage-04" / "revised_plan.md").read_text(encoding="utf-8")
+            code = archive / "stage-05" / "deterministic_findings.json"
+            own = (
+                {f["id"] for f in json.loads(code.read_text(encoding="utf-8"))}
+                if code.exists()
+                else set()
+            )
+            own.add("review-incomplete")
+            findings = [Finding.model_validate(f) for f in raw["findings"]]
+            return [f for f in findings if f.id not in own], plan
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return None
 
 
 def _plan(store: RunStore, stage: int, name: str) -> None:
@@ -734,9 +916,14 @@ def advance(
             if not hold_at_review:
                 store.update(status="STOPPED")
                 raise
+            if store.state.plan_stage is None:
+                # A re-review failed before a plan was current: there is nothing to present.
+                store.update(status="STOPPED")
+                store.event("workflow.stop", {"reason": "Reviewer failed after two retries"})
+                raise
             store.event(
                 "review.error",
-                {"attempt": store.state.attempt, "error": "Reviewer failed after one retry"},
+                {"attempt": store.state.attempt, "error": "Reviewer failed after two retries"},
             )
             return store.update(status="REVIEW_ERROR", review_complete=False)
         except WorkflowError as exc:
@@ -790,11 +977,8 @@ def _advance(
                 *(["reframe_objections"] if "reframe_objections" in workspace else []),
             )
             output = _agent(store, llm, cfg, "framing", 2, "research_brief", workspace, required)
-            options = (
-                ["ASK_RESEARCHER", "STOP"]
-                if output.needs_input
-                else ["DESIGN", "STOP"] + (["ASK_RESEARCHER"] if output.question.strip() else [])
-            )
+            # Framing never stops a run: an untestable hypothesis becomes a finding downstream.
+            options = ["ASK_RESEARCHER"] if output.needs_input else ["DESIGN"]
             route = _route(store, judge, cfg, options, [output])
             store.write(2, "route.json", json.dumps({"choice": route}))
             store.complete(
@@ -869,13 +1053,26 @@ def _advance(
         if pending:
             _run_revision(store, llm, cfg, pending["plan"], pending["objections"], review_llm)
         redecide = False
+        # Code checks (seeds, index) run on the draft too, so the first revision fixes them
+        # instead of the final check finding them after the revision loop.
+        # They matter only when stage 4 is about to be (re)decided; a run made before the index
+        # existed has none.
+        stage4_open = not store.valid(4) or _forced_stop(store, 4)
+        early = (
+            _deterministic_findings(store, 3, "draft_plan.md")
+            if stage4_open
+            and store.state.profile is not None
+            and not changes_requested
+            and (store.path / "stage-03" / "index.json").is_file()
+            else []
+        )
         if store.valid(4) and _forced_stop(store, 4):
             method, skeptic = (
                 _load(store, 4, name) for name in ("methodologist_review", "skeptic_review")
             )
-            redecide = _critic_options(store, cfg, method, skeptic, changes_requested)[0] != [
-                "STOP"
-            ]
+            redecide = _critic_options(store, cfg, method, skeptic, changes_requested, early)[
+                0
+            ] != ["STOP"]
         if not store.valid(4) or redecide:
             store.update(stage=4)
             draft = (
@@ -909,7 +1106,7 @@ def _advance(
                     needed,
                     review_llm=review_llm,
                 )
-            options, forced = _critic_options(store, cfg, method, skeptic, changes_requested)
+            options, forced = _critic_options(store, cfg, method, skeptic, changes_requested, early)
             route = _route(store, judge, cfg, options, [method, skeptic])
             if route == "ASK_RESEARCHER":
                 store.write(4, "route.json", json.dumps({"choice": route}))
@@ -933,13 +1130,13 @@ def _advance(
                 )
                 continue
             if route == "REVISE":
-                _revision(
-                    store,
-                    llm,
-                    cfg,
-                    {"methodologist_review": method.markdown, "skeptic_review": skeptic.markdown},
-                    review_llm,
-                )
+                objections = {
+                    "methodologist_review": method.markdown,
+                    "skeptic_review": skeptic.markdown,
+                }
+                if fixes := [f.model_dump() for f in early if _major_fix(f)]:
+                    objections["deterministic_findings"] = json.dumps(fixes, ensure_ascii=False)
+                _revision(store, llm, cfg, objections, review_llm)
                 changes_requested = False
             else:
                 store.write(
@@ -950,7 +1147,11 @@ def _advance(
                 store.write(4, "revised_plan.md", draft)
                 extras = []
                 if store.state.profile is not None:
-                    store.write(4, "index.json", store.read(3, "index.json"))
+                    if draft == store.read(3, "draft_plan.md"):
+                        store.write(4, "index.json", store.read(3, "index.json"))
+                    else:
+                        # A requested change left unrevised: the index must match this plan.
+                        _index_plan(store, llm, cfg, 4, draft)
                     extras.append("index.json")
                 store.write(4, "route.json", json.dumps({"choice": route, "forced": forced}))
                 store.complete(
@@ -991,9 +1192,13 @@ def _advance(
         redecide = False
         if store.valid(5) and _forced_stop(store, 5):
             final = _load(store, 5, "final_review")
-            redecide = _final_options(store, cfg, final, _maintained(store, review_names))[0] != [
-                "STOP"
-            ]
+            redecide = _final_options(
+                store,
+                cfg,
+                final,
+                _maintained(store, review_names),
+                _previous_final(store) is None,
+            )[0] != ["STOP"]
         if not store.valid(5) or redecide:
             store.update(stage=5)
             if not redecide:
@@ -1009,6 +1214,21 @@ def _advance(
                     inputs["deterministic_findings"] = text
                 for name in review_names:
                     inputs[name] = store.read(4, name + ".md")
+                earlier = _previous_final(store)
+                prior = previous_majors(earlier[0]) if earlier else []
+                convergent = []
+                if earlier:
+                    inputs["previous_final_findings"] = json.dumps(
+                        prior, ensure_ascii=False, indent=2
+                    )
+                    inputs["plan_diff_since_last_final"] = _plan_diff(earlier[1], inputs["plan"])
+                    store.write(
+                        5, "previous_final_findings.json", inputs["previous_final_findings"]
+                    )
+                    store.write(
+                        5, "plan_diff_since_last_final.md", inputs["plan_diff_since_last_final"]
+                    )
+                    convergent = ["previous_final_findings", "plan_diff_since_last_final"]
                 needed = _with_replies(
                     inputs,
                     HYPOTHESES_INPUT,
@@ -1016,6 +1236,7 @@ def _advance(
                     "plan",
                     *(n for n in review_names if n != "response"),
                     *(["deterministic_findings"] if store.state.profile is not None else []),
+                    *convergent,
                 )
                 final = _agent(
                     store,
@@ -1028,11 +1249,17 @@ def _advance(
                     needed,
                     review_llm=review_llm,
                 )
-                seen = {(f.id, f.issue) for f in final.findings}
-                final.findings.extend(f for f in deterministic if (f.id, f.issue) not in seen)
+                # A check that ran out of budget resolved nothing; do not reopen old findings.
+                if earlier and not any(f.id == "review-incomplete" for f in final.findings):
+                    converge_final(final, prior, earlier[1], inputs["plan"])
+                if adjustments := severity_adjustments(final):
+                    store.write(5, "final_review.md", final.markdown.rstrip() + adjustments)
+                final.findings = _merge_deterministic(final.findings, deterministic)
                 store.write(5, "final_review.json", _metadata(final))
             maintained = _maintained(store, review_names)
-            options, forced = _final_options(store, cfg, final, maintained)
+            options, forced = _final_options(
+                store, cfg, final, maintained, _previous_final(store) is None
+            )
             route = _route(store, judge, cfg, options, [final, *maintained])
             store.write(5, "route.json", json.dumps({"choice": route, "forced": forced}))
             store.complete(
@@ -1044,7 +1271,12 @@ def _advance(
                 ]
                 + [(4, name + ".md") for name in review_names],
                 ["final_review.md", "final_review.json", "route.json"]
-                + (["deterministic_findings.json"] if store.state.profile is not None else []),
+                + (["deterministic_findings.json"] if store.state.profile is not None else [])
+                + [
+                    name
+                    for name in ("previous_final_findings.json", "plan_diff_since_last_final.md")
+                    if (store.path / "stage-05" / name).is_file()
+                ],
             )
         else:
             final = _load(store, 5, "final_review")
@@ -1068,11 +1300,18 @@ def _advance(
                 store.update(status="INCOMPLETE", review_complete=False)
                 return store.state
             store.update(stage=6, review_complete=True, status="PENDING_REVIEW")
+            unfinished = any(
+                f.id == "review-incomplete"
+                for o in [final, *_maintained(store, review_names)]
+                for f in o.findings
+            )
             store.write(
                 6,
                 "researcher_review.md",
-                "Scientific review: reviewed complete. Researcher acceptance: pending.\n\n"
-                + store.read(store.state.plan_stage, store.state.plan_name),
+                f"Scientific review: {'incomplete' if unfinished else 'reviewed complete'}. "
+                "Researcher acceptance: pending.\n\n"
+                + store.read(store.state.plan_stage, store.state.plan_name)
+                + _open_evidence(final, _maintained(store, review_names)),
             )
             replies = [e["data"] for e in store.events() if e["kind"] == "researcher.response"]
             store.write(

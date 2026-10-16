@@ -1,4 +1,4 @@
-"""Bounded workspace agents: read, search, source, calculate, check, then submit."""
+"""Bounded workspace agents: read, search, source, calculate, check (reviewers), submit."""
 
 import hashlib
 import json
@@ -6,11 +6,12 @@ import re
 
 from pydantic import ValidationError
 
-from experiment_design.agents.prompts import prompt
+from experiment_design.agents.prompts import CALCULATING_ROLES, prompt
 from experiment_design.config import RunConfig
 from experiment_design.contracts import (
     AgentOutput,
     CalculationRequest,
+    Finding,
     ReviewerError,
     RevisionDisposition,
     WorkflowError,
@@ -24,6 +25,9 @@ from experiment_design.vocabulary import REVIEW_ROLES
 
 _READ_LINES = 400
 _READ_CAP = 1000
+# Counted contract rejections before the task fails: two corrections after the first.
+_CONTRACT_REJECTIONS = 3
+_UNKNOWN_REFS = "Finding references evidence not accepted in this task: "
 _INTERNAL_REF = re.compile(r"(?:source|document|calculation):[0-9a-f]{16,}")
 
 
@@ -98,6 +102,29 @@ def _usage_ceiling(llm: object, attempts: list[dict]) -> int | None:
     return final["tokens_in"] + max_tokens
 
 
+def _incomplete(store: RunStore, task: str, role: str, budget: str) -> AgentOutput:
+    """A review past its task allowance ends with one MAJOR needs_evidence finding.
+
+    The review must not read as a clean pass, but the plan has no defect to revise; the workflow
+    goes on.
+    """
+    issue = f"review incomplete: {role} exceeded its {budget} budget"
+    store.event("agent.accepted", {"task": task, "incomplete": budget})
+    return AgentOutput(
+        markdown=f"{issue.capitalize()}. This review did not finish its inspection.",
+        findings=[
+            Finding(
+                id="review-incomplete",
+                severity="MAJOR",
+                kind="needs_evidence",
+                issue=issue,
+                consequence="The plan was not fully inspected by this review.",
+                suggestion="Treat this review as partial; repeat it if the plan is still in doubt.",
+            )
+        ],
+    )
+
+
 def _digest(read_result: dict) -> dict:
     """Journal a read by identity; the model alone receives the text."""
     text = read_result["text"]
@@ -163,6 +190,12 @@ def _read(workspace: dict[str, str], covered: dict[str, set[int]], args: dict) -
     }
 
 
+def _read_key(args: dict) -> str:
+    """Identity of what a read returns: with names, the other arguments are ignored. Live: a
+    reviewer sent names plus a different name each call, five whole copies in one turn."""
+    return json.dumps(["names", args["names"]] if "names" in args else args, sort_keys=True)
+
+
 def _search(workspace: dict[str, str], args: dict) -> dict:
     terms = str(args.get("query", "")).lower().split()
     if not terms:
@@ -191,7 +224,7 @@ def _problems(
     covered: dict[str, set[int]],
     accepted_refs: set[str],
 ) -> tuple[AgentOutput | None, list[str]]:
-    """Every reason a submission would be rejected; shared by check and submit."""
+    """Every reason a submission would be rejected."""
     try:
         output = AgentOutput.model_validate(args)
     except ValidationError as exc:
@@ -209,11 +242,14 @@ def _problems(
         {ref for f in output.findings for ref in f.evidence_refs if ref not in accepted_refs}
     )
     if unknown:
+        known = sorted(accepted_refs)
         problems.append(
-            "Finding references evidence not accepted in this task: "
+            _UNKNOWN_REFS
             + ", ".join(unknown[:5])
             + ". Use only evidence_ref values returned by source or calculate, "
-            "or leave evidence_refs empty"
+            "or leave evidence_refs empty. A document name or a read sha256 is not a ref; "
+            "call source with the exact quote to get one. Refs accepted so far: "
+            + (", ".join(known[:8]) if known else "none")
         )
     if output.needs_input and not output.question.strip():
         problems.append("needs_input requires a concrete question")
@@ -221,6 +257,27 @@ def _problems(
     if unread:
         problems.append(f"Required documents not fully read: {unread}")
     return output, problems
+
+
+#: Default answers a run without a researcher gets before its agents may no longer ask: a default
+#: answer settles nothing, and a designer asked one question 20 times (live light-se, 2026-10-16).
+MAX_SYSTEM_ANSWERS = 3
+_ASKING_CLOSED = (
+    "No researcher can answer in this run, and earlier questions got only default answers: do "
+    "not set needs_input. Decide yourself with the option that adds the fewest new "
+    "requirements and list the open question under Limitations."
+)
+
+
+def asking_closed(store: RunStore) -> bool:
+    answers = [
+        e
+        for e in store.events()
+        if e["kind"] == "researcher.response"
+        and e["data"].get("researcher") == "system"
+        and e["data"].get("action") == "ANSWER"
+    ]
+    return len(answers) >= MAX_SYSTEM_ANSWERS
 
 
 def run_specialist(
@@ -236,28 +293,37 @@ def run_specialist(
     missing = [name for name in required if name not in workspace]
     if missing:
         raise WorkflowError(f"Required documents missing from workspace: {', '.join(missing)}")
-    task_text = (
-        f"Role: {role}. Inspect the document index, read every required document fully, "
-        "then check and submit."
-    )
+    # Review roles read for themselves and check before submit: giving them the documents
+    # up front and dropping check weakened the independent review in a blind comparison.
+    reviewer = role in REVIEW_ROLES
+    covered: dict[str, set[int]] = {}
+    task: dict[str, object] = {"required": required, "documents": _index(workspace)}
+    if reviewer:
+        task["task"] = (
+            f"Role: {role}. Inspect the document index, read every required document fully, "
+            "then check and submit."
+        )
+    else:
+        task["task"] = (
+            f"Role: {role}. The full text of every required document is in required_documents. "
+            "Use the document index for the other documents, then submit."
+        )
+        task["required_documents"] = {
+            name: "\n".join(
+                f"{n}: {line}" for n, line in enumerate(workspace[name].splitlines(), 1)
+            )
+            for name in required
+        }
+        covered = {name: set(range(1, len(workspace[name].splitlines()) + 1)) for name in required}
+    closed = asking_closed(store)
+    if closed:
+        task["asking"] = _ASKING_CLOSED
     messages = [
         {"role": "system", "content": prompt(role, pack)},
-        {
-            "role": "user",
-            "content": json.dumps(
-                {"task": task_text, "required": required, "documents": _index(workspace)},
-                ensure_ascii=False,
-            ),
-        },
+        {"role": "user", "content": json.dumps(task, ensure_ascii=False)},
     ]
-    covered: dict[str, set[int]] = {}
     tools = [
         _tool("submit", "Submit the final scientific output", AgentOutput.model_json_schema()),
-        _tool(
-            "check",
-            "Advisory: report every problem submit would reject, without submitting",
-            AgentOutput.model_json_schema(),
-        ),
         _tool(
             "read",
             "Read numbered lines. Pass names to read several whole documents in one call "
@@ -286,11 +352,6 @@ def run_specialist(
                 "required": ["query"],
                 "additionalProperties": False,
             },
-        ),
-        _tool(
-            "calculate",
-            "Optional supported computation; explicit calculator_id required",
-            CalculationRequest.model_json_schema(),
         ),
         _tool(
             "source",
@@ -323,6 +384,22 @@ def run_specialist(
             },
         ),
     ]
+    if reviewer:
+        tools.append(
+            _tool(
+                "check",
+                "Advisory: report every problem submit would reject, without submitting",
+                AgentOutput.model_json_schema(),
+            )
+        )
+    if role in CALCULATING_ROLES:
+        tools.append(
+            _tool(
+                "calculate",
+                "Optional supported computation; explicit calculator_id required",
+                CalculationRequest.model_json_schema(),
+            )
+        )
     if store.state.usage_unknown:
         raise WorkflowError("Provider usage is unknown")
     accepted_refs: set[str] = set()
@@ -342,11 +419,16 @@ def run_specialist(
     task_tokens = sum(e["tokens"] or 0 for e in prior)
     attempts_used = len(prior)
     contract_rejections = 0
+    ref_rejections = 0
+    # Live: a rejoinder issued the same read nine times in one turn and its next prompt
+    # passed the task token ceiling. A repeated identical read returns a pointer instead.
+    reads_done: dict[str, str] = {}
     for turn in range(len(prior), cfg.task_max_turns):
-        if (
-            task_tokens >= cfg.task_max_tokens
-            or store.state.llm_tokens >= store.state.llm_token_limit
-        ):
+        if store.state.llm_tokens >= store.state.llm_token_limit:
+            raise WorkflowError("LLM token budget exhausted")
+        if task_tokens >= cfg.task_max_tokens:
+            if reviewer:
+                return _incomplete(store, task, role, "tokens")
             raise WorkflowError("LLM token budget exhausted")
         if attempts_used >= cfg.task_max_turns:
             break
@@ -417,11 +499,13 @@ def run_specialist(
             if role in REVIEW_ROLES:
                 raise ReviewerError("Reviewer call failed after retry") from failure
             raise WorkflowError("Provider call failed") from failure
-        if (
-            task_tokens > cfg.task_max_tokens
-            or store.state.llm_tokens > store.state.llm_token_limit
-            or attempts_used > cfg.task_max_turns
-        ):
+        if store.state.llm_tokens > store.state.llm_token_limit:
+            raise WorkflowError("LLM token or turn budget exceeded")
+        if task_tokens > cfg.task_max_tokens or attempts_used > cfg.task_max_turns:
+            if reviewer:
+                return _incomplete(
+                    store, task, role, "tokens" if task_tokens > cfg.task_max_tokens else "turns"
+                )
             raise WorkflowError("LLM token or turn budget exceeded")
         assistant: dict = {"role": "assistant", "content": response.content}
         if response.tool_calls:
@@ -439,8 +523,9 @@ def run_specialist(
                 {
                     "role": "user",
                     "content": "Plain-text replies are discarded. Put your document in submit "
-                    "(markdown and the other fields), or continue with read, search, source, "
-                    "calculate or check.",
+                    "(markdown and the other fields), or continue with read, search, source"
+                    + (", calculate" if role in CALCULATING_ROLES else "")
+                    + (" or check." if reviewer else "."),
                 }
             )
         submission = None
@@ -450,8 +535,25 @@ def run_specialist(
                 args = json.loads(call.arguments)
                 if not isinstance(args, dict):
                     raise ValueError("Tool arguments must be a JSON object")
-                if call.name in {"submit", "check"}:
+                if call.name == "check" and reviewer:
+                    _, problems = _problems(args, workspace, required, covered, accepted_refs)
+                    result = {"ok": not problems, "problems": problems}
+                elif call.name == "submit":
                     output, problems = _problems(args, workspace, required, covered, accepted_refs)
+                    if (
+                        output is not None
+                        and problems
+                        and all(p.startswith(_UNKNOWN_REFS) for p in problems)
+                    ):
+                        # Unknown refs alone get one correction; then they are dropped, as
+                        # empty evidence_refs are allowed, so citations never fail a task.
+                        ref_rejections += 1
+                        if ref_rejections > 1:
+                            for finding in output.findings:
+                                finding.evidence_refs = [
+                                    r for r in finding.evidence_refs if r in accepted_refs
+                                ]
+                            problems = []
                     expected = (
                         [f["finding_id"] for f in json.loads(workspace["revision_findings"])]
                         if role == "revision" and "revision_findings" in workspace
@@ -480,11 +582,18 @@ def run_specialist(
                         )
                         or missing_responses
                         or any("revision responses" in p for p in problems)
-                        or (role in REVIEW_ROLES and problems)
+                        or (
+                            role in REVIEW_ROLES
+                            and any(not p.startswith(_UNKNOWN_REFS) for p in problems)
+                        )
                     )
-                    if call.name == "submit" and contract_problem:
+                    if contract_problem:
                         contract_rejections += 1
-                        if contract_rejections >= 2 and missing_responses and not problems:
+                        if (
+                            contract_rejections >= _CONTRACT_REJECTIONS
+                            and missing_responses
+                            and not problems
+                        ):
                             output.responses.extend(
                                 RevisionDisposition(
                                     finding_id=f,
@@ -497,23 +606,23 @@ def run_specialist(
                             problems.append(
                                 "Missing revision responses: " + ", ".join(missing_responses)
                             )
-                        if contract_rejections >= 2 and problems:
+                        if contract_rejections >= _CONTRACT_REJECTIONS and problems:
                             contract_failure = True
-                    if call.name == "check":
-                        result = {"ok": not problems, "problems": problems}
+                    if submission is not None:
+                        problems.append("Only one submit per response is allowed")
+                    if problems:
+                        result = {
+                            "accepted": False,
+                            "error": "; ".join(problems),
+                            "problems": problems,
+                        }
                     else:
-                        if submission is not None:
-                            problems.append("Only one submit per response is allowed")
-                        if problems:
-                            result = {
-                                "accepted": False,
-                                "error": "; ".join(problems),
-                                "problems": problems,
-                            }
-                        else:
-                            submission = output
-                            result = {"accepted": True}
+                        submission = output
+                        result = {"accepted": True}
+                elif call.name == "read" and (earlier := reads_done.get(_read_key(args))):
+                    result = {"repeated": f"Same read as call {earlier}; its result is above."}
                 elif call.name == "read":
+                    reads_done[_read_key(args)] = call.id
                     if "names" in args:
                         result = {
                             "documents": [
@@ -535,7 +644,7 @@ def run_specialist(
                         }
                     else:
                         result = _quote(store, workspace, args, accepted_refs)
-                elif call.name == "calculate":
+                elif call.name == "calculate" and role in CALCULATING_ROLES:
                     request = CalculationRequest.model_validate(args)
                     if not request.calculator_id:
                         raise ValueError("Explicit calculator_id required")
@@ -602,9 +711,16 @@ def run_specialist(
             )
         if contract_failure:
             if role in REVIEW_ROLES:
-                raise ReviewerError("Invalid reviewer submission after one retry")
-            raise WorkflowError("Invalid question or revision response after one retry")
+                raise ReviewerError("Invalid reviewer submission after two retries")
+            raise WorkflowError("Invalid question or revision response after two retries")
         if submission is not None:
             store.event("agent.accepted", {"task": task})
+            if closed and submission.needs_input:
+                store.event("question.suppressed", {"role": role, "question": submission.question})
+                submission = submission.model_copy(
+                    update={"needs_input": False, "question": "", "options": []}
+                )
             return submission
+    if reviewer:
+        return _incomplete(store, task, role, "turns")
     raise WorkflowError("Specialist turn allowance exhausted without accepted submission")

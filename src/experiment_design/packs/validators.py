@@ -1,7 +1,7 @@
 """Deterministic checks on declared experiment metadata, without editing the plan."""
 
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Literal
 
 from experiment_design.contracts import Finding, WorkflowError
 from experiment_design.packs import Pack
@@ -10,8 +10,16 @@ from experiment_design.publication.experiment_index import ExperimentIndex
 Validator = Callable[[ExperimentIndex, Mapping[str, Any]], list[Finding]]
 
 
-def _finding(rule: str, identifier: str, category: str, issue: str, suggestion: str) -> Finding:
+def _finding(
+    rule: str,
+    identifier: str,
+    category: str,
+    issue: str,
+    suggestion: str,
+    kind: Literal["fix", "needs_evidence"] = "fix",
+) -> Finding:
     return Finding(
+        kind=kind,
         id=f"{rule}-{identifier}",
         severity="MAJOR",
         category=category,
@@ -88,6 +96,10 @@ def benchmark_contamination(index: ExperimentIndex, resources: Mapping[str, Any]
     ]
 
 
+#: Words that show a declared control handles flaky tests (reruns are how flakiness is detected).
+_FLAKY_WORDS = ("flak", "rerun", "re-run")  # "flak" covers flaky and flakiness
+
+
 def flaky_tests(index: ExperimentIndex, resources: Mapping[str, Any]) -> list[Finding]:
     return [
         _finding(
@@ -95,10 +107,12 @@ def flaky_tests(index: ExperimentIndex, resources: Mapping[str, Any]) -> list[Fi
             e.experiment_id,
             "control",
             "Flaky-test handling is unspecified.",
-            "Declare flaky-test detection, reruns and exclusion rules before evaluation.",
+            "Declare flaky-test detection, reruns and exclusion rules before evaluation, as a "
+            "named control (for example 'Flaky-test control: three clean reruns; a failure "
+            "that does not reproduce is excluded').",
         )
         for e in index.experiments
-        if not any("flaky" in control.casefold() for control in e.controls)
+        if not any(w in control.casefold() for control in e.controls for w in _FLAKY_WORDS)
     ]
 
 
@@ -110,6 +124,7 @@ def project_diversity(index: ExperimentIndex, resources: Mapping[str, Any]) -> l
             "reproducibility",
             "Project diversity is insufficient.",
             "Identify at least two independent projects and disclose their selection.",
+            "needs_evidence",
         )
         for position, resource in enumerate(resources.get("resources", []))
         if resource.get("kind") == "dataset"

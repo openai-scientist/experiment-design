@@ -17,6 +17,7 @@ from experiment_design.persistence.store import RunStore
 from experiment_design.runtime.llm import LLMClient
 
 _SOURCE_CHARS = 4000
+_EVIDENCE_LINE = re.compile(r"^\s+- (?:Data|Metrics): (.+)$", re.MULTILINE)
 _DATASET_SOURCE = re.compile(r"(?:^|/)(?:\d+[-_.]?)?dataset-[^/]*\.json$")
 
 
@@ -24,6 +25,8 @@ class Mention(Record):
     name: str
     kind: Literal["dataset", "benchmark", "baseline", "metric"]
     source_url: str | None = None
+    #: The model's guess of the Hub id ("owner/name"). Only a Hub lookup can verify it.
+    hf_repo_id: str | None = None
 
 
 class SurveyPlan(Record):
@@ -32,8 +35,26 @@ class SurveyPlan(Record):
     mentions: list[Mention] = Field(default_factory=list)
 
 
+_REPO_ID = re.compile(r"^[\w.-]+(?:/[\w.-]+)?$")
+
+
+def hub_repo_id(value: str | None) -> str | None:
+    value = (value or "").strip()
+    return value if _REPO_ID.match(value) else None
+
+
 def canonical(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+
+
+_VERSION = re.compile(r"v?\d+(-\d+)*")
+
+
+def names_entry(mention: str, entry: str) -> bool:
+    """A mention names a registry entry by its name, or by its name and a version
+    ("Defects4J v2.0" names "Defects4J"; "CIFAR-10-C" does not name "CIFAR-10")."""
+    m, e = canonical(mention), canonical(entry)
+    return m == e or (m.startswith(e + "-") and _VERSION.fullmatch(m[len(e) + 1 :]) is not None)
 
 
 def resource_id(kind: str, name: str) -> str:
@@ -71,6 +92,11 @@ def researcher_resources(sources: Mapping[str, str]) -> list[Resource]:
     return found
 
 
+def evidence_resources(hypothesis_md: str) -> list[str]:
+    """Data and metrics lines of the hypothesis evidence; they may name resources to consider."""
+    return list(dict.fromkeys(_EVIDENCE_LINE.findall(hypothesis_md)))
+
+
 def survey(
     store: RunStore,
     llm: LLMClient,
@@ -91,15 +117,25 @@ def survey(
         llm,
         cfg,
         "surveyor",
-        {"brief": brief_md, "hypotheses": hypothesis_md, "sources": sources},
+        {
+            "brief": brief_md,
+            "hypotheses": hypothesis_md,
+            "sources": sources,
+            "Resources named in the hypothesis evidence": evidence_resources(hypothesis_md),
+        },
         SurveyPlan,
     )
     visible = "\n".join([brief_md, hypothesis_md, *sources.values()])
     tasks = {task.casefold() for task in plan.tasks}
+    # A curated entry the hypotheses name is kept whatever the tasks: its verifiable source
+    # wins over the evidence card's (live: Defects4J was filtered out and stayed unverified).
+    named = [mention.name for mention in plan.mentions if mention.name.strip()]
     registry = [
         entry
         for entry in pack.registry
-        if not tasks or tasks & {task.casefold() for task in entry.tasks}
+        if not tasks
+        or tasks & {task.casefold() for task in entry.tasks}
+        or any(names_entry(name, entry.name) for name in named)
     ] or list(pack.registry)
     candidates: list[Resource] = list(researcher)
     candidates += [
@@ -124,6 +160,7 @@ def survey(
             source_url=mention.source_url
             if mention.source_url and mention.source_url in visible
             else None,
+            hf_repo_id=hub_repo_id(mention.hf_repo_id),
         )
         for mention in plan.mentions
         if mention.name.strip()

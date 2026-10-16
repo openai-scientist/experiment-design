@@ -111,9 +111,61 @@ def test_vendor_matches_management():
                 path.read_bytes().replace(b"\r\n", b"\n")
             ).hexdigest()
             for path in sorted(root.rglob("*"))
-            if path.is_file() and path.relative_to(root).as_posix() != "SOURCE"
+            if path.is_file()
+            and path.relative_to(root).as_posix() != "SOURCE"
+            # ``pi/`` is the PI service's contract; engines do not vendor it.
+            and path.relative_to(root).parts[0] != "pi"
         }
 
     assert digest(VENDOR) == digest(management), (
         "re-copy management/docs/contract and update SOURCE"
     )
+
+
+# --- cross-field rules the Platform enforces and JSON Schema cannot express ----------------
+
+NOW = "2026-10-16T00:00:00Z"
+
+
+def _gate(**kw) -> dict:
+    return {"gate_id": "g", "kind": "artifact_review", "step_key": None, "prompt": "p",
+            "opened_at": NOW, **kw}  # fmt: skip
+
+
+def _event(**kw) -> dict:
+    return {"source_seq": 1, "type": "exd.note", "class": "activity", "occurred_at": NOW,
+            "step_key": "s1", "actor": "agent", "summary": "x", **kw}  # fmt: skip
+
+
+def _state(**kw) -> dict:
+    return {"engine_run_id": "e", "stage_run_id": "s", "phase": "drafting", "step_key": None,
+            "waiting_input": False, "open_gate": None, **kw}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (cm.Gate, _gate(artifact_ids=[])),
+        (cm.Gate, _gate(artifact_ids=["a"], options=[{"option_id": "o1", "label": "l"}])),
+        (cm.Gate, _gate(kind="question", options=[{"option_id": "o1", "label": "l"}])),
+        (cm.RunState, _state(phase="failed")),
+        (cm.RunState, _state(failure={"code": "c", "message": "m"})),
+        (cm.RevisionItem, {"finding_id": "f", "outcome": "not_fixed"}),
+        (cm.RevisionItem, {"finding_id": "f", "outcome": "rebutted", "note": " "}),
+        (cm.EventEnvelope, _event(type="run.step_changed")),
+        (cm.EventEnvelope, _event(actor=" ")),
+        (cm.EventEnvelope, _event(type="note")),
+        (cm.EventEnvelope, _event(**{"class": "lifecycle", "type": "exd.note"})),
+    ],
+)
+def test_platform_cross_field_rules_reject(model, payload) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+def test_platform_cross_field_rules_accept_valid() -> None:
+    cm.Gate.model_validate(_gate(artifact_ids=["a"]))
+    cm.RunState.model_validate(_state(phase="failed", failure={"code": "c", "message": "m"}))
+    cm.RevisionItem.model_validate({"finding_id": "f", "outcome": "fixed"})
+    cm.RevisionItem.model_validate({"finding_id": "f", "outcome": "rebutted", "note": "why"})
+    cm.EventEnvelope.model_validate(_event())

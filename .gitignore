@@ -6,5 +6,7 @@ __pycache__/
 .exd/
 exd.yaml
 .env
-docs/
+docs/*
+!docs/test-audit.md
+!docs/test-audit-ledger.md
 runs/

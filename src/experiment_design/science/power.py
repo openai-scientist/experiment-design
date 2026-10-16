@@ -6,8 +6,6 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
-from scipy.stats import nct, t
-
 from experiment_design.contracts import CalculationRequest, CalculationResult, Quantity
 
 
@@ -208,6 +206,8 @@ def calculate(request: CalculationRequest) -> CalculationResult:
     if delta <= 0 and request.target_power > contrast.alpha:
         reasons.append("target power is unattainable at the stated effect")
         return result
+
+    from scipy.stats import nct, t  # lazy: scipy.stats dominates import time
 
     def at(n: int) -> float:
         df = 2 * n - 2

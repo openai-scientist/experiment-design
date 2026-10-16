@@ -1,5 +1,6 @@
 """A separate index bound to exact reviewed Markdown, never a replacement for it."""
 
+import difflib
 import hashlib
 import re
 from typing import Literal
@@ -51,6 +52,56 @@ def extract_index(
     return index.model_copy(update={"plan_sha256": digest})
 
 
+def _words(text: str) -> str:
+    """Case, heading marks, punctuation and spacing removed."""
+    return " ".join(re.sub(r"[\W_]+", " ", text.casefold()).split())
+
+
+def _closest_heading(section: str, headings: list[str]) -> str | None:
+    """The one heading the section names: equal, else the only one containing it, else the
+    only close one; the numbers must agree. Ambiguity gives None."""
+    wanted = _words(section)
+    if not wanted:
+        return None
+    normal = {h: _words(h) for h in headings}
+    exact = [h for h, n in normal.items() if n == wanted]
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    # The numbers must agree: "Experiment 1" never binds to "Experiment 10: Foo", and
+    # "Experiment 3: Foo" never to "Experiment 1: Foo".
+    digits = re.findall(r"\d+", wanted)
+    numbers = {h: re.findall(r"\d+", n) for h, n in normal.items()}
+    contained = [
+        h for h, n in normal.items() if wanted in n and numbers[h][: len(digits)] == digits
+    ]
+    if contained:
+        return contained[0] if len(contained) == 1 else None
+    normal = {h: n for h, n in normal.items() if numbers[h] == digits}
+    ranked = sorted(
+        ((difflib.SequenceMatcher(None, wanted, n).ratio(), h) for h, n in normal.items()),
+        reverse=True,
+    )
+    if ranked and ranked[0][0] >= 0.75 and (len(ranked) == 1 or ranked[1][0] < ranked[0][0] - 0.1):
+        return ranked[0][1]
+    return None
+
+
+def rebind_index(index: ExperimentIndex, plan_md: str) -> ExperimentIndex:
+    """Mechanical repair by code: each plan_section becomes the plan's own heading line and
+    the index is bound to the current plan, so no reviewer sees a heading-format mismatch."""
+    headings = list(
+        dict.fromkeys(line for line in plan_md.splitlines() if re.match(r"^#{1,6} ", line))
+    )
+    experiments = [
+        e.model_copy(
+            update={"plan_section": _closest_heading(e.plan_section, headings) or e.plan_section}
+        )
+        for e in index.experiments
+    ]
+    digest = hashlib.sha256(plan_md.encode("utf-8")).hexdigest()
+    return index.model_copy(update={"experiments": experiments, "plan_sha256": digest})
+
+
 def check_index(index: ExperimentIndex, plan_md: str, hypothesis_ids: list[str]) -> list[Finding]:
     findings: list[Finding] = []
 
@@ -78,7 +129,9 @@ def check_index(index: ExperimentIndex, plan_md: str, hypothesis_ids: list[str])
     for experiment in index.experiments:
         if experiment.plan_section not in headings:
             report(
-                f"Section missing for {experiment.experiment_id}.", "Use an exact existing heading."
+                f"Section missing for {experiment.experiment_id}.",
+                "Use an exact existing heading.",
+                severity="MINOR",
             )
         if experiment.experiment_id in indexed:
             report(

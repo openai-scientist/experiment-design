@@ -52,6 +52,15 @@ def test_real_metadata_with_revision_is_verified():
     assert out.source_url == "https://huggingface.co/datasets/owner/data"
 
 
+@pytest.mark.parametrize(
+    ("declared", "shown"), [(["unknown"], "unknown"), (["mit", "cc-by-4.0"], "mit, cc-by-4.0")]
+)
+def test_a_license_list_on_the_card_is_kept(declared, shown):
+    body = {"sha": "abc123", "cardData": {"license": declared}}
+    out = _run(_resource(), lambda request: httpx.Response(200, json=body))
+    assert out.license == shown
+
+
 def test_metadata_without_revision_is_unknown():
     out = _run(_resource(), lambda request: httpx.Response(200, json={"id": "owner/data"}))
     assert out.status == "unknown"
@@ -141,3 +150,21 @@ def test_minimums_report_missing_benchmark():
         "only 0 verified benchmark (minimum 1)",
         "only 0 verified or cited baseline (minimum 2)",
     ]
+
+
+def test_github_resource_without_revision_names_the_github_lookup():
+    resource = _resource(source_url="https://github.com/o/r", hf_repo_id=None)
+    out = validate(resource)
+    assert out.status == "unknown"
+    assert out.reasons == ["the GitHub lookup gave no revision"]
+
+
+def test_github_reason_is_not_added_when_a_hub_lookup_was_made():
+    github = "https://github.com/org/data"
+    hub = _run(
+        _resource(source_url=github), lambda request: httpx.Response(200, json={"id": "owner/data"})
+    )
+    assert not any("GitHub" in reason for reason in hub.reasons)
+    assert hub.reasons
+    plain = validate(_resource(hf_repo_id=None, source_url=github))
+    assert plain.reasons == ["the GitHub lookup gave no revision"]

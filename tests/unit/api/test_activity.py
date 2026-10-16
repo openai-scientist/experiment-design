@@ -10,26 +10,27 @@ from tests.integration.review.test_markdown_workflow import store_for
     ("kind", "data", "type", "actor"),
     [
         ("agent.started", {"role": "skeptic", "stage": 4}, "exd.agent.started", "skeptic"),
-        ("agent.accepted", {"task": "design:1:3:0"}, "exd.agent.accepted", "design"),
+        ("agent.started", {"role": "final_check", "stage": 5}, "exd.agent.started", "reviewer"),
+        ("agent.accepted", {"task": "design:1:3:0"}, "exd.agent.accepted", "designer"),
         (
             "calculation",
             {"result": {"status": "computed", "method_id": "paired_t"}},
             "exd.calculation.computed",
-            "calculator",
+            "system",
         ),
         ("route", {"choice": "DESIGN", "automatic": True}, "exd.route.decided", "system"),
-        ("route", {"choice": "REVISE", "automatic": False}, "exd.route.decided", "jev"),
+        ("route", {"choice": "REVISE", "automatic": False}, "exd.route.decided", "coordinator"),
         (
             "reframe.objections",
             {"objections": {"critic": "private text"}},
             "exd.review.reframed",
-            "workflow",
+            "system",
         ),
         (
             "revision.pending",
             {"attempt": 1, "plan": "private text", "objections": {}},
             "exd.revision.started",
-            "revision",
+            "reviser",
         ),
         (
             "researcher.response",
@@ -72,5 +73,6 @@ def test_pack_activity_forwarding_and_unknown_activity_rejected(tmp_path):
     )
     event = log.since(0)[0]
     assert event.step_key == "s2b_resources" and event.refs == ["dataset1"]
+    assert event.actor == "system"
     with pytest.raises(WorkflowError):
         store.activity("exd.unknown", actor="r", summary="unknown")

@@ -18,7 +18,7 @@ class LLMConfig(Record):
     model: str
     api_key_env: str = "EXD_LLM_API_KEY"
     timeout_sec: float = Field(default=120, gt=0)
-    max_retries: int = Field(default=3, ge=0)
+    max_retries: int = Field(default=4, ge=0)
     retry_base_delay: float = Field(default=2.0, ge=0)
     temperature: float = 0.2
     max_tokens: int = Field(default=4096, gt=0)

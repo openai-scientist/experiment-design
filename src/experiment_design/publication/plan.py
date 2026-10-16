@@ -79,8 +79,16 @@ def render_review(store: RunStore) -> str:
 
 
 def _open_findings(store: RunStore) -> list[dict]:
-    """Findings of the final review, with the IDs the Platform saw; empty when it never ran."""
-    if not store.valid(5) or not (store.path / "stage-05" / "final_review.json").is_file():
+    """Findings of the final review, with the IDs the Platform saw; without a final review,
+    the critics' findings (a stop after the critics leaves them open)."""
+    if store.valid(5) and (store.path / "stage-05" / "final_review.json").is_file():
+        records = store.bound_findings(5, "final_review.json", store.state.attempt)
+    elif store.valid(4) and not store.tampered(5):
+        records = []
+        for name in ("methodologist_review.json", "skeptic_review.json"):
+            if (store.path / "stage-04" / name).is_file():
+                records += store.bound_findings(4, name, store.state.attempt)
+    else:
         return []
     return [
         {
@@ -90,7 +98,7 @@ def _open_findings(store: RunStore) -> list[dict]:
             "consequence": record.get("consequence", ""),
             "suggestion": record.get("suggestion", ""),
         }
-        for record in store.bound_findings(5, "final_review.json", store.state.attempt)
+        for record in records
     ]
 
 
@@ -98,17 +106,17 @@ def _open_findings_section(findings: list[dict]) -> str:
     lines = [
         "",
         "",
-        "## Finding còn mở",
+        "## Open findings",
         "",
-        "Review độc lập chưa đạt khi researcher chấp nhận plan này.",
+        "The independent review was not satisfied when this plan was accepted.",
     ]
     if not findings:
-        lines.append("Không có finding cụ thể nào được ghi nhận.")
+        lines.append("No specific finding was recorded.")
     for finding in findings:
         lines.append(
             f"- {finding['finding_id']} ({finding['severity']}): {finding['issue']}"
-            + (f" Hệ quả: {finding['consequence']}" if finding["consequence"] else "")
-            + (f" Đề xuất: {finding['suggestion']}" if finding["suggestion"] else "")
+            + (f" Consequence: {finding['consequence']}" if finding["consequence"] else "")
+            + (f" Suggestion: {finding['suggestion']}" if finding["suggestion"] else "")
         )
     return "\n".join(lines) + "\n"
 

@@ -13,7 +13,7 @@ Python 3.12+, uv, PowerShell, repository root:
 
 - Dependencies: `uv sync --locked`
 - CLI: `uv run exd --help`
-- Full deterministic checks: `uv run pytest -q`
+- Full deterministic checks (parallel, ~2 min): `uv run --with pytest-xdist pytest -q -p no:cacheprovider -n 8`; never run the full suite serially
 - Focused publication checks: `uv run pytest tests/e2e tests/integration/publication -q`
 - Style: `uv run ruff check .` and `uv run ruff format --check .`
 
@@ -35,7 +35,9 @@ hold small typed runtime/review/calculation records, not a structured scientific
 plan body. Persistence owns atomic filesystem artifacts, manifests, checkpoints,
 source snapshots and append-only events; it imports no providers or workflow.
 Agents are bounded workspace agents: each gets a goal and an index of role-scoped
-documents, then uses read, search, source, calculate and check before submit.
+documents, then uses read, search, source and (design, methodologist, revision only)
+calculate before submit. Drafting roles also get the full text of their required
+documents up front; review roles read them themselves and run check before submit.
 They own bounded scientific reasoning and specialist tools. Science owns the
 existing supported statistical algorithms. Workflow owns stages and legal routes.
 Publication copies exact reviewed Markdown bytes without model calls or rendering.
@@ -53,8 +55,13 @@ CLI/config own researcher commands and configuration.
 | S6 | Present the exact current Markdown and record real researcher decisions. |
 | S7 | Publish `stage-07/exp_plan.md` without changing the scientific body. |
 
-JEV chooses WHAT/NEXT among legal code-enumerated options; agents choose HOW.
-Validate returned options; never claim JEV itself is deterministic. Sole legal
+Code enumerates the legal routes and picks one when a rule decides it: a sole option,
+a needed question, a progress route (DESIGN, CHECK, PRESENT) while no MAJOR fix is open,
+or a single legal refinement; a defect found only by a code check is revised. JEV only
+chooses REVISE or REFRAME when both are legal. STOP is legal only when no other route is;
+`forced` records whether limits removed the refinements. A review stopped by its budget is
+never presented as complete. Agents choose HOW.
+Validate returned options; never claim JEV itself is deterministic. Rule-decided
 routes are labelled automatic and require no fabricated JEV call. Methodology is
 open-ended; calculator coverage is not an allowlist or universal power gate. A method
 without a calculator can still be proposed, with its uncertainty stated.
@@ -114,6 +121,15 @@ Tests use fake external providers and independent calculator references. Shared
 contracts/runtime/storage/science/workflow changes require full deterministic tests;
 before handoff run full tests, lint and format checks. Mutation-check changed
 authority/scientific guards, then restore exactly.
+
+During edits, use `uv run python scripts/affected_tests.py --files tests/path/test_file.py --run`
+or `--lane unit-api --run` for a deliberate focused check. Automatic local checks use
+`uv run python scripts/affected_tests.py --run`; pre-push uses
+`uv run python scripts/affected_tests.py --base origin/main --run`. Omit `--run` to
+inspect the selection. The shared policy is `scripts/test-lanes.json`: shared core,
+fixtures/helpers, unknown/deleted paths and unavailable Git evidence run everything.
+Focused checks support the edit loop; the full handoff checks above remain required.
+See `docs/testing.md` for ownership, selection policy and CI gate behavior.
 
 Regenerate the statistics fixture with
 `uv run --with statsmodels tests/fixtures/stats_reference.py`.
