@@ -42,3 +42,35 @@ def test_malformed_metadata_is_unavailable():
     with pytest.raises(HFUnavailable):
         client.model_info("owner/model")
     client.close()
+
+
+@pytest.mark.parametrize("first", ["network", 429, 503])
+def test_one_transient_failure_is_retried(first):
+    calls = []
+
+    def response(request):
+        calls.append(request.url.path)
+        if len(calls) == 1:
+            if first == "network":
+                raise httpx.ConnectError("dropped", request=request)
+            return httpx.Response(first)
+        return httpx.Response(200, json={"sha": "revision"})
+
+    client = HFClient(transport=httpx.MockTransport(response))
+    assert client.dataset_info("owner/data") == {"sha": "revision"}
+    assert len(calls) == 2
+    client.close()
+
+
+def test_a_client_error_is_not_retried():
+    calls = []
+
+    def response(request):
+        calls.append(request)
+        return httpx.Response(401)
+
+    client = HFClient(transport=httpx.MockTransport(response))
+    with pytest.raises(HFUnavailable):
+        client.dataset_info("owner/data")
+    assert len(calls) == 1
+    client.close()

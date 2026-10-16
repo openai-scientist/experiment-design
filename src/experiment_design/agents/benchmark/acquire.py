@@ -73,6 +73,8 @@ def acquire(
     card = info.get("cardData")
     card = card if isinstance(card, dict) else {}
     license_ = card.get("license")
+    if isinstance(license_, list):  # the Hub allows a list of licenses
+        license_ = ", ".join(x for x in license_ if isinstance(x, str)) or None
     revision = info.get("sha")
     size = info.get("usedStorage")
     splits = _split_names(card)

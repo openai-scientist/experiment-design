@@ -2,6 +2,8 @@
 
 import httpx
 
+from experiment_design.agents.benchmark import http
+
 
 class HFUnavailable(Exception):
     """The Hub could not answer: network error, 429, 5xx, auth failure or malformed body."""
@@ -53,7 +55,7 @@ class HFClient:
 
     def _get(self, path: str, params: dict | None, *, missing_ok: bool = False):
         try:
-            response = self._client.get(path, params=params)
+            response = http.get(self._client, path, params)
         except httpx.HTTPError as exc:
             raise HFUnavailable(f"network error: {type(exc).__name__}") from exc
         if response.status_code == 404 and missing_ok:

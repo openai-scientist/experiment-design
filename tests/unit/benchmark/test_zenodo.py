@@ -94,3 +94,19 @@ def test_without_a_client_the_resource_is_left_as_it_was():
 def test_the_ml_pack_registry_lists_cifar_10_c_on_zenodo():
     entries = {e.name: e for e in load_pack(Profile(domain="ml")).registry}
     assert entries["CIFAR-10-C"].source_url == "https://zenodo.org/records/2535967"
+
+
+def test_a_dropped_zenodo_connection_is_retried_once():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise httpx.ConnectError("dropped", request=request)
+        return httpx.Response(
+            200, json={"doi": "10.5281/zenodo.1", "metadata": {"license": {"id": "cc-by-4.0"}}}
+        )
+
+    out = _run(_resource("https://zenodo.org/records/1"), handler)
+    assert len(calls) == 2
+    assert out.status == "verified" and out.license == "cc-by-4.0"

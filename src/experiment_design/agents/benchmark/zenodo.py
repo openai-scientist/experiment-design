@@ -2,6 +2,8 @@
 
 import httpx
 
+from experiment_design.agents.benchmark import http
+
 
 class ZenodoUnavailable(Exception):
     """Zenodo could not answer: network error, 429, 5xx or malformed body."""
@@ -30,7 +32,7 @@ class ZenodoClient:
 
     def record(self, record_id: str) -> dict | None:
         try:
-            response = self._client.get(f"/api/records/{record_id}")
+            response = http.get(self._client, f"/api/records/{record_id}")
         except httpx.HTTPError as exc:
             raise ZenodoUnavailable(f"network error: {type(exc).__name__}") from exc
         if response.status_code == 404:

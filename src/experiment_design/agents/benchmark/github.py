@@ -2,6 +2,8 @@
 
 import httpx
 
+from experiment_design.agents.benchmark import http
+
 
 class GitHubUnavailable(Exception):
     """GitHub could not answer: network error, 403/429, 5xx or malformed body."""
@@ -43,7 +45,7 @@ class GitHubClient:
 
     def _get(self, path: str) -> dict | None:
         try:
-            response = self._client.get(path)
+            response = http.get(self._client, path)
         except httpx.HTTPError as exc:
             raise GitHubUnavailable(f"network error: {type(exc).__name__}") from exc
         if response.status_code == 404:

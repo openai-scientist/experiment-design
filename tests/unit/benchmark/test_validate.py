@@ -52,6 +52,15 @@ def test_real_metadata_with_revision_is_verified():
     assert out.source_url == "https://huggingface.co/datasets/owner/data"
 
 
+@pytest.mark.parametrize(
+    ("declared", "shown"), [(["unknown"], "unknown"), (["mit", "cc-by-4.0"], "mit, cc-by-4.0")]
+)
+def test_a_license_list_on_the_card_is_kept(declared, shown):
+    body = {"sha": "abc123", "cardData": {"license": declared}}
+    out = _run(_resource(), lambda request: httpx.Response(200, json=body))
+    assert out.license == shown
+
+
 def test_metadata_without_revision_is_unknown():
     out = _run(_resource(), lambda request: httpx.Response(200, json={"id": "owner/data"}))
     assert out.status == "unknown"
