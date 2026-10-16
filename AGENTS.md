@@ -122,6 +122,15 @@ contracts/runtime/storage/science/workflow changes require full deterministic te
 before handoff run full tests, lint and format checks. Mutation-check changed
 authority/scientific guards, then restore exactly.
 
+During edits, use `uv run python scripts/affected_tests.py --files tests/path/test_file.py --run`
+or `--lane unit-api --run` for a deliberate focused check. Automatic local checks use
+`uv run python scripts/affected_tests.py --run`; pre-push uses
+`uv run python scripts/affected_tests.py --base origin/main --run`. Omit `--run` to
+inspect the selection. The shared policy is `scripts/test-lanes.json`: shared core,
+fixtures/helpers, unknown/deleted paths and unavailable Git evidence run everything.
+Focused checks support the edit loop; the full handoff checks above remain required.
+See `docs/test-audit.md` for ownership, measurements and CI gate behavior.
+
 Regenerate the statistics fixture with
 `uv run --with statsmodels tests/fixtures/stats_reference.py`.
 `tests/unit/science/test_stats.py` checks the generator SHA-256 in

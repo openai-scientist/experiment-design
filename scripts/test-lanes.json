@@ -1,0 +1,26 @@
+{
+  "shared": [
+    "AGENTS.md", "pyproject.toml", "uv.lock", ".github/*", "scripts/*",
+    ".python-version", ".gitignore", ".ignore", ".rgignore", "Dockerfile*",
+    "exd.example.yaml", "src/experiment_design/__init__.py",
+    "src/experiment_design/contracts.py", "src/experiment_design/config.py",
+    "src/experiment_design/vocabulary.py", "src/experiment_design/runtime/*",
+    "src/experiment_design/persistence/*", "src/experiment_design/science/*",
+    "src/experiment_design/workflow/*", "src/experiment_design/packs/*",
+    "src/experiment_design/api/contract_models.py", "tests/support/*",
+    "tests/fixtures/*", "tests/contract/vendor/*", "tests/contract/fake_platform.py",
+    "tests/**/conftest.py", "tests/conftest.py", "tests/**/__init__.py", "tests/__init__.py",
+    "docs/examples/*", "hypotheses*.example.md"
+  ],
+  "ignore": ["README.md", "docs/test-audit.md", "docs/test-audit-ledger.md"],
+  "lanes": {
+    "contract": "tests/contract/test_*.py", "cli": "tests/e2e/test_*.py",
+    "api": "tests/integration/api/test_*.py", "storage": "tests/integration/persistence/test_*.py",
+    "publication": "tests/integration/publication/test_*.py",
+    "review": "tests/integration/review/test_*.py", "unit-agents": "tests/unit/agents/test_*.py",
+    "unit-api": "tests/unit/api/test_*.py", "benchmark": "tests/unit/benchmark/test_*.py",
+    "packs": "tests/unit/packs/test_*.py", "unit-publication": "tests/unit/publication/test_*.py",
+    "runtime": "tests/unit/runtime/test_*.py", "science": "tests/unit/science/test_*.py",
+    "activity": "tests/unit/test_activity.py", "tooling": "tests/tooling/test_*.py"
+  }
+}

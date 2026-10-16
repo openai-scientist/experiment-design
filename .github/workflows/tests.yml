@@ -1,0 +1,82 @@
+name: deterministic checks
+
+on:
+  pull_request:
+  merge_group:
+  release:
+    types: [published]
+  push:
+    branches: [main, master, 'release/**']
+    tags: ['**']
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selection:
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.select.outputs.tests }}
+      plan: ${{ steps.select.outputs.plan }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            python scripts/affected_tests.py --base "$BASE_REF" --github-output "$GITHUB_OUTPUT"
+          else
+            python scripts/affected_tests.py --full --github-output "$GITHUB_OUTPUT"
+          fi
+
+  tests:
+    needs: selection
+    if: needs.selection.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: '3.12'
+      - run: uv sync --locked
+      - name: Run the exact selected plan
+        env:
+          TEST_PLAN: ${{ needs.selection.outputs.plan }}
+        run: uv run python scripts/affected_tests.py --plan-env TEST_PLAN --run
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: '3.12'
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  gate:
+    if: always()
+    needs: [selection, tests, lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require selection, tests and style
+        env:
+          CHECK_RESULTS: ${{ toJSON(needs) }}
+        run: python scripts/affected_tests.py --gate-env CHECK_RESULTS

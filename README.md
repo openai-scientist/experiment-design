@@ -94,3 +94,12 @@ uv run pytest -q          # deterministic tests, no network
 uv run pytest -m live     # opt-in; calls real providers and needs the keys above
 uv run ruff check .
 ```
+
+For quick feedback while editing, run
+`uv run python scripts/affected_tests.py --files tests/unit/api/test_observability.py --run`
+or choose an owner with `--lane unit-api --run`. Run automatic affected checks with
+`uv run python scripts/affected_tests.py --run`, and pre-push checks with
+`uv run python scripts/affected_tests.py --base origin/main --run`.
+Omit `--run` to inspect the JSON plan. Shared changes and missing dependency/diff
+evidence select the full suite. Full tests and style checks remain required before
+handoff; [the audit report](docs/test-audit.md) explains the policy and measured results.
