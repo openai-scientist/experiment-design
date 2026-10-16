@@ -90,7 +90,7 @@ def test_shared_unknown_and_deleted_paths_run_full(project, path):
 
 
 def test_known_empty_diff_and_explicit_docs_skip(project):
-    for paths in ([], ["README.md"], ["docs/test-audit.md"]):
+    for paths in ([], ["README.md"], ["docs/testing.md"]):
         result = selector().select(project, paths)
         assert result["tests"] == [] and result["full"] is False
 

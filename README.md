@@ -102,4 +102,4 @@ or choose an owner with `--lane unit-api --run`. Run automatic affected checks w
 `uv run python scripts/affected_tests.py --base origin/main --run`.
 Omit `--run` to inspect the JSON plan. Shared changes and missing dependency/diff
 evidence select the full suite. Full tests and style checks remain required before
-handoff; [the audit report](docs/test-audit.md) explains the policy and measured results.
+handoff; [the testing guide](docs/testing.md) explains the selection policy and CI gate.

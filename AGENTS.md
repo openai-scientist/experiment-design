@@ -129,7 +129,7 @@ or `--lane unit-api --run` for a deliberate focused check. Automatic local check
 inspect the selection. The shared policy is `scripts/test-lanes.json`: shared core,
 fixtures/helpers, unknown/deleted paths and unavailable Git evidence run everything.
 Focused checks support the edit loop; the full handoff checks above remain required.
-See `docs/test-audit.md` for ownership, measurements and CI gate behavior.
+See `docs/testing.md` for ownership, selection policy and CI gate behavior.
 
 Regenerate the statistics fixture with
 `uv run --with statsmodels tests/fixtures/stats_reference.py`.

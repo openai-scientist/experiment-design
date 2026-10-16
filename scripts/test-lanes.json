@@ -12,7 +12,7 @@
     "tests/**/conftest.py", "tests/conftest.py", "tests/**/__init__.py", "tests/__init__.py",
     "docs/examples/*", "hypotheses*.example.md"
   ],
-  "ignore": ["README.md", "docs/test-audit.md", "docs/test-audit-ledger.md"],
+  "ignore": ["README.md", "docs/testing.md"],
   "lanes": {
     "contract": "tests/contract/test_*.py", "cli": "tests/e2e/test_*.py",
     "api": "tests/integration/api/test_*.py", "storage": "tests/integration/persistence/test_*.py",
