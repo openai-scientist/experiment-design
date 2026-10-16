@@ -44,3 +44,20 @@ def test_designers_and_reviewers_share_one_rule_for_analysis_decisions(role):
     # frozen; the plan was revised three times and the run stopped.
     text = " ".join(prompt(role, None).split())
     assert "is not an implementation detail: the plan fixes it with a concrete value" in text
+
+
+def test_the_indexer_names_the_threat_each_control_addresses():
+    # Live 2026-10-16: a plan with three agreeing executions per test was indexed without the
+    # word "flaky", so the flaky-test check failed it until the engine stopped.
+    text = " ".join(prompt("indexer", None).split())
+    assert "Start each control with the threat it addresses" in text
+    assert "'Flaky tests: ...'" in text
+
+
+def test_review_fixes_from_the_code_review():
+    design = " ".join(prompt("design", None).split())
+    assert 'mark a value no source states "(set by design)"' in design
+    skeptic = " ".join(prompt("skeptic", None).split())
+    assert "never ask the researcher to add one" in skeptic
+    selector = " ".join(prompt("selector", None).split())
+    assert "unless the version changes the data" in selector

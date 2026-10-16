@@ -97,7 +97,7 @@ def benchmark_contamination(index: ExperimentIndex, resources: Mapping[str, Any]
 
 
 #: Words that show a declared control handles flaky tests (reruns are how flakiness is detected).
-_FLAKY_WORDS = ("flaky", "rerun", "re-run")
+_FLAKY_WORDS = ("flak", "rerun", "re-run")  # "flak" covers flaky and flakiness
 
 
 def flaky_tests(index: ExperimentIndex, resources: Mapping[str, Any]) -> list[Finding]:

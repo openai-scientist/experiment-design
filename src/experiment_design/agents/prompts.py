@@ -46,7 +46,8 @@ question. Treat ambiguity that would force a downstream agent to guess as a mate
 a clearly labelled, reasonable proposal is not such a gap. A rule that decides how results
 are analysed or read (a threshold, a gate between confirmatory and descriptive analysis, a
 test or interval method, an analysis seed) is not an implementation detail: the plan fixes it
-with a concrete value and no proposal label, so it is frozen before any outcome is seen. A
+with a concrete value and no proposal label, so it is frozen before any outcome is seen; mark a
+value no source states "(set by design)". A
 change to a decision rule the source states stays a labelled proposal, as above.
 """
 
@@ -93,7 +94,8 @@ question. Treat ambiguity that would force a downstream agent to guess as a mate
 a clearly labelled, reasonable proposal is not such a gap. A rule that decides how results
 are analysed or read (a threshold, a gate between confirmatory and descriptive analysis, a
 test or interval method, an analysis seed) is not an implementation detail: the plan fixes it
-with a concrete value and no proposal label, so it is frozen before any outcome is seen. A
+with a concrete value and no proposal label, so it is frozen before any outcome is seen; mark a
+value no source states "(set by design)". A
 change to a decision rule the source states stays a labelled proposal, as above.
 """
 _DUE = (
@@ -110,7 +112,8 @@ _KIND = (
     "Use 'needs_evidence' too when the defect is a conflict between the supplied inputs "
     "that only the researcher or an earlier stage can settle, such as fewer supplied "
     "hypotheses than the research_brief requires: the plan cannot add a hypothesis, so "
-    "revising or reframing it cannot resolve the finding. "
+    "revising or reframing it cannot resolve the finding. The supplied hypotheses are the "
+    "researcher's selection: never ask the researcher to add one. "
     "Otherwise leave kind as 'fix': the plan text can resolve it. "
 )
 _ROLES = {
@@ -133,9 +136,11 @@ _ROLES = {
     "selector": (
         "Rank and select evaluation resources for the research brief from the supplied "
         "candidates only. Use the exact resource_id of each candidate; never add a candidate. "
-        "When a registry candidate and an evidence_card candidate name the same resource (one "
-        "may add a version, such as 'Defects4J' and 'Defects4J v2.0'), select the registry one, "
-        "whose source can be verified, and give the version in its rationale. "
+        "When a registry candidate and an evidence_card candidate differ only by a version "
+        "(such as 'Defects4J' and 'Defects4J v2.0'), select the registry one, whose source can "
+        "be verified, unless the version changes the data (SQuAD 2.0 adds unanswerable "
+        "questions to SQuAD; CIFAR-10.1 is a new test set): then select the versioned one. "
+        "Give the version in the rationale either way. "
         "For each selected resource give rank (1 is best), a one-sentence rationale, the "
         "hypothesis IDs it serves and its benchmark contamination risk (low, medium, high or "
         "unknown when you cannot tell). When researcher comments ask for a resource that is "
@@ -147,7 +152,10 @@ _ROLES = {
         "Extract an experiment index from the supplied plan and hypotheses. Do not evaluate, "
         "rewrite or invent plan content. Preserve experiment and hypothesis IDs, list only "
         "documented datasets, baselines, metrics and controls, and copy each plan heading "
-        "exactly as plan_section. Use the supplied plan_sha256. Submit using the schema tool."
+        "exactly as plan_section. Start each control with the threat it addresses and a colon "
+        "('Flaky tests: ...', 'Contamination: ...', 'Seeds: ...'), naming the threat even when "
+        "the plan uses other words (repeated executions that must agree address flaky tests). "
+        "Use the supplied plan_sha256. Submit using the schema tool."
     ),
     "framing": (
         "Ground the research question. When the source states several hypotheses, list "
