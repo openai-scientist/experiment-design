@@ -186,9 +186,19 @@ def test_llm_retry_attempts_can_be_capped(monkeypatch):
 
 @pytest.mark.parametrize(
     "status,known",
-    [(400, True), (401, True), (404, True), (408, False), (500, True), (503, True), (524, True)],
+    [
+        (400, True),
+        (401, True),
+        (404, True),
+        (408, False),
+        (500, False),
+        (502, False),
+        (503, False),
+        (504, False),
+        (524, False),
+    ],
 )
-def test_http_error_response_usage_is_zero_except_408(monkeypatch, status, known):
+def test_only_4xx_error_responses_have_known_zero_usage(monkeypatch, status, known):
     monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", lambda _: None)
     llm = client(lambda _: httpx.Response(status), retries=0)
     try:
@@ -242,7 +252,7 @@ def test_dropped_connection_is_retried_with_unknown_usage(monkeypatch):
 
 
 @pytest.mark.parametrize("status", [500, 502, 503, 524])
-def test_http_error_status_costs_zero_tokens_and_backs_off_to_about_a_minute(monkeypatch, status):
+def test_http_5xx_status_keeps_usage_unknown_and_backs_off_to_about_a_minute(monkeypatch, status):
     sleeps, calls = [], []
     monkeypatch.setattr("experiment_design.runtime.llm.time.sleep", sleeps.append)
 
@@ -259,7 +269,7 @@ def test_http_error_status_costs_zero_tokens_and_backs_off_to_about_a_minute(mon
         assert llm.complete([], []).tokens_out == 7
         errors = llm.last_attempts[:-1]
         assert len(errors) == 4
-        assert all(a["tokens_in"] == a["tokens_out"] == 0 for a in errors)
+        assert all(a["tokens_in"] is a["tokens_out"] is None for a in errors)
         assert sleeps == [2.0, 5.0, 15.0, 30.0]
     finally:
         llm.close()

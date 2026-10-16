@@ -100,9 +100,10 @@ class LLMClient:
             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
                 # Timeouts and dropped connections are transient; usage stays unknown.
                 code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                # An HTTP error response (4xx/5xx, 524 included) carries no completion: usage is
-                # known zero. Only a timeout or a dropped connection may hide processed work.
-                usage = 0 if code is not None and code != 408 else None
+                # A 4xx response was refused before generation: usage is known zero. A timeout,
+                # a dropped connection or a 5xx (a gateway such as 502/504/524 may report an
+                # error after the provider billed the completion) may hide processed work.
+                usage = 0 if code is not None and 400 <= code < 500 and code != 408 else None
                 timed_out = isinstance(exc, httpx.TimeoutException) or code == 408
                 self._report(started, "timeout" if timed_out else "error", usage, usage)
                 self.last_attempts.append(
