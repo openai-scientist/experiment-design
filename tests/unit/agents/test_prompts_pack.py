@@ -25,3 +25,13 @@ def test_finding_category_is_validated_and_old_output_still_parses():
     assert Finding(**values, category="framing").category == "framing"
     with pytest.raises(ValidationError):
         Finding(**values, category="invented")
+
+
+@pytest.mark.parametrize("role", ["methodologist", "skeptic", "final_check"])
+def test_reviewers_mark_an_input_conflict_as_unfixable_by_revision(role):
+    # Live 2026-10-16: an H1-only selection against a two-hypothesis brief was raised as
+    # 'fix', so the engine reframed twice and stopped without a reviewed plan.
+    text = prompt(role, None)
+    assert "conflict between the supplied inputs" in text
+    assert "fewer supplied hypotheses than the research_brief requires" in text
+    assert "conflict between the supplied inputs" not in prompt("design", None)

@@ -99,6 +99,10 @@ _KIND = (
     "verification, data access or evidence, so that editing the plan cannot resolve it "
     "(a license or provenance to confirm, a dataset to inspect, a missing citation, a "
     "baseline or dataset that no supplied document identifies). "
+    "Use 'needs_evidence' too when the defect is a conflict between the supplied inputs "
+    "that only the researcher or an earlier stage can settle, such as fewer supplied "
+    "hypotheses than the research_brief requires: the plan cannot add a hypothesis, so "
+    "revising or reframing it cannot resolve the finding. "
     "Otherwise leave kind as 'fix': the plan text can resolve it. "
 )
 _ROLES = {
