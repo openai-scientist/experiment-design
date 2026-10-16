@@ -1013,3 +1013,25 @@ def test_previous_final_is_the_latest_archived_final_check(tmp_path):
         )
     (tmp_path / "attempts" / "3" / "stage-04").mkdir(parents=True)
     assert _previous_final(store) == ([], "newer")
+
+
+def test_previous_final_leaves_out_the_findings_code_checks_itself(tmp_path):
+    from types import SimpleNamespace
+
+    from experiment_design.workflow.engine import _previous_final
+
+    archive = tmp_path / "attempts" / "1"
+    (archive / "stage-05").mkdir(parents=True)
+    (archive / "stage-04").mkdir()
+    code = MAJOR | {"id": "seed-E1", "issue": "Fewer than three seeds"}
+    out_of_budget = MAJOR | {"id": "review-incomplete", "issue": "Ran out"}
+    findings = [MAJOR, code, out_of_budget]
+    (archive / "stage-05" / "final_review.json").write_text(
+        json.dumps({"findings": findings}), encoding="utf-8"
+    )
+    (archive / "stage-05" / "deterministic_findings.json").write_text(
+        json.dumps([code]), encoding="utf-8"
+    )
+    (archive / "stage-04" / "revised_plan.md").write_text("plan", encoding="utf-8")
+    kept, _ = _previous_final(SimpleNamespace(path=tmp_path))
+    assert [f.id for f in kept] == [MAJOR["id"]]

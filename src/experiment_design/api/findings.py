@@ -45,6 +45,7 @@ def to_contract_finding(
 
 
 CRITIC_REVIEWS = ("methodologist_review.json", "skeptic_review.json")
+REJOINDERS = ("methodologist_rejoinder.json", "skeptic_rejoinder.json")
 
 
 def mapped_findings(
@@ -102,14 +103,27 @@ def review_findings(
     for name in CRITIC_REVIEWS:
         with suppress(FileNotFoundError):
             original += mapped_findings(store, 4, name, round=round, artifact_id=artifact_id)
+    # A rejoinder's maintained MAJOR fix, or an unfinished rejoinder, stops the run as well
+    # (engine `_final_options`), so it stays open.
+    held = []
+    for name in REJOINDERS:
+        with suppress(FileNotFoundError):
+            held += [
+                f
+                for f in mapped_findings(
+                    store, 4, name, round=round, artifact_id=artifact_id, open_after_final=True
+                )
+                if f.severity == "blocking"
+                and (f.kind == "fix" or f.issue.startswith("review incomplete:"))
+            ]
     return ReviewFindings(
         round=round,
         reviewed_artifact_id=artifact_id,
         reviewer_model=reviewer_model,
-        findings=[*original, *final],
+        findings=[*original, *held, *final],
         # The contract's `passed` means no blocking finding of any kind; an open needs_evidence
         # MAJOR blocks it too (the Platform rejected such a report as unreadable).
-        passed=not any(f.severity == "blocking" for f in final),
+        passed=not any(f.severity == "blocking" for f in [*held, *final]),
     )
 
 

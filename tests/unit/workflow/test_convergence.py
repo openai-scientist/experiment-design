@@ -126,3 +126,12 @@ def test_design_flaws_are_not_deferred_to_execution():
     # A finding that was MINOR already is not listed as a demotion.
     assert out.findings[3].issue == "Issue F4"
     assert severity_adjustments(out) == ""
+
+
+def test_a_comment_in_a_code_block_is_not_a_heading():
+    from experiment_design.workflow.convergence import _sections
+
+    lines = ["# Plan", "## Method", "```python", "# set seed", "```", "after", "## Analysis", "x"]
+    sections = _sections("\n".join(lines))
+    assert sorted(sections) == ["plan", "plan > analysis", "plan > method"]
+    assert "after" in sections["plan > method"][0]

@@ -63,6 +63,27 @@ def test_current_final_findings_and_stable_engine_ids(tmp_path):
         review_findings(store, round=1, artifact_id="draft", reviewer_model="review-m")
 
 
+@pytest.mark.parametrize(
+    ("kind", "issue", "blocks"),
+    [
+        ("fix", "Still wrong", True),
+        ("needs_evidence", "review incomplete: skeptic exceeded its turn budget", True),
+        ("needs_evidence", "Needs a lookup", False),
+    ],
+)
+def test_a_rejoinder_that_stops_the_run_is_open_in_the_report(tmp_path, kind, issue, blocks):
+    store = store_for(tmp_path)
+    advance(store, Provider(happy_outputs()), Judge(), RunConfig())
+    held = MAJOR | {"id": "r1", "kind": kind, "issue": issue}
+    # The happy final check has no MAJOR; only the rejoinder holds one.
+    (store.path / "stage-04" / "skeptic_rejoinder.json").write_text(
+        json.dumps({"findings": [held]}), encoding="utf-8"
+    )
+    report = review_findings(store, round=1, artifact_id="draft", reviewer_model="review-m")
+    assert report.passed is not blocks
+    assert any(f.issue.startswith(issue) for f in report.findings) is blocks
+
+
 def test_reviewer_schema_failure_opens_a_gate_with_error(tmp_path):
     from experiment_design.api.contract_models import ModelRole, Phase
     from experiment_design.runtime.llm import LLMResponse, ToolCall

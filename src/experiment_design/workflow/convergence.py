@@ -14,9 +14,14 @@ def _norm(text: str) -> str:
 def _sections(plan: str) -> dict[str, list[str]]:
     """Heading path (``a > b``) -> texts of its sections, subsections included."""
     lines = plan.splitlines()
-    heads = [
-        (i, len(m[1]), _norm(m[2])) for i, line in enumerate(lines) if (m := _HEADING.match(line))
-    ]
+    heads = []
+    fenced = False
+    for i, line in enumerate(lines):
+        # A `# comment` inside a fenced code block is not a heading.
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and (m := _HEADING.match(line)):
+            heads.append((i, len(m[1]), _norm(m[2])))
     result: dict[str, list[str]] = {}
     stack: list[tuple[int, str]] = []
     for n, (start, level, title) in enumerate(heads):

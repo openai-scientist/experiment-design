@@ -683,8 +683,6 @@ class RunManager:
                 },
             )
             return
-        if store.state.status == "INCOMPLETE":
-            report = report.model_copy(update={"passed": False})
         body = report.model_dump_json(by_alias=True).encode()
         report_id = self._upload_artifact(run, "review.findings/v1", "review_findings.json", body)
         self._emit(

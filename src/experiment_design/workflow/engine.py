@@ -582,7 +582,10 @@ def _final_options(
 
 
 def _previous_final(store: RunStore) -> tuple[list[Finding], str] | None:
-    """The findings and plan of the most recent archived final check, if any."""
+    """The model's findings and plan of the most recent archived final check, if any.
+
+    Code re-checks its own findings every round, so they and `review-incomplete` are left out.
+    """
     root = store.path / "attempts"
     numbers = sorted((int(d.name) for d in root.glob("*") if d.name.isdigit()), reverse=True)
     for number in numbers:
@@ -592,7 +595,15 @@ def _previous_final(store: RunStore) -> tuple[list[Finding], str] | None:
                 (archive / "stage-05" / "final_review.json").read_text(encoding="utf-8")
             )
             plan = (archive / "stage-04" / "revised_plan.md").read_text(encoding="utf-8")
-            return [Finding.model_validate(f) for f in raw["findings"]], plan
+            code = archive / "stage-05" / "deterministic_findings.json"
+            own = (
+                {f["id"] for f in json.loads(code.read_text(encoding="utf-8"))}
+                if code.exists()
+                else set()
+            )
+            own.add("review-incomplete")
+            findings = [Finding.model_validate(f) for f in raw["findings"]]
+            return [f for f in findings if f.id not in own], plan
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             continue
     return None
@@ -1230,7 +1241,8 @@ def _advance(
                     needed,
                     review_llm=review_llm,
                 )
-                if earlier:
+                # A check that ran out of budget resolved nothing; do not reopen old findings.
+                if earlier and not any(f.id == "review-incomplete" for f in final.findings):
                     converge_final(final, prior, earlier[1], inputs["plan"])
                 if adjustments := severity_adjustments(final):
                     store.write(5, "final_review.md", final.markdown.rstrip() + adjustments)
