@@ -1000,7 +1000,7 @@ def test_previous_final_is_the_latest_archived_final_check(tmp_path):
 
     from experiment_design.workflow.engine import _previous_final
 
-    store = SimpleNamespace(path=tmp_path)
+    store = SimpleNamespace(path=tmp_path, events=list)
     assert _previous_final(store) is None
     for number, plan in ((1, "old"), (2, "newer")):
         (tmp_path / "attempts" / str(number) / "stage-05").mkdir(parents=True)
@@ -1013,6 +1013,27 @@ def test_previous_final_is_the_latest_archived_final_check(tmp_path):
         )
     (tmp_path / "attempts" / "3" / "stage-04").mkdir(parents=True)
     assert _previous_final(store) == ([], "newer")
+
+
+def test_previous_final_does_not_carry_across_a_reframe(tmp_path):
+    from types import SimpleNamespace
+
+    from experiment_design.workflow.engine import _previous_final
+
+    for number in (1, 2):
+        archive = tmp_path / "attempts" / str(number)
+        (archive / "stage-05").mkdir(parents=True)
+        (archive / "stage-04").mkdir()
+        (archive / "stage-05" / "final_review.json").write_text(
+            json.dumps({"findings": [MAJOR]}), encoding="utf-8"
+        )
+        (archive / "stage-04" / "revised_plan.md").write_text(f"plan {number}", encoding="utf-8")
+    reframe = {"kind": "reframe.objections", "data": {"attempt": 1, "objections": {}}}
+    store = SimpleNamespace(path=tmp_path, events=lambda: [reframe])
+    # Attempt 1 was reframed away; attempt 2 was checked after the new framing.
+    assert _previous_final(store)[1] == "plan 2"
+    reframe["data"]["attempt"] = 2
+    assert _previous_final(store) is None
 
 
 def test_previous_final_leaves_out_the_findings_code_checks_itself(tmp_path):
@@ -1033,5 +1054,5 @@ def test_previous_final_leaves_out_the_findings_code_checks_itself(tmp_path):
         json.dumps([code]), encoding="utf-8"
     )
     (archive / "stage-04" / "revised_plan.md").write_text("plan", encoding="utf-8")
-    kept, _ = _previous_final(SimpleNamespace(path=tmp_path))
+    kept, _ = _previous_final(SimpleNamespace(path=tmp_path, events=list))
     assert [f.id for f in kept] == [MAJOR["id"]]

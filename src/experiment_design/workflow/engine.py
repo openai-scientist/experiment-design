@@ -585,9 +585,17 @@ def _previous_final(store: RunStore) -> tuple[list[Finding], str] | None:
     """The model's findings and plan of the most recent archived final check, if any.
 
     Code re-checks its own findings every round, so they and `review-incomplete` are left out.
+    A reframe discards the framing, so a final check archived at or before one does not carry.
     """
     root = store.path / "attempts"
-    numbers = sorted((int(d.name) for d in root.glob("*") if d.name.isdigit()), reverse=True)
+    reframed = max(
+        (e["data"]["attempt"] for e in store.events() if e["kind"] == "reframe.objections"),
+        default=0,
+    )
+    numbers = sorted(
+        (n for d in root.glob("*") if d.name.isdigit() and (n := int(d.name)) > reframed),
+        reverse=True,
+    )
     for number in numbers:
         archive = root / str(number)
         try:
