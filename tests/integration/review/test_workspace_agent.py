@@ -378,3 +378,36 @@ def test_unknown_refs_get_one_correction_then_are_dropped_without_failing(tmp_pa
     assert "Refs accepted so far: none" in first["error"]
     assert second == {"accepted": True}
     assert output.findings[0].evidence_refs == []
+
+
+def _system_answers(store, count):
+    for _ in range(count):
+        store.event("researcher.response", {"action": "ANSWER", "researcher": "system"})
+
+
+ASKING = {
+    "markdown": "Draft",
+    "needs_input": True,
+    "question": "Which condition?",
+    "options": ["A", "B"],
+}
+
+
+def test_after_three_default_answers_a_question_is_suppressed(tmp_path):
+    # Live light-se 2026-10-16: one question got 20 default answers before the run stopped.
+    store = store_for(tmp_path)
+    _system_answers(store, 3)
+    output, provider = specialist(store, [[("submit", ASKING)]])
+    assert output.needs_input is False
+    assert "No researcher can answer" in provider.inputs[0][1]["content"]
+    suppressed = [e["data"] for e in store.events() if e["kind"] == "question.suppressed"]
+    assert suppressed == [{"role": "design", "question": "Which condition?"}]
+
+
+def test_a_researcher_answer_keeps_asking_open(tmp_path):
+    store = store_for(tmp_path)
+    _system_answers(store, 2)
+    store.event("researcher.response", {"action": "ANSWER", "researcher": "alice"})
+    output, provider = specialist(store, [[("submit", ASKING)]])
+    assert output.needs_input is True
+    assert "No researcher can answer" not in provider.inputs[0][1]["content"]

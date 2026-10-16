@@ -91,8 +91,9 @@ STAGE_KEY = "experiment_plan"
 _DEFAULT_ANSWER = (
     "No researcher can answer in this mode. Do not add a requirement because of this question. "
     "Keep the plan's current choice; where none exists, take the option that adds the fewest new "
-    'requirements and label it "Proposal — confirm before launch". List this question under '
-    "Limitations as open for the researcher."
+    "requirements: a rule that decides how results are analysed or read gets that value in the "
+    'plan, marked "(set by design)"; any other detail is labelled "Proposal — confirm before '
+    'launch". List this question under Limitations as open for the researcher.'
 )
 _CANCEL_WAIT_SECONDS = 5.0
 

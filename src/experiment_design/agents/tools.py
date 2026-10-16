@@ -259,6 +259,27 @@ def _problems(
     return output, problems
 
 
+#: Default answers a run without a researcher gets before its agents may no longer ask: a default
+#: answer settles nothing, and a designer asked one question 20 times (live light-se, 2026-10-16).
+MAX_SYSTEM_ANSWERS = 3
+_ASKING_CLOSED = (
+    "No researcher can answer in this run, and earlier questions got only default answers: do "
+    "not set needs_input. Decide yourself with the option that adds the fewest new "
+    "requirements and list the open question under Limitations."
+)
+
+
+def asking_closed(store: RunStore) -> bool:
+    answers = [
+        e
+        for e in store.events()
+        if e["kind"] == "researcher.response"
+        and e["data"].get("researcher") == "system"
+        and e["data"].get("action") == "ANSWER"
+    ]
+    return len(answers) >= MAX_SYSTEM_ANSWERS
+
+
 def run_specialist(
     role: str,
     store: RunStore,
@@ -294,6 +315,9 @@ def run_specialist(
             for name in required
         }
         covered = {name: set(range(1, len(workspace[name].splitlines()) + 1)) for name in required}
+    closed = asking_closed(store)
+    if closed:
+        task["asking"] = _ASKING_CLOSED
     messages = [
         {"role": "system", "content": prompt(role, pack)},
         {"role": "user", "content": json.dumps(task, ensure_ascii=False)},
@@ -691,6 +715,11 @@ def run_specialist(
             raise WorkflowError("Invalid question or revision response after two retries")
         if submission is not None:
             store.event("agent.accepted", {"task": task})
+            if closed and submission.needs_input:
+                store.event("question.suppressed", {"role": role, "question": submission.question})
+                submission = submission.model_copy(
+                    update={"needs_input": False, "question": "", "options": []}
+                )
             return submission
     if reviewer:
         return _incomplete(store, task, role, "turns")
